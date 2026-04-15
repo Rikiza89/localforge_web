@@ -57,7 +57,7 @@ def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
 
 
 if __name__ == "__main__":
-    from interface.server import create_app
+    from localforge.interface.server import create_app
 
     # Flaskアプリケーションを生成
     app = create_app()
