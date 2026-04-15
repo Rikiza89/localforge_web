@@ -35,8 +35,9 @@ _HYBRID_THRESHOLD = 200
 _HYBRID_HEAD = 80
 # ハイブリッド戦略: 末尾の行数
 _HYBRID_TAIL = 40
-# 並列サマリー生成のワーカー数
-_MAX_WORKERS = 3
+# サマリー生成のワーカー数
+# ローカルOllamaはリクエストを直列処理するため、複数ワーカーは逆効果（タイムアウトの原因）
+_MAX_WORKERS = 1
 # .localforgeディレクトリ名
 _LOCALFORGE_DIR = ".localforge"
 
