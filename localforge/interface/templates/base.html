@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LocalForge</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- ヘッダーバー -->
+    <header class="header-bar">
+      <div class="header-logo">
+        <span class="logo-diamond">◆</span>
+        <span class="logo-text">LocalForge</span>
+      </div>
+      <div class="header-controls">
+        <select id="model-selector" class="model-select" title="使用するOllamaモデル">
+          <option value="">モデル読み込み中...</option>
+        </select>
+        <span class="project-path" id="project-path">プロジェクト未選択</span>
+        <button class="btn btn-secondary" id="open-project-btn" title="フォルダを開く">
+          📁 フォルダを開く
+        </button>
+      </div>
+    </header>
+
+    <!-- モードタブバー -->
+    <nav class="tab-bar">
+      <button class="tab-btn active" data-tab="generate" id="tab-generate">Generate</button>
+      <button class="tab-btn" data-tab="resume" id="tab-resume">Resume</button>
+      <button class="tab-btn" data-tab="explain" id="tab-explain">Explain</button>
+    </nav>
+
+    <!-- ファイルツリー（左サイドバー） -->
+    <aside class="file-tree-panel">
+      <div class="panel-header">
+        <span>ファイルツリー</span>
+        <button class="icon-btn" id="refresh-tree-btn" title="ツリーを更新">↻</button>
+      </div>
+      <div class="file-tree-container" id="file-tree">
+        <div class="empty-state">フォルダを開いてください</div>
+      </div>
+    </aside>
+
+    <!-- メインワークスペース -->
+    <main class="main-workspace">
+      <!-- ブロックアラート -->
+      <div id="alert-container"></div>
+
+      <!-- Generateタブ -->
+      <div class="tab-content active" id="tab-content-generate">
+        {% include "partials/plan_viewer.html" %}
+      </div>
+
+      <!-- Resumeタブ -->
+      <div class="tab-content" id="tab-content-resume">
+        {% include "partials/resume_panel.html" %}
+      </div>
+
+      <!-- Explainタブ -->
+      <div class="tab-content" id="tab-content-explain">
+        {% include "partials/report_viewer.html" %}
+      </div>
+    </main>
+
+    <!-- コンテキストパネル（右サイドバー） -->
+    <aside class="context-panel">
+      <div class="panel-header">コンテキスト</div>
+      <div class="context-section">
+        <div class="section-label">context.md</div>
+        <pre class="context-content" id="context-md-content">—</pre>
+      </div>
+      <div class="context-section">
+        <div class="section-label">ProjectIndex</div>
+        <div class="index-summary" id="index-summary">
+          <div class="empty-state">未インデックス</div>
+        </div>
+      </div>
+      <div class="context-section">
+        <div class="section-label">Git ログ</div>
+        <div class="git-log" id="git-log-list">
+          <div class="empty-state">—</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ステータスバー -->
+    <footer class="status-bar">
+      <span class="status-message" id="status-message">待機中</span>
+      <span class="status-tokens" id="status-tokens"></span>
+      <span class="status-git" id="status-git"></span>
+      <span class="status-port">:7331</span>
+    </footer>
+  </div>
+
+  <!-- ファイル内容モーダル -->
+  <div class="modal-overlay" id="file-modal" style="display:none;">
+    <div class="modal">
+      <div class="modal-header">
+        <span id="modal-title">ファイル内容</span>
+        <button class="modal-close" id="modal-close">✕</button>
+      </div>
+      <pre class="modal-content" id="modal-content"></pre>
+    </div>
+  </div>
+
+  <!-- 右クリックコンテキストメニュー -->
+  <div class="context-menu" id="context-menu" style="display:none;">
+    <ul>
+      <li data-action="view">ファイル内容を表示</li>
+      <li data-action="regenerate">このファイルを再生成</li>
+      <li data-action="explain-file">このファイルを説明</li>
+    </ul>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/stream.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/filetree.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!-- プラン生成・承認UIコンポーネント -->
+<div class="plan-viewer">
+  <div class="workspace-header">
+    <h2>Generate — 新しいプロジェクトを生成</h2>
+  </div>
+
+  <!-- プロンプト入力エリア -->
+  <div class="prompt-section">
+    <label for="generate-prompt" class="field-label">プロジェクトの説明</label>
+    <textarea
+      id="generate-prompt"
+      class="prompt-input"
+      placeholder="例: FlaskとSQLiteを使ったTodoアプリを作ってください。ユーザー認証、タスク管理、REST APIを含めてください。"
+      rows="5"
+    ></textarea>
+    <div class="prompt-actions">
+      <button class="btn btn-primary" id="generate-plan-btn">
+        ✦ プランを生成
+      </button>
+    </div>
+  </div>
+
+  <!-- プラン表示・編集エリア -->
+  <div class="plan-section" id="plan-section" style="display:none;">
+    <div class="plan-header">
+      <h3>生成されたプラン</h3>
+      <div class="plan-actions">
+        <button class="btn btn-primary" id="approve-plan-btn">✓ 承認して生成開始</button>
+        <button class="btn btn-secondary" id="edit-plan-btn">✎ 編集</button>
+        <button class="btn btn-secondary" id="reprompt-btn">↺ 再プロンプト</button>
+      </div>
+    </div>
+
+    <!-- プランのビジュアルツリー -->
+    <div class="plan-tree" id="plan-tree"></div>
+
+    <!-- 編集可能な生JSONテキストエリア -->
+    <div class="plan-json-editor" id="plan-json-editor" style="display:none;">
+      <label class="field-label">プランJSON（直接編集可能）</label>
+      <textarea id="plan-json-textarea" class="json-textarea" rows="20" spellcheck="false"></textarea>
+      <div class="json-editor-actions">
+        <button class="btn btn-primary" id="apply-json-btn">適用</button>
+        <button class="btn btn-secondary" id="cancel-edit-btn">キャンセル</button>
+      </div>
+    </div>
+
+    <!-- プランストリーム出力（生成中） -->
+    <pre class="stream-output" id="plan-stream-output" style="display:none;"></pre>
+  </div>
+
+  <!-- ファイル生成エリア -->
+  <div class="generation-section" id="generation-section" style="display:none;">
+    <div class="generation-header">
+      <h3>ファイル生成中...</h3>
+      <button class="btn btn-danger" id="cancel-generation-btn">✕ キャンセル</button>
+    </div>
+    <div class="progress-container">
+      <progress id="generation-progress" max="100" value="0"></progress>
+      <span class="progress-label" id="progress-label">準備中...</span>
+    </div>
+    <div class="stream-output-container">
+      <pre class="stream-output" id="generation-stream-output"></pre>
+    </div>
+  </div>
+</div>
