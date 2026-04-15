@@ -225,6 +225,35 @@ class ContextService:
     # Explainモード用コンテキスト
     # ------------------------------------------------------------------
 
+    def build_batch_file_summary_prompt(
+        self,
+        file_chunks: List["FileChunk"],
+        content_limit: int = 400,
+    ) -> str:
+        """
+        複数ファイルを一括でサマリー生成するプロンプトを組み立てる。
+        1回のLLM呼び出しで複数ファイルのサマリーを取得することで処理を高速化する。
+
+        Args:
+            file_chunks: FileChunkのリスト
+            content_limit: バッチプロンプト内で使う1ファイルあたりの最大文字数
+
+        Returns:
+            組み立てたプロンプト文字列
+        """
+        sections = []
+        for chunk in file_chunks:
+            excerpt = chunk.content[:content_limit]
+            sections.append(f"=== {chunk.path} ===\n{excerpt}")
+
+        prompt = (
+            "以下の各ファイルについて、それぞれ1〜2文で役割を説明してください。\n"
+            "必ず以下の形式で各ファイルの説明を出力してください:\n\n"
+            "FILE: <ファイルパス>\nSUMMARY: <説明>\n\n"
+            + "\n\n".join(sections)
+        )
+        return self._guard_budget(prompt, "batch_file_summary")
+
     def build_file_summary_prompt(
         self,
         file_path: str,

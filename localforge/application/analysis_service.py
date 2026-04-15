@@ -1,16 +1,17 @@
 """
 分析サービス — インデックス構築・ハイブリッドファイル読み込みの責務を担う。
-parallel file summarization に ThreadPoolExecutor(max_workers=3) を使用する。
+ヒューリスティックサマリー（LLM不要な自明なファイル）と
+LLMバッチ処理（複数ファイルを1回のLLM呼び出しで処理）を組み合わせて
+インデックス構築を高速化する。
 """
 
 from __future__ import annotations
 
 import ast
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Generator, List, Optional, Tuple
+from typing import Callable, Dict, Generator, List, Optional, Tuple
 
 from localforge.application.context_service import ContextService
 from localforge.domain.exceptions import IndexBuildError
@@ -35,9 +36,22 @@ _HYBRID_THRESHOLD = 200
 _HYBRID_HEAD = 80
 # ハイブリッド戦略: 末尾の行数
 _HYBRID_TAIL = 40
-# サマリー生成のワーカー数
-# ローカルOllamaはリクエストを直列処理するため、複数ワーカーは逆効果（タイムアウトの原因）
-_MAX_WORKERS = 1
+# 設定・データファイルの拡張子（LLMサマリー不要）
+_HEURISTIC_EXTENSIONS = frozenset({
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".md", ".txt", ".rst", ".lock", ".env",
+    ".gitignore", ".dockerignore", ".gitattributes", ".editorconfig",
+})
+# ロックファイル名（依存関係のロックファイル）
+_LOCK_FILE_NAMES = frozenset({
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "poetry.lock", "Pipfile.lock", "Cargo.lock",
+    "composer.lock", "Gemfile.lock", "go.sum",
+})
+# この実質行数以下のファイルはLLMを使わない
+_HEURISTIC_LINE_THRESHOLD = 8
+# 1回のLLM呼び出しで処理するファイル数
+_BATCH_SIZE = 5
 # .localforgeディレクトリ名
 _LOCALFORGE_DIR = ".localforge"
 
@@ -113,6 +127,57 @@ def _extract_js_ts_landmarks(source: str) -> List[str]:
         if any(stripped.startswith(kw) for kw in keywords):
             landmarks.append(f"# L{i}: {line}")
     return landmarks
+
+
+def _try_heuristic_summary(chunk: FileChunk) -> Optional[str]:
+    """
+    ファイルが自明な場合にLLMを使わずサマリーを返す。
+    - 空ファイル / ロックファイル / 設定ファイル拡張子 / 極小ファイル
+    - インポートのみの __init__.py
+    これらに当てはまらない場合はNoneを返し、呼び出し元がLLMにフォールバックする。
+    """
+    path = Path(chunk.path)
+    non_empty = [l for l in chunk.content.splitlines() if l.strip()]
+
+    if not non_empty:
+        return "空のファイル"
+
+    if path.name in _LOCK_FILE_NAMES:
+        return "依存関係のロックファイル"
+
+    if path.suffix.lower() in _HEURISTIC_EXTENSIONS:
+        lang = _detect_language(path)
+        return f"{lang} 設定・データファイル（{len(non_empty)} 行）"
+
+    if len(non_empty) <= _HEURISTIC_LINE_THRESHOLD:
+        lang = _detect_language(path)
+        return f"小さな {lang} ファイル（{len(non_empty)} 行）"
+
+    if path.name == "__init__.py":
+        non_comment = [l for l in non_empty if not l.strip().startswith("#")]
+        if non_comment and all(
+            l.strip().startswith(("import ", "from ")) for l in non_comment
+        ):
+            return "Pythonパッケージ初期化（インポート定義のみ）"
+
+    return None
+
+
+def _parse_batch_summaries(response: str) -> Dict[str, str]:
+    """
+    バッチLLM応答から FILE: / SUMMARY: ペアを解析してパス→サマリーの辞書を返す。
+    認識できない行は無視するため、LLMが余計なテキストを出力しても壊れない。
+    """
+    result: Dict[str, str] = {}
+    current_path: Optional[str] = None
+    for raw_line in response.splitlines():
+        line = raw_line.strip()
+        if line.startswith("FILE:"):
+            current_path = line[len("FILE:"):].strip()
+        elif line.startswith("SUMMARY:") and current_path is not None:
+            result[current_path] = line[len("SUMMARY:"):].strip()
+            current_path = None
+    return result
 
 
 class AnalysisService:
@@ -266,32 +331,45 @@ class AnalysisService:
                 files_to_process.append((f, chunk))
 
         done_count = len(cached_chunks)
-
-        # 並列サマリー生成
         all_chunks: List[FileChunk] = list(cached_chunks)
 
         if files_to_process:
-            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
-                future_map = {}
-                for _, chunk in files_to_process:
-                    prompt = self._context.build_file_summary_prompt(
-                        file_path=chunk.path,
-                        content=chunk.content,
-                        extension=Path(chunk.path).suffix,
-                    )
-                    future = executor.submit(self._llm.generate_sync, model, prompt)
-                    future_map[future] = chunk
+            # フェーズ1: ヒューリスティックサマリー（LLM不要なファイルを即時処理）
+            needs_llm: List[Tuple[Path, FileChunk]] = []
+            for f, chunk in files_to_process:
+                heuristic = _try_heuristic_summary(chunk)
+                if heuristic is not None:
+                    chunk.summary = heuristic
+                    chunk.indexed_at = datetime.utcnow()
+                    all_chunks.append(chunk)
+                    done_count += 1
+                    yield {
+                        "progress": {
+                            "done": done_count,
+                            "total": total,
+                            "current_file": chunk.path,
+                        }
+                    }
+                else:
+                    needs_llm.append((f, chunk))
 
-                for future in as_completed(future_map):
-                    chunk = future_map[future]
-                    try:
-                        summary = future.result()
-                        chunk.summary = summary.strip()
-                        chunk.indexed_at = datetime.utcnow()
-                    except Exception as exc:
-                        logger.warning("サマリー生成エラー: %s — %s", chunk.path, exc)
-                        chunk.summary = f"サマリー生成に失敗しました: {exc}"
+            # フェーズ2: LLMバッチ処理（_BATCH_SIZE件ずつまとめて1回のLLM呼び出しで処理）
+            for batch_start in range(0, len(needs_llm), _BATCH_SIZE):
+                batch = needs_llm[batch_start: batch_start + _BATCH_SIZE]
+                batch_chunks = [chunk for _, chunk in batch]
 
+                try:
+                    prompt = self._context.build_batch_file_summary_prompt(batch_chunks)
+                    response = self._llm.generate_sync(model, prompt)
+                    summaries = _parse_batch_summaries(response)
+                except Exception as exc:
+                    logger.warning("バッチサマリー生成エラー: %s", exc)
+                    summaries = {}
+
+                for _, chunk in batch:
+                    summary = summaries.get(chunk.path, "").strip()
+                    chunk.summary = summary if summary else f"サマリー生成に失敗しました"
+                    chunk.indexed_at = datetime.utcnow()
                     all_chunks.append(chunk)
                     done_count += 1
                     yield {
