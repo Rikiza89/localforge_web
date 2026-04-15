@@ -66,6 +66,13 @@ async function openProject() {
     // モードに応じてタブを切り替え
     switchTab(data.mode);
 
+    // モデルセレクタをプロジェクトの保存済みモデルに合わせる
+    const modelSelectEl = document.getElementById("model-selector");
+    if (modelSelectEl && data.model) {
+      const opt = modelSelectEl.querySelector(`option[value="${data.model}"]`);
+      if (opt) modelSelectEl.value = data.model;
+    }
+
     // コンテキストパネルを更新
     await refreshContextPanel();
     await refreshGitLog();
@@ -378,10 +385,21 @@ async function approvePlanAndGenerate() {
 /**
  * インデックスを構築する。
  */
-function buildIndex() {
+async function buildIndex() {
   if (!_currentProjectRoot) {
     showAlert("先にフォルダを開いてください。", "warning");
     return;
+  }
+
+  // UIで選択中のモデルをプロジェクト設定に同期する
+  const modelSelectEl = document.getElementById("model-selector");
+  const selectedModel = modelSelectEl ? modelSelectEl.value : null;
+  if (selectedModel) {
+    try {
+      await apiRequest("/api/project/model", "POST", { model: selectedModel });
+    } catch (e) {
+      console.warn("モデル同期エラー:", e.message);
+    }
   }
 
   const progressContainer = document.getElementById("index-progress-container");
