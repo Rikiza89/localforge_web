@@ -20,6 +20,8 @@ _DEFAULT_BASE_URL = "http://localhost:11434"
 # HTTPリクエストのタイムアウト秒数（ストリーミング時は別途設定）
 _CONNECT_TIMEOUT = 5
 _READ_TIMEOUT = 120
+# generate_sync 用タイムアウト（大型ローカルモデル向けに長めに設定）
+_GENERATE_READ_TIMEOUT = 600
 
 
 class OllamaClient:
@@ -83,6 +85,7 @@ class OllamaClient:
         model: str,
         prompt: str,
         system: Optional[str] = None,
+        read_timeout: int = _READ_TIMEOUT,
     ) -> Generator[str, None, None]:
         """
         Ollama generate APIを使用してテキストをストリーミング生成する。
@@ -114,7 +117,7 @@ class OllamaClient:
                 f"{self._base_url}/api/generate",
                 json=payload,
                 stream=True,
-                timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
+                timeout=(_CONNECT_TIMEOUT, read_timeout),
             ) as resp:
                 if resp.status_code == 404:
                     raise OllamaModelNotFoundError(
@@ -155,6 +158,7 @@ class OllamaClient:
     ) -> str:
         """
         ストリーミングなしで完全なテキスト応答を生成する（テスト・内部用）。
+        大型ローカルモデル向けに長めのタイムアウトを使用する。
 
         Args:
             model: 使用するOllamaモデル名
@@ -168,4 +172,4 @@ class OllamaClient:
             OllamaConnectionError: サーバーへの接続に失敗した場合
             OllamaModelNotFoundError: 指定モデルが見つからない場合
         """
-        return "".join(self.stream_completion(model, prompt, system))
+        return "".join(self.stream_completion(model, prompt, system, read_timeout=_GENERATE_READ_TIMEOUT))
