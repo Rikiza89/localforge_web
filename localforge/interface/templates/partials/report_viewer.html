@@ -1,0 +1,45 @@
+<!-- 説明レポートとQ&Aチャットコンポーネント -->
+<div class="report-viewer">
+  <div class="workspace-header">
+    <h2>Explain — コードベース分析</h2>
+    <div class="explain-actions">
+      <button class="btn btn-primary" id="build-index-btn">⚙ インデックス構築</button>
+      <button class="btn btn-secondary" id="generate-report-btn" disabled>
+        ✦ レポート生成
+      </button>
+    </div>
+  </div>
+
+  <!-- インデックス進捗バー（sticky） -->
+  <div class="index-progress-container sticky-progress" id="index-progress-container" style="display:none;">
+    <div class="progress-row">
+      <span id="index-progress-label">インデックス構築中...</span>
+      <progress id="index-progress" max="100" value="0"></progress>
+    </div>
+  </div>
+
+  <!-- レポート出力エリア -->
+  <div class="report-output" id="report-output">
+    <div class="empty-state report-empty">
+      <p>「インデックス構築」を実行してからレポートを生成してください。</p>
+    </div>
+  </div>
+
+  <!-- Q&Aチャットエリア（レポート完了後に有効化） -->
+  <div class="chat-section" id="chat-section">
+    <div class="chat-divider">
+      <span>Q&amp;A チャット</span>
+    </div>
+    <div class="chat-history" id="chat-history"></div>
+    <div class="chat-input-row">
+      <input
+        type="text"
+        id="chat-input"
+        class="chat-input"
+        placeholder="このプロジェクトについて質問してください..."
+        disabled
+      >
+      <button class="btn btn-primary" id="chat-send" disabled>送信 ↵</button>
+    </div>
+  </div>
+</div>

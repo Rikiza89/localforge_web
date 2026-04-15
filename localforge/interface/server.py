@@ -1,0 +1,150 @@
+"""
+Flaskアプリケーション — ルート登録・依存性注入・ロギング設定を行うサーバーモジュール。
+"""
+
+from __future__ import annotations
+
+import logging
+import logging.handlers
+from pathlib import Path
+
+from flask import Flask
+
+from localforge.application.analysis_service import AnalysisService
+from localforge.application.context_service import ContextService
+from localforge.application.explanation_service import ExplanationService
+from localforge.application.generation_service import GenerationService
+from localforge.application.project_service import ProjectService
+from localforge.application.resume_service import ResumeService
+from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
+from localforge.infrastructure.git_adapter import GitAdapter
+from localforge.infrastructure.index_adapter import IndexAdapter
+from localforge.infrastructure.ollama_client import OllamaClient
+
+# ログレベル設定
+_LOG_FORMAT = (
+    '{"time": "%(asctime)s", "level": "%(levelname)s",'
+    ' "logger": "%(name)s", "message": "%(message)s"}'
+)
+
+
+def _configure_logging(log_dir: Path) -> None:
+    """
+    JSONフォーマットのローテーティングファイルログを設定する内部関数。
+
+    Args:
+        log_dir: ログファイルを配置するディレクトリ
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "app.log"
+
+    formatter = logging.Formatter(_LOG_FORMAT)
+
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path,
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+
+    # コンソール出力も追加（開発時に有用）
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+
+def create_app(log_dir: Path = Path(".localforge")) -> Flask:
+    """
+    Flaskアプリケーションを生成して設定する。
+    依存オブジェクトを構築し、ブループリントを登録する。
+
+    Args:
+        log_dir: ログファイルのディレクトリ（デフォルト: .localforge）
+
+    Returns:
+        設定済みのFlaskアプリケーション
+    """
+    _configure_logging(log_dir)
+    logger = logging.getLogger(__name__)
+
+    app = Flask(
+        __name__,
+        template_folder="templates",
+        static_folder="static",
+    )
+    app.config["JSON_SORT_KEYS"] = False
+    app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
+
+    # ---------------------------------------------------------------------------
+    # インフラストラクチャ層のインスタンスを構築
+    # ---------------------------------------------------------------------------
+    fs = FileSystemAdapter()
+    git = GitAdapter()
+    index_adapter = IndexAdapter()
+    llm = OllamaClient()
+
+    # ---------------------------------------------------------------------------
+    # アプリケーション層のサービスを構築
+    # ---------------------------------------------------------------------------
+    context_svc = ContextService()
+    project_svc = ProjectService(fs=fs, git=git, index=index_adapter)
+    analysis_svc = AnalysisService(
+        fs=fs, index_adapter=index_adapter, llm=llm, context=context_svc
+    )
+    explanation_svc = ExplanationService(
+        analysis=analysis_svc, llm=llm, context=context_svc
+    )
+    generation_svc = GenerationService(
+        fs=fs, git=git, index_adapter=index_adapter, llm=llm, context=context_svc
+    )
+    resume_svc = ResumeService(
+        fs=fs,
+        git=git,
+        generation=generation_svc,
+        explanation=explanation_svc,
+        context=context_svc,
+    )
+
+    # ---------------------------------------------------------------------------
+    # サービスをアプリケーション設定に格納
+    # ---------------------------------------------------------------------------
+    app.config["project_service"] = project_svc
+    app.config["generation_service"] = generation_svc
+    app.config["analysis_service"] = analysis_svc
+    app.config["explanation_service"] = explanation_svc
+    app.config["resume_service"] = resume_svc
+    app.config["context_service"] = context_svc
+    app.config["llm"] = llm
+    app.config["git"] = git
+    app.config["fs"] = fs
+
+    # ---------------------------------------------------------------------------
+    # ブループリントの登録
+    # ---------------------------------------------------------------------------
+    from localforge.interface.routes.project_routes import bp as project_bp
+    from localforge.interface.routes.generation_routes import bp as generation_bp
+    from localforge.interface.routes.explain_routes import bp as explain_bp
+    from localforge.interface.routes.git_routes import bp as git_bp
+
+    app.register_blueprint(project_bp)
+    app.register_blueprint(generation_bp)
+    app.register_blueprint(explain_bp)
+    app.register_blueprint(git_bp)
+
+    # ---------------------------------------------------------------------------
+    # メインルート（SPAシェル）
+    # ---------------------------------------------------------------------------
+    from flask import render_template
+
+    @app.route("/")
+    def index():
+        """メインSPAシェルを返す。"""
+        return render_template("index.html")
+
+    logger.info("LocalForge Flaskアプリケーション初期化完了")
+    return app
