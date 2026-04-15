@@ -108,6 +108,7 @@ def open_project():
         "project_root": str(root),
         "banner": banner_messages.get(mode, ""),
         "file_tree": [_node_to_dict(n) for n in project.file_tree],
+        "model": project.config.model,
     })
 
 
