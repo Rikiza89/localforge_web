@@ -459,6 +459,9 @@ class AnalysisService:
         done_count = len(cached_chunks)
         all_chunks: List[FileChunk] = list(cached_chunks)
 
+        # キャッシュ済みファイル数を即座に反映してプログレスバーを正しい位置に移動
+        yield {"progress": {"done": done_count, "total": total, "current_file": ""}}
+
         # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
         # Tier-0: パスのみで解決できたファイルを全て先に処理
         # （設定・アセット・テストファイル — ディスクI/O不要）
