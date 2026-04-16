@@ -422,13 +422,21 @@ async function buildIndex() {
           : "インデックス構築中...";
       }
     },
-    onDone: () => {
+    onDone: async () => {
       if (progressContainer) progressContainer.style.display = "none";
       if (reportBtn) reportBtn.disabled = false;
       _indexBuilt = true;
       updateStatusBar("インデックス構築完了");
-      showAlert("インデックスが完成しました。「レポート生成」を押してください。", "success");
       refreshContextPanel();
+
+      // 保存済みレポートがあればロードしてQ&Aをそのまま有効化する
+      const hasReport = await loadSavedReport();
+      if (hasReport) {
+        enableChat();
+        showAlert("インデックス完了 — 保存済みレポートを読み込みました。Q&Aで質問できます。", "success");
+      } else {
+        showAlert("インデックスが完成しました。「レポート生成」を押してください。", "success");
+      }
     },
     onError: (err) => {
       if (progressContainer) progressContainer.style.display = "none";
@@ -436,6 +444,46 @@ async function buildIndex() {
       updateStatusBar("エラーが発生しました");
     },
   });
+}
+
+/**
+ * 保存済みレポート（.localforge/report.md）を読み込んでUIに表示する。
+ * レポートが存在すればtrue、存在しなければfalseを返す。
+ * @returns {Promise<boolean>}
+ */
+async function loadSavedReport() {
+  try {
+    const data = await apiRequest("/api/explain/saved-report");
+    if (!data.content) return false;
+
+    const reportOutput = document.getElementById("report-output");
+    if (!reportOutput) return false;
+
+    reportOutput.innerHTML = "";
+
+    // Markdown を解析して generateReport と同じDOM構造を再現する
+    // ## セクション名 → h3 + hr + p
+    let currentP = null;
+    for (const line of data.content.split("\n")) {
+      if (line.startsWith("## ")) {
+        const h3 = document.createElement("h3");
+        h3.textContent = line.slice(3).trim();
+        const hr = document.createElement("hr");
+        reportOutput.appendChild(h3);
+        reportOutput.appendChild(hr);
+        currentP = document.createElement("p");
+        reportOutput.appendChild(currentP);
+      } else if (line === "---" || line.startsWith("# ")) {
+        // セクション区切り・ドキュメントタイトルはスキップ
+      } else if (currentP !== null) {
+        currentP.textContent += (currentP.textContent ? "\n" : "") + line;
+      }
+    }
+
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 /**
