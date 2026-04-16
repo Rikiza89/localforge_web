@@ -59,6 +59,8 @@ _LOCK_FILE_NAMES = frozenset({
 _HEURISTIC_LINE_THRESHOLD = 20
 # 1バッチあたりのトークン予算（適応的バッチサイズ計算に使用）
 _TOKEN_BUDGET_PER_BATCH = 3500
+# ヒューリスティック処理中にN件ごとにディスクへ中間保存する
+_INCREMENTAL_SAVE_INTERVAL = 50
 # .localforgeディレクトリ名
 _LOCALFORGE_DIR = ".localforge"
 # 自動生成ファイルの検出パターン（ファイル先頭5行で検索）
@@ -421,6 +423,7 @@ class AnalysisService:
         if files_to_process:
             # フェーズ1: ヒューリスティックサマリー（LLM不要なファイルを即時処理）
             needs_llm: List[Tuple[Path, FileChunk]] = []
+            heuristic_since_flush = 0
             for f, chunk in files_to_process:
                 heuristic = _try_heuristic_summary(chunk)
                 if heuristic is not None:
@@ -428,6 +431,7 @@ class AnalysisService:
                     chunk.indexed_at = datetime.utcnow()
                     all_chunks.append(chunk)
                     done_count += 1
+                    heuristic_since_flush += 1
                     yield {
                         "progress": {
                             "done": done_count,
@@ -435,8 +439,22 @@ class AnalysisService:
                             "current_file": chunk.path,
                         }
                     }
+                    # 中間保存: N件ごとにディスクへフラッシュ
+                    if heuristic_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
+                        try:
+                            self._index_adapter.save_chunks(index_path, all_chunks)
+                        except Exception as exc:
+                            logger.warning("中間インデックス保存失敗: %s", exc)
+                        heuristic_since_flush = 0
                 else:
                     needs_llm.append((f, chunk))
+
+            # フェーズ1完了時点でフラッシュ（LLMフェーズ開始前のチェックポイント）
+            if heuristic_since_flush > 0:
+                try:
+                    self._index_adapter.save_chunks(index_path, all_chunks)
+                except Exception as exc:
+                    logger.warning("中間インデックス保存失敗: %s", exc)
 
             # Change 3 & 5: 適応的バッチサイズ + 2ワーカー並列LLM処理
             batches = _make_batches(needs_llm)
@@ -472,6 +490,11 @@ class AnalysisService:
                                 "current_file": chunk.path,
                             }
                         }
+                    # LLMバッチ完了ごとにディスクへフラッシュ（再起動時の復元ポイント）
+                    try:
+                        self._index_adapter.save_chunks(index_path, all_chunks)
+                    except Exception as exc:
+                        logger.warning("中間インデックス保存失敗: %s", exc)
 
         # インデックスを保存
         try:
