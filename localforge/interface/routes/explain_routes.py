@@ -154,6 +154,31 @@ def ask_question():
     return _sse_response(gen)
 
 
+@bp.route("/saved-report", methods=["GET"])
+def get_saved_report():
+    """
+    .localforge/report.md の内容を返す。
+    ファイルが存在しない場合は content: null を返す。
+
+    Response JSON:
+        content: Markdownテキスト（存在しない場合はnull）
+    """
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    report_path = project.root / ".localforge" / "report.md"
+    if not report_path.exists():
+        return jsonify({"content": None})
+
+    try:
+        content = report_path.read_text(encoding="utf-8")
+        return jsonify({"content": content})
+    except OSError as exc:
+        return jsonify({"error": "ReadError", "message": str(exc)}), 500
+
+
 @bp.route("/summary", methods=["GET"])
 def get_summary():
     """
