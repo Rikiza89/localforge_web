@@ -244,12 +244,11 @@ class ContextService:
         sections = []
         for chunk in file_chunks:
             excerpt = chunk.content[:content_limit]
-            sections.append(f"=== {chunk.path} ===\n{excerpt}")
+            sections.append(f"FILE: {chunk.path}\n{excerpt}")
 
         prompt = (
-            "以下の各ファイルについて、それぞれ1〜2文で役割を説明してください。\n"
-            "必ず以下の形式で各ファイルの説明を出力してください:\n\n"
-            "FILE: <ファイルパス>\nSUMMARY: <説明>\n\n"
+            "各ファイルの役割を1文で要約してください。\n"
+            "出力形式: FILE: <パス>\\nSUMMARY: <要約>\n\n"
             + "\n\n".join(sections)
         )
         return self._guard_budget(prompt, "batch_file_summary")
