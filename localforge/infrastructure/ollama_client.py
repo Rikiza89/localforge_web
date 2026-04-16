@@ -65,6 +65,23 @@ class OllamaClient:
         else:
             logger.info("CUDA GPU未検出: CPU推論モードで動作します")
 
+        # CPUスレッド数（Noneでデフォルト自動設定）
+        self.num_thread: Optional[int] = None
+
+    def set_num_thread(self, num_thread: Optional[int]) -> None:
+        """
+        Ollamaが使用するCPUスレッド数を設定する。
+        Noneを渡すとOllamaのデフォルト（全コア自動）に戻す。
+
+        Args:
+            num_thread: 使用するCPUスレッド数（1以上の整数、またはNone）
+        """
+        self.num_thread = num_thread
+        if num_thread is not None:
+            logger.info("CPUスレッド数を設定: %d", num_thread)
+        else:
+            logger.info("CPUスレッド数をデフォルト（自動）にリセットしました")
+
     def is_available(self) -> bool:
         """
         Ollamaサーバーが起動していてアクセス可能かどうかを確認する。
@@ -133,8 +150,14 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
+
+        options: dict = {}
         if self.cuda_available:
-            payload["options"] = {"num_gpu": -1}  # 全レイヤーをGPUにオフロード
+            options["num_gpu"] = -1          # 全レイヤーをGPUにオフロード
+        if self.num_thread is not None:
+            options["num_thread"] = self.num_thread
+        if options:
+            payload["options"] = options
 
         logger.debug("Ollamaストリーミング開始: model=%s", model)
 

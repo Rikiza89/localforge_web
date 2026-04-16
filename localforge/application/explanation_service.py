@@ -66,6 +66,7 @@ class ExplanationService:
         """
         11セクションのレポートをSSEイベントとしてストリーミング生成する。
         各セクションは別々のOllamaコールで処理する。
+        生成完了後に <project>/.localforge/report.md として保存する。
 
         Args:
             root: プロジェクトルート
@@ -85,6 +86,7 @@ class ExplanationService:
         chunks = project_index.file_chunks
 
         total_sections = len(REPORT_SECTIONS)
+        completed_sections: List[tuple[str, str]] = []  # (name, content)
 
         for sec_idx, section_name in enumerate(REPORT_SECTIONS):
             # セクションヘッダーを送信
@@ -112,12 +114,19 @@ class ExplanationService:
                 relevant_summaries=relevant_summaries,
             )
 
+            section_tokens: List[str] = []
             try:
                 for token in self._llm.stream_completion(model, prompt):
+                    section_tokens.append(token)
                     yield {"token": token}
             except Exception as exc:
                 logger.error("セクション生成エラー [%s]: %s", section_name, exc)
                 yield {"token": f"\n[エラー: {exc}]\n"}
+
+            completed_sections.append((section_name, "".join(section_tokens)))
+
+        # レポートをディスクに保存
+        self._save_report(root, completed_sections, project_index.project_name)
 
         yield {
             "progress": {
@@ -127,6 +136,32 @@ class ExplanationService:
             }
         }
         yield {"done": True}
+
+    def _save_report(
+        self,
+        root: Path,
+        sections: List[tuple[str, str]],
+        project_name: str,
+    ) -> None:
+        """
+        レポートをMarkdown形式で .localforge/report.md に保存する。
+
+        Args:
+            root: プロジェクトルート
+            sections: [(セクション名, 内容)] のリスト
+            project_name: プロジェクト名（ドキュメントタイトル用）
+        """
+        report_path = root / _LOCALFORGE_DIR / "report.md"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+
+        lines: List[str] = [f"# {project_name} — Codebase Report\n\n"]
+        for name, content in sections:
+            lines.append(f"## {name}\n\n")
+            lines.append(content.strip())
+            lines.append("\n\n---\n\n")
+
+        report_path.write_text("".join(lines), encoding="utf-8")
+        logger.info("レポートを保存しました: %s", report_path)
 
     def stream_answer(
         self,
