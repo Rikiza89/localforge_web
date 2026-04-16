@@ -456,11 +456,13 @@ class AnalysisService:
                     files_needing_read.append(f)
 
         changed_count = len(tier0_chunks) + len(files_needing_read)
-        done_count = len(cached_chunks)
+        done_count = 0
         all_chunks: List[FileChunk] = list(cached_chunks)
 
-        # キャッシュ済みファイル数を即座に反映してプログレスバーを正しい位置に移動
-        yield {"progress": {"done": done_count, "total": total, "current_file": ""}}
+        # キャッシュ済みファイルをひとつずつ表示してプログレスバーを正しい位置まで進める
+        for cached in cached_chunks:
+            done_count += 1
+            yield {"progress": {"done": done_count, "total": total, "current_file": cached.path}}
 
         # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
         # Tier-0: パスのみで解決できたファイルを全て先に処理
