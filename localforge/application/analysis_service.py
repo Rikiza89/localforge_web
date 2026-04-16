@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Generator, List, Optional, Tuple
@@ -129,37 +130,129 @@ def _extract_js_ts_landmarks(source: str) -> List[str]:
     return landmarks
 
 
+def _smart_summary_python(source: str) -> Optional[str]:
+    """
+    Python AST を使ってLLM不要のサマリーを生成する。
+    モジュールdocstring → クラス定義（+docstring） → 公開関数（+docstring）の順に抽出。
+    何も抽出できなかった場合はNoneを返す。
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    parts: List[str] = []
+
+    # モジュールdocstring（最も情報量が多い）
+    module_doc = ast.get_docstring(tree)
+    if module_doc:
+        first = module_doc.strip().split("\n")[0].strip()
+        if first:
+            parts.append(first)
+
+    # トップレベルのクラス
+    class_items: List[str] = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            doc = ast.get_docstring(node)
+            if doc:
+                desc = doc.strip().split("\n")[0][:50]
+                class_items.append(f"{node.name}（{desc}）")
+            else:
+                class_items.append(node.name)
+    if class_items:
+        parts.append("クラス: " + "、".join(class_items[:4]))
+
+    # トップレベルの公開関数
+    func_items: List[str] = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if not node.name.startswith("_"):
+                doc = ast.get_docstring(node)
+                if doc:
+                    desc = doc.strip().split("\n")[0][:50]
+                    func_items.append(f"{node.name}（{desc}）")
+                else:
+                    func_items.append(node.name)
+    if func_items:
+        parts.append("関数: " + "、".join(func_items[:5]))
+
+    return " | ".join(parts) if parts else None
+
+
+# JS/TS エクスポート抽出パターン
+_JS_NAMED_EXPORT_RE = re.compile(
+    r"export\s+(?:async\s+)?(?:function|class|const|let|var)\s+(\w+)"
+)
+_JS_DEFAULT_EXPORT_RE = re.compile(r"export\s+default\s+(?:class|function)?\s*(\w+)")
+
+
+def _smart_summary_js_ts(path: Path, source: str) -> Optional[str]:
+    """
+    JS/TS ソースの先頭行からエクスポート情報を正規表現で抽出してサマリーを生成する。
+    LLM不要。何も抽出できなかった場合はNoneを返す。
+    """
+    head = "\n".join(source.splitlines()[:100])
+
+    named = list(dict.fromkeys(_JS_NAMED_EXPORT_RE.findall(head)))
+    default_match = _JS_DEFAULT_EXPORT_RE.search(head)
+
+    items: List[str] = []
+    if default_match and default_match.group(1):
+        items.append(f"デフォルト: {default_match.group(1)}")
+    if named:
+        items.append("エクスポート: " + "、".join(named[:6]))
+
+    if not items:
+        return None
+
+    lang = _detect_language(path)
+    return f"{lang}ファイル — " + " | ".join(items)
+
+
 def _try_heuristic_summary(chunk: FileChunk) -> Optional[str]:
     """
-    ファイルが自明な場合にLLMを使わずサマリーを返す。
-    - 空ファイル / ロックファイル / 設定ファイル拡張子 / 極小ファイル
-    - インポートのみの __init__.py
-    これらに当てはまらない場合はNoneを返し、呼び出し元がLLMにフォールバックする。
+    LLMを呼ばずにサマリーを生成できる場合はその文字列を返す。
+    生成できない場合はNoneを返し、呼び出し元がLLMバッチにフォールバックする。
+
+    優先順位:
+      1. 空ファイル / ロックファイル / 設定拡張子 / 極小ファイル  → 即時テキスト
+      2. Python → AST（モジュールdocstring + クラス/関数シグネチャ）
+      3. JS/TS  → 正規表現（エクスポート名）
+      4. それ以外 → None（LLMバッチへ）
     """
     path = Path(chunk.path)
     non_empty = [l for l in chunk.content.splitlines() if l.strip()]
 
+    # 空ファイル
     if not non_empty:
         return "空のファイル"
 
+    # ロックファイル
     if path.name in _LOCK_FILE_NAMES:
         return "依存関係のロックファイル"
 
+    # 設定・データファイル（拡張子で判定）
     if path.suffix.lower() in _HEURISTIC_EXTENSIONS:
         lang = _detect_language(path)
         return f"{lang} 設定・データファイル（{len(non_empty)} 行）"
 
+    # 極小ファイル（実質行数がしきい値以下）
     if len(non_empty) <= _HEURISTIC_LINE_THRESHOLD:
         lang = _detect_language(path)
         return f"小さな {lang} ファイル（{len(non_empty)} 行）"
 
-    if path.name == "__init__.py":
-        non_comment = [l for l in non_empty if not l.strip().startswith("#")]
-        if non_comment and all(
-            l.strip().startswith(("import ", "from ")) for l in non_comment
-        ):
-            return "Pythonパッケージ初期化（インポート定義のみ）"
+    ext = path.suffix.lower()
 
+    # Python: AST解析でdocstring + クラス/関数名を抽出
+    if ext == ".py":
+        return _smart_summary_python(chunk.content)  # None → LLMフォールバック
+
+    # JS/TS: エクスポート名をパターンマッチで抽出
+    if ext in (".js", ".ts", ".jsx", ".tsx", ".vue"):
+        return _smart_summary_js_ts(path, chunk.content)  # None → LLMフォールバック
+
+    # その他の言語 → LLMバッチ
     return None
 
 
