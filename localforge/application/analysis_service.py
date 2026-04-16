@@ -212,6 +212,38 @@ def _try_heuristic_summary(chunk: FileChunk) -> Optional[str]:
     return None
 
 
+def _try_path_summary(path: Path, size: int) -> Optional[str]:
+    """
+    ファイルを読まずにパスとサイズだけでサマリーを決定する（Tier-0 高速パス）。
+    - サイズ0（空ファイル）
+    - ロックファイル名
+    - 設定・アセット系拡張子（.json, .svg, .png, .woff ...）
+    - テストファイル名パターン（*test*, *spec*）
+    これらに当てはまらない場合はNoneを返し、ファイル読み込みへ進む。
+    """
+    if size == 0:
+        return "空のファイル"
+
+    if path.name in _LOCK_FILE_NAMES:
+        return "依存関係のロックファイル"
+
+    if path.suffix.lower() in _HEURISTIC_EXTENSIONS:
+        lang = _detect_language(path)
+        return f"{lang} 設定・データファイル"
+
+    name_lower = path.name.lower()
+    if "test" in name_lower or "spec" in name_lower:
+        stem = path.stem
+        for sfx in (".test", ".spec", "_test", "_spec"):
+            if stem.lower().endswith(sfx):
+                stem = stem[: len(stem) - len(sfx)]
+                break
+        lang = _detect_language(path)
+        return f"{lang} のテストスイート（{stem} のテスト）"
+
+    return None
+
+
 def _make_batches(
     needs_llm: List[Tuple["Path", "FileChunk"]],
 ) -> List[List["FileChunk"]]:
@@ -391,9 +423,12 @@ class AnalysisService:
 
         yield {"progress": {"done": 0, "total": total, "current_file": ""}}
 
-        # 変更ファイルの特定（増分インデックス）
-        files_needing_read: List[Path] = []
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        # ファイル分類: キャッシュ済み / Tier-0(パスのみ解決) / 読み込み必要
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
         cached_chunks: List[FileChunk] = []
+        tier0_chunks: List[FileChunk] = []   # パス・サイズだけで決定（I/O不要）
+        files_needing_read: List[Path] = []  # 内容確認が必要なファイル
 
         for f in code_files:
             rel = str(f.relative_to(root))
@@ -404,26 +439,66 @@ class AnalysisService:
                 # 変更なし → キャッシュを使用
                 cached_chunks.append(cached)
             else:
-                files_needing_read.append(f)
+                summary = _try_path_summary(f, size)
+                if summary is not None:
+                    # Tier-0: ファイルを開かずにサマリー確定
+                    tier0_chunks.append(FileChunk(
+                        path=rel,
+                        content="",
+                        strategy=ChunkStrategy.FULL,
+                        size=size,
+                        mtime=mtime,
+                        language=_detect_language(f),
+                        summary=summary,
+                        indexed_at=datetime.utcnow(),
+                    ))
+                else:
+                    files_needing_read.append(f)
 
-        # Change 2: 並列ファイル読み込み（全ファイルのI/Oをオーバーラップ）
-        files_to_process: List[Tuple[Path, FileChunk]] = []
+        changed_count = len(tier0_chunks) + len(files_needing_read)
+        done_count = len(cached_chunks)
+        all_chunks: List[FileChunk] = list(cached_chunks)
+
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        # Tier-0: パスのみで解決できたファイルを全て先に処理
+        # （設定・アセット・テストファイル — ディスクI/O不要）
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        t0_since_flush = 0
+        for chunk in tier0_chunks:
+            all_chunks.append(chunk)
+            done_count += 1
+            t0_since_flush += 1
+            yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
+            if t0_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
+                try:
+                    self._index_adapter.save_chunks(index_path, all_chunks)
+                except Exception as exc:
+                    logger.warning("中間インデックス保存失敗: %s", exc)
+                t0_since_flush = 0
+
+        if t0_since_flush > 0:
+            try:
+                self._index_adapter.save_chunks(index_path, all_chunks)
+            except Exception as exc:
+                logger.warning("中間インデックス保存失敗: %s", exc)
+
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        # Tier-1 & Tier-2: 読み込みが必要なファイルを処理
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
         if files_needing_read:
+            # 並列ファイル読み込み（全ファイルのI/Oをオーバーラップ）
             max_io_workers = min(32, (os.cpu_count() or 1) * 4)
             with ThreadPoolExecutor(max_workers=max_io_workers) as io_executor:
                 chunks_iter = io_executor.map(
                     lambda f: self.read_file_chunk(f, root), files_needing_read
                 )
-                files_to_process = list(zip(files_needing_read, chunks_iter))
+                files_to_process: List[Tuple[Path, FileChunk]] = list(
+                    zip(files_needing_read, chunks_iter)
+                )
 
-        changed_count = len(files_to_process)
-        done_count = len(cached_chunks)
-        all_chunks: List[FileChunk] = list(cached_chunks)
-
-        if files_to_process:
-            # フェーズ1: ヒューリスティックサマリー（LLM不要なファイルを即時処理）
+            # Tier-1: コンテンツベースのヒューリスティック（ミニファイ・自動生成・行数）
             needs_llm: List[Tuple[Path, FileChunk]] = []
-            heuristic_since_flush = 0
+            t1_since_flush = 0
             for f, chunk in files_to_process:
                 heuristic = _try_heuristic_summary(chunk)
                 if heuristic is not None:
@@ -431,32 +506,25 @@ class AnalysisService:
                     chunk.indexed_at = datetime.utcnow()
                     all_chunks.append(chunk)
                     done_count += 1
-                    heuristic_since_flush += 1
-                    yield {
-                        "progress": {
-                            "done": done_count,
-                            "total": total,
-                            "current_file": chunk.path,
-                        }
-                    }
-                    # 中間保存: N件ごとにディスクへフラッシュ
-                    if heuristic_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
+                    t1_since_flush += 1
+                    yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
+                    if t1_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
                         try:
                             self._index_adapter.save_chunks(index_path, all_chunks)
                         except Exception as exc:
                             logger.warning("中間インデックス保存失敗: %s", exc)
-                        heuristic_since_flush = 0
+                        t1_since_flush = 0
                 else:
                     needs_llm.append((f, chunk))
 
-            # フェーズ1完了時点でフラッシュ（LLMフェーズ開始前のチェックポイント）
-            if heuristic_since_flush > 0:
+            # Tier-1完了チェックポイント（LLMフェーズ開始前に保存）
+            if t1_since_flush > 0:
                 try:
                     self._index_adapter.save_chunks(index_path, all_chunks)
                 except Exception as exc:
                     logger.warning("中間インデックス保存失敗: %s", exc)
 
-            # Change 3 & 5: 適応的バッチサイズ + 2ワーカー並列LLM処理
+            # Tier-2: LLMバッチ処理（適応的バッチサイズ + 2ワーカー並列）
             batches = _make_batches(needs_llm)
 
             def _run_batch(
@@ -483,13 +551,7 @@ class AnalysisService:
                         chunk.indexed_at = datetime.utcnow()
                         all_chunks.append(chunk)
                         done_count += 1
-                        yield {
-                            "progress": {
-                                "done": done_count,
-                                "total": total,
-                                "current_file": chunk.path,
-                            }
-                        }
+                        yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
                     # LLMバッチ完了ごとにディスクへフラッシュ（再起動時の復元ポイント）
                     try:
                         self._index_adapter.save_chunks(index_path, all_chunks)
