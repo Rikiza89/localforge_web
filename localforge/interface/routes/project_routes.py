@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request
@@ -252,3 +253,52 @@ def get_file_content():
         return jsonify({"content": content, "path": rel_path})
     except OSError as exc:
         return jsonify({"error": "ReadError", "message": str(exc)}), 500
+
+
+@bp.route("/num-thread", methods=["GET"])
+def get_num_thread():
+    """
+    現在のCPUスレッド設定とシステムのCPUコア数を返す。
+
+    Response JSON:
+        num_thread: 現在の設定（nullでデフォルト自動）
+        cpu_count: システムのCPUコア数
+    """
+    llm = _get_llm()
+    return jsonify({
+        "num_thread": llm.num_thread,
+        "cpu_count": os.cpu_count(),
+    })
+
+
+@bp.route("/num-thread", methods=["POST"])
+def set_num_thread():
+    """
+    Ollamaが使用するCPUスレッド数を設定する。
+    次回以降の全LLMコールに即座に適用される。
+
+    Request JSON:
+        num_thread (int or null): スレッド数（nullでデフォルト自動設定に戻す）
+
+    Response JSON:
+        num_thread: 設定されたスレッド数
+        cpu_count: システムのCPUコア数
+    """
+    llm = _get_llm()
+    data = request.get_json(silent=True) or {}
+    num_thread = data.get("num_thread")
+
+    if num_thread is not None:
+        if not isinstance(num_thread, int) or num_thread < 1:
+            return jsonify({
+                "error": "InvalidValue",
+                "message": "num_threadは1以上の整数を指定してください",
+            }), 400
+        cpu_count = os.cpu_count() or 1
+        num_thread = min(num_thread, cpu_count)
+
+    llm.set_num_thread(num_thread)
+    return jsonify({
+        "num_thread": llm.num_thread,
+        "cpu_count": os.cpu_count(),
+    })
