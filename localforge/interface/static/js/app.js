@@ -584,6 +584,73 @@ async function continueGeneration() {
 }
 
 // =========================================================================
+// CPU スレッド管理
+// =========================================================================
+
+let _cpuCount = 1;
+
+/**
+ * CPU スレッド情報をAPIから取得してUIに反映する。
+ */
+async function loadCpuThreadInfo() {
+  try {
+    const data = await apiRequest("/api/project/num-thread");
+    _cpuCount = data.cpu_count || 1;
+
+    const slider  = document.getElementById("cpu-thread-slider");
+    const maxLbl  = document.getElementById("cpu-max-label");
+    const coreLbl = document.getElementById("cpu-core-label");
+
+    if (maxLbl)  maxLbl.textContent  = _cpuCount;
+    if (coreLbl) coreLbl.textContent = `${_cpuCount} コア`;
+    if (slider) {
+      slider.max   = _cpuCount;
+      slider.value = data.num_thread ?? _cpuCount;
+    }
+
+    _updateCpuUI(data.num_thread);
+  } catch (e) {
+    console.warn("CPUスレッド情報取得エラー:", e.message);
+  }
+}
+
+/**
+ * スライダーバッジとラベルを現在の設定値に合わせて更新する。
+ * @param {number|null} numThread
+ */
+function _updateCpuUI(numThread) {
+  const badge   = document.getElementById("cpu-thread-badge");
+  const valueEl = document.getElementById("cpu-slider-value");
+
+  if (numThread === null || numThread === undefined) {
+    if (badge)   { badge.textContent = "自動"; badge.className = "cpu-thread-badge"; }
+    if (valueEl) valueEl.textContent = "自動設定";
+  } else {
+    const pct = Math.round((numThread / _cpuCount) * 100);
+    if (badge)   { badge.textContent = `${numThread} スレッド`; badge.className = "cpu-thread-badge active"; }
+    if (valueEl) valueEl.textContent = `${numThread} スレッド (${pct}%)`;
+  }
+}
+
+/**
+ * スレッド数をAPIに送信して即時適用する。
+ * @param {number|null} numThread - nullで自動設定に戻す
+ */
+async function applyCpuThread(numThread) {
+  try {
+    const data = await apiRequest("/api/project/num-thread", "POST", { num_thread: numThread });
+    _updateCpuUI(data.num_thread);
+    const msg = data.num_thread !== null
+      ? `CPUスレッドを ${data.num_thread} に設定しました`
+      : "CPUスレッドを自動設定に戻しました";
+    updateStatusBar(msg);
+    showAlert(msg, "success", 3000);
+  } catch (err) {
+    showAlert(`CPUスレッド設定エラー: ${err.message}`, "error");
+  }
+}
+
+// =========================================================================
 // 初期化
 // =========================================================================
 
@@ -727,7 +794,32 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  // 初期化: モデル一覧を読み込む
+  // CPU スレッドマネージャーのイベント設定
+  const cpuSlider = document.getElementById("cpu-thread-slider");
+  if (cpuSlider) {
+    cpuSlider.addEventListener("input", () => {
+      const val = parseInt(cpuSlider.value);
+      const pct = Math.round((val / _cpuCount) * 100);
+      const valueEl = document.getElementById("cpu-slider-value");
+      if (valueEl) valueEl.textContent = `${val} スレッド (${pct}%)`;
+    });
+  }
+
+  const cpuApplyBtn = document.getElementById("cpu-apply-btn");
+  if (cpuApplyBtn) {
+    cpuApplyBtn.addEventListener("click", () => {
+      const s = document.getElementById("cpu-thread-slider");
+      if (s) applyCpuThread(parseInt(s.value));
+    });
+  }
+
+  const cpuAutoBtn = document.getElementById("cpu-auto-btn");
+  if (cpuAutoBtn) {
+    cpuAutoBtn.addEventListener("click", () => applyCpuThread(null));
+  }
+
+  // 初期化: モデル一覧とCPU情報を読み込む
   await loadModels();
+  await loadCpuThreadInfo();
   updateStatusBar("LocalForge 準備完了 — フォルダを開いてください");
 });

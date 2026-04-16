@@ -83,6 +83,28 @@
           <div class="empty-state">—</div>
         </div>
       </div>
+
+      <!-- CPU スレッドマネージャー -->
+      <div class="context-section">
+        <div class="section-label">CPU スレッド</div>
+        <div id="cpu-thread-panel">
+          <div class="cpu-thread-info">
+            <span id="cpu-core-label" class="text-muted">— コア</span>
+            <span id="cpu-thread-badge" class="cpu-thread-badge">自動</span>
+          </div>
+          <input type="range" id="cpu-thread-slider" class="cpu-slider"
+                 min="1" max="8" value="4" title="スレッド数を調整">
+          <div class="cpu-slider-meta">
+            <span class="text-muted">1</span>
+            <span id="cpu-slider-value" class="font-mono" style="font-size:11px;">— スレッド</span>
+            <span id="cpu-max-label" class="text-muted">8</span>
+          </div>
+          <div class="cpu-thread-actions">
+            <button class="btn btn-primary btn-sm" id="cpu-apply-btn">適用</button>
+            <button class="btn btn-secondary btn-sm" id="cpu-auto-btn">自動に戻す</button>
+          </div>
+        </div>
+      </div>
     </aside>
 
     <!-- ステータスバー -->
