@@ -1135,3 +1135,60 @@ progress::-moz-progress-bar {
 .text-danger { color: var(--danger); }
 .text-accent { color: var(--accent); }
 .font-mono { font-family: var(--font-mono); }
+
+/* =========================================================================
+   CPU スレッドマネージャー
+   ========================================================================= */
+
+.btn-sm {
+  padding: 3px 10px;
+  font-size: 11px;
+  height: auto;
+  line-height: 1.6;
+}
+
+.cpu-thread-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.cpu-thread-badge {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.cpu-thread-badge.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.cpu-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin-bottom: 4px;
+  display: block;
+}
+
+.cpu-slider-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+}
+
+.cpu-thread-actions {
+  display: flex;
+  gap: 6px;
+}
