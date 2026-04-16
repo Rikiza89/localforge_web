@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from typing import Generator, List, Optional
 
 import requests
@@ -22,6 +23,23 @@ _CONNECT_TIMEOUT = 5
 _READ_TIMEOUT = 120
 # generate_sync 用タイムアウト（大型ローカルモデル向けに長めに設定）
 _GENERATE_READ_TIMEOUT = 600
+
+
+def _detect_cuda() -> bool:
+    """
+    nvidia-smi を呼び出してCUDA対応GPUが存在するか確認する。
+    nvidia-smi が見つからない・タイムアウト・エラーの場合はFalseを返す。
+    外部ライブラリ不要。
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
 
 
 class OllamaClient:
@@ -40,6 +58,12 @@ class OllamaClient:
         self._base_url = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
+
+        self.cuda_available: bool = _detect_cuda()
+        if self.cuda_available:
+            logger.info("CUDA GPU検出: Ollamaリクエストにnum_gpu=-1を設定します")
+        else:
+            logger.info("CUDA GPU未検出: CPU推論モードで動作します")
 
     def is_available(self) -> bool:
         """
@@ -109,6 +133,8 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
+        if self.cuda_available:
+            payload["options"] = {"num_gpu": -1}  # 全レイヤーをGPUにオフロード
 
         logger.debug("Ollamaストリーミング開始: model=%s", model)
 

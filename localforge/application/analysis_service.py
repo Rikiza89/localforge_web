@@ -402,6 +402,11 @@ class AnalysisService:
         lf_dir = root / _LOCALFORGE_DIR
         index_path = lf_dir / "index.jsonl"
 
+        if self._llm.cuda_available:
+            logger.info("インデックス構築: CUDA GPU推論モード")
+        else:
+            logger.info("インデックス構築: CPU推論モード")
+
         # 既存チャンクを読み込んでmtime+sizeでキャッシュを作成
         existing_chunks = self._index_adapter.load_chunks(index_path)
         chunk_cache: dict[str, FileChunk] = {
