@@ -100,6 +100,10 @@ async function sendChatMessage(question) {
         _chatSending = false;
         enableChat();
 
+        // Q&Aをディスクに保存（エラーは無視してUIをブロックしない）
+        apiRequest("/api/explain/qa-save", "POST", { question, answer: answerBuffer })
+          .catch(e => console.warn("Q&A保存エラー:", e.message));
+
         // 入力フィールドにフォーカスを戻す
         const input = document.getElementById("chat-input");
         if (input) input.focus();

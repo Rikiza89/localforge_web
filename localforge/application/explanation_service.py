@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Generator, List, Optional
 
@@ -226,6 +227,30 @@ class ExplanationService:
             return
 
         yield {"done": True}
+
+    def append_qa_entry(self, root: Path, question: str, answer: str) -> None:
+        """
+        Q&Aのやり取りを .localforge/qa_history.md に追記する。
+        ファイルが存在しない場合は新規作成する。
+
+        Args:
+            root: プロジェクトルート
+            question: ユーザーの質問
+            answer: アシスタントの回答
+        """
+        qa_path = root / _LOCALFORGE_DIR / "qa_history.md"
+        qa_path.parent.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = f"\n## [{timestamp}]\n\n**Q:** {question}\n\n**A:** {answer.strip()}\n\n---\n"
+
+        if not qa_path.exists():
+            qa_path.write_text("# Q&A 履歴\n" + entry, encoding="utf-8")
+        else:
+            with qa_path.open("a", encoding="utf-8") as fh:
+                fh.write(entry)
+
+        logger.debug("Q&Aエントリを保存しました: %s", qa_path)
 
     def get_summary(self, root: Path) -> Optional[dict]:
         """
