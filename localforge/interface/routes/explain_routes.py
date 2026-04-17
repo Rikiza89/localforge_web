@@ -154,6 +154,38 @@ def ask_question():
     return _sse_response(gen)
 
 
+@bp.route("/qa-save", methods=["POST"])
+def save_qa_entry():
+    """
+    Q&Aのやり取りを .localforge/qa_history.md に追記する。
+
+    Request JSON:
+        question (str): ユーザーの質問
+        answer (str): アシスタントの回答
+
+    Response JSON:
+        ok: true
+    """
+    project_svc = _get_project_svc()
+    explanation_svc = _get_explanation_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    data = request.get_json(silent=True) or {}
+    question = data.get("question", "").strip()
+    answer = data.get("answer", "").strip()
+    if not question or not answer:
+        return jsonify({"error": "InvalidData", "message": "questionとanswerは必須です"}), 400
+
+    try:
+        explanation_svc.append_qa_entry(project.root, question, answer)
+        return jsonify({"ok": True})
+    except Exception as exc:
+        logger.error("Q&A保存エラー: %s", exc)
+        return jsonify({"error": "SaveError", "message": str(exc)}), 500
+
+
 @bp.route("/saved-report", methods=["GET"])
 def get_saved_report():
     """
