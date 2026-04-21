@@ -263,4 +263,7 @@ def get_summary():
             "message": "ProjectIndexが見つかりません。先にインデックスを構築してください。"
         }), 404
 
+    vector = current_app.config.get("vector")
+    rag_ready = vector.collection_exists(project.root) if vector else False
+    summary["rag_ready"] = rag_ready
     return jsonify(summary)

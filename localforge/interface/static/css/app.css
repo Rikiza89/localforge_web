@@ -1195,63 +1195,93 @@ progress::-moz-progress-bar {
 
 /* =========================================================================
    Ollamaライブ出力パネル（固定位置オーバーレイ）
+   タブは常に表示、ボディのみwidth遷移でスライド開閉する。
    ========================================================================= */
+
+/* 外枠: 右端に固定、高さはヘッダー〜ステータスバー間 */
 .ollama-panel {
   position: fixed;
   top: var(--header-h);
   right: 0;
-  width: 320px;
   height: calc(100vh - var(--header-h) - var(--status-h));
   z-index: 900;
   display: flex;
   flex-direction: row;
+  align-items: stretch;
   pointer-events: none;
-  transition: transform 0.25s ease;
 }
 
-.ollama-panel.collapsed {
-  transform: translateX(320px);
-}
-
+/* タブボタン: 縦書きで常時表示 */
 .ollama-panel-tab {
   pointer-events: all;
-  position: absolute;
-  left: -28px;
-  top: 50%;
-  transform: translateY(-50%) rotate(-90deg);
-  transform-origin: center center;
+  flex-shrink: 0;
+  width: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 4px 4px 0 0;
-  padding: 5px 10px;
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   cursor: pointer;
+  padding: 12px 0;
   color: var(--text-muted);
-  font-size: 11px;
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  letter-spacing: 0.05em;
   transition: color 0.15s, background 0.15s;
 }
 
-.ollama-panel-tab:hover,
-.ollama-panel.active .ollama-panel-tab {
+.ollama-panel-tab:hover {
   color: var(--accent);
   background: var(--bg-secondary);
 }
 
+/* タブラベル: 縦書き */
 .ollama-tab-label {
-  display: inline-block;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transform: rotate(180deg);
+  white-space: nowrap;
 }
 
+/* ストリーミング中インジケータドット */
+.ollama-stream-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.ollama-panel.streaming .ollama-stream-dot {
+  background: var(--success);
+  box-shadow: 0 0 4px var(--success);
+}
+
+.ollama-panel.streaming .ollama-panel-tab {
+  color: var(--success);
+}
+
+/* パネル本体: widthでスライド開閉 */
 .ollama-panel-body {
   pointer-events: all;
-  flex: 1;
+  width: 300px;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
-  overflow: hidden;
+  transition: width 0.25s ease;
+}
+
+.ollama-panel.collapsed .ollama-panel-body {
+  width: 0;
+  border-left: none;
 }
 
 .ollama-panel-header {
@@ -1262,6 +1292,7 @@ progress::-moz-progress-bar {
   border-bottom: 1px solid var(--border);
   background: var(--bg-tertiary);
   flex-shrink: 0;
+  min-width: 300px;
 }
 
 .ollama-panel-title {
@@ -1270,6 +1301,7 @@ progress::-moz-progress-bar {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 
 .ollama-panel-actions {
@@ -1287,14 +1319,16 @@ progress::-moz-progress-bar {
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
+  min-width: 300px;
 }
 
 .ollama-thinking {
   border-top: 1px solid var(--border);
   color: var(--text-muted);
   font-style: italic;
-  flex: 0 0 40%;
-  max-height: 40%;
+  flex: 0 0 38%;
+  overflow-y: auto;
+  min-width: 300px;
 }
 
 .ollama-thinking-label {
@@ -1302,17 +1336,6 @@ progress::-moz-progress-bar {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  padding-bottom: 4px;
-  margin-bottom: 6px;
+  padding: 6px 10px 4px;
   border-bottom: 1px dashed var(--border);
-}
-
-/* アクティブ（ストリーミング中）インジケーター */
-.ollama-panel.streaming .ollama-panel-tab {
-  color: var(--success);
-}
-
-.ollama-panel.streaming .ollama-panel-tab::before {
-  content: "● ";
-  color: var(--success);
 }
