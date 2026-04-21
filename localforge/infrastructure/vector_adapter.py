@@ -50,6 +50,7 @@ class VectorAdapter:
             project_root: プロジェクトのルートディレクトリ
         """
         import chromadb
+        from chromadb.config import Settings
 
         chroma_path = project_root / ".localforge" / _CHROMA_DIR
         chroma_path.mkdir(parents=True, exist_ok=True)
@@ -58,7 +59,10 @@ class VectorAdapter:
             return
 
         self._chroma_path = chroma_path
-        self._client = chromadb.PersistentClient(path=str(chroma_path))
+        self._client = chromadb.PersistentClient(
+            path=str(chroma_path),
+            settings=Settings(anonymized_telemetry=False),
+        )
         self._collection = self._client.get_or_create_collection(
             name=_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},

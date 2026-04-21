@@ -16,6 +16,25 @@ let _cancelGenStream = null;
 // インデックス構築済みフラグ
 let _indexBuilt = false;
 
+/**
+ * RAGインデックスの有無に応じてExplainタブのボタン状態を切り替える。
+ * ragReady=true: ビルドボタンを「RAG再インデックス」に変更し、移行ボタンを隠す
+ * ragReady=false: 通常ラベルに戻し、移行ボタンを表示する
+ * @param {boolean} ragReady
+ */
+function _applyRagButtonState(ragReady) {
+  const buildBtn = document.getElementById("build-index-btn");
+  const migrateBtn = document.getElementById("migrate-vector-btn");
+  if (!buildBtn) return;
+  if (ragReady) {
+    buildBtn.textContent = "⚙ RAG再インデックス";
+    if (migrateBtn) migrateBtn.style.display = "none";
+  } else {
+    buildBtn.textContent = "⚙ インデックス構築";
+    if (migrateBtn) { migrateBtn.style.display = ""; migrateBtn.disabled = false; }
+  }
+}
+
 // =========================================================================
 // タブ切替
 // =========================================================================
@@ -144,12 +163,10 @@ async function refreshContextPanel() {
         <div class="index-stat" style="margin-top:6px; color:var(--text-muted); font-size:11px;">${(summary.summary || "").slice(0, 120)}...</div>
       `;
     }
-    // インデックスが存在する場合はRAG移行ボタンと生成ボタンを有効化
     const reportBtn = document.getElementById("generate-report-btn");
     if (reportBtn) reportBtn.disabled = false;
-    const migrateBtn = document.getElementById("migrate-vector-btn");
-    if (migrateBtn) migrateBtn.disabled = false;
     _indexBuilt = true;
+    _applyRagButtonState(summary.rag_ready === true);
   } catch (e) {
     // インデックスが存在しない場合はスキップ
   }
@@ -433,8 +450,7 @@ async function buildIndex() {
       if (reportBtn) reportBtn.disabled = false;
       _indexBuilt = true;
       updateStatusBar("インデックス構築完了");
-      const migrateBtn = document.getElementById("migrate-vector-btn");
-      if (migrateBtn) migrateBtn.disabled = false;
+      _applyRagButtonState(true);
       refreshContextPanel();
 
       // 保存済みレポートがあればロードしてQ&Aをそのまま有効化する
