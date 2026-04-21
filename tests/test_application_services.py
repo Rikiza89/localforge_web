@@ -338,6 +338,65 @@ def standalone_func():
         index_path = python_fixture_project / ".localforge" / "index.jsonl"
         assert index_path.exists()
 
+    def test_build_index_no_status_events_without_vector(self, analysis_service, python_fixture_project):
+        """VectorAdapterなしの場合、statusイベントが生成されないことをテスト。"""
+        events = list(analysis_service.build_index(
+            root=python_fixture_project,
+            model="llama3.2",
+        ))
+        status_events = [e for e in events if "status" in e]
+        # vector=None なので埋め込みフェーズは実行されずstatusイベントは0件
+        assert len(status_events) == 0
+
+    def test_build_index_emits_status_events_with_vector(
+        self, analysis_service_with_vector, mock_vector, python_fixture_project
+    ):
+        """VectorAdapterありの場合、statusイベントが生成されることをテスト。"""
+        events = list(analysis_service_with_vector.build_index(
+            root=python_fixture_project,
+            model="llama3.2",
+        ))
+        status_events = [e for e in events if "status" in e]
+        done_events = [e for e in events if e.get("done")]
+        # 埋め込みフェーズのstatusイベントが存在する
+        assert len(status_events) >= 1
+        assert len(done_events) == 1
+        # upsert_chunkが呼び出されたことを確認
+        assert mock_vector.upsert_chunk.called
+
+    def test_get_top_chunks_semantic_fallback_to_keywords(self, analysis_service):
+        """vector=Noneの場合、get_top_chunks_semanticがキーワード検索にフォールバックすることをテスト。"""
+        chunks = [
+            FileChunk(
+                path="auth.py",
+                content="def login(): pass",
+                strategy=ChunkStrategy.FULL,
+                size=18,
+                mtime=1700000000.0,
+                summary="認証・ログイン機能",
+            ),
+            FileChunk(
+                path="utils.py",
+                content="def format_date(): pass",
+                strategy=ChunkStrategy.FULL,
+                size=25,
+                mtime=1700000001.0,
+                summary="日付フォーマットユーティリティ",
+            ),
+        ]
+        # vector=None なのでキーワード検索にフォールバック
+        top = analysis_service.get_top_chunks_semantic(chunks, "login authentication", top_n=1)
+        assert len(top) == 1
+        assert top[0].path == "auth.py"
+
+    def test_get_top_chunks_semantic_with_vector(self, analysis_service_with_vector, mock_vector, sample_chunk):
+        """VectorAdapterありの場合、セマンティック検索が呼び出されることをテスト。"""
+        mock_vector.get_top_chunks_semantic.return_value = [sample_chunk]
+        chunks = [sample_chunk]
+        top = analysis_service_with_vector.get_top_chunks_semantic(chunks, "hello", top_n=1)
+        assert len(top) == 1
+        mock_vector.get_top_chunks_semantic.assert_called_once()
+
 
 class TestResumeDetection:
     """再開検出のテスト。"""
