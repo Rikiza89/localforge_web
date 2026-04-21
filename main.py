@@ -5,11 +5,44 @@ pywebviewウィンドウとFlaskサーバーを統合して起動する。
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
+import platform
+import signal
+import subprocess
 import threading
 import time
 
 logger = logging.getLogger(__name__)
+
+
+def _kill_ollama() -> None:
+    """Ollamaプロセスを終了してVRAM/RAMを解放する。"""
+    system = platform.system()
+    try:
+        if system == "Windows":
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ollama.exe"],
+                capture_output=True,
+                timeout=5,
+            )
+        else:
+            subprocess.run(
+                ["pkill", "-x", "ollama"],
+                capture_output=True,
+                timeout=5,
+            )
+        logger.info("Ollamaプロセスを終了しました")
+    except Exception as exc:
+        logger.warning("Ollamaプロセス終了に失敗しました: %s", exc)
+
+
+def _signal_handler(signum, frame) -> None:
+    """SIGTERMまたはSIGINT受信時にOllamaを終了してプロセスを終了する。"""
+    logger.info("シグナル %d を受信 — Ollamaを終了します", signum)
+    _kill_ollama()
+    os._exit(0)
 
 # Flaskサーバーのホスト・ポート設定
 _HOST = "127.0.0.1"  # セキュリティ上の理由でローカルホストのみにバインド
@@ -59,6 +92,11 @@ def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
 if __name__ == "__main__":
     from localforge.interface.server import create_app
 
+    # シグナルハンドラとatexitを登録（強制終了時にOllamaを確実に終了させる）
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    atexit.register(_kill_ollama)
+
     # Flaskアプリケーションを生成
     app = create_app()
 
@@ -91,6 +129,8 @@ if __name__ == "__main__":
         )
         logger.info("pywebviewウィンドウを起動します")
         webview.start(debug=False)
+        # ウィンドウが閉じられた後にOllamaを終了する
+        _kill_ollama()
     except ImportError:
         # pywebviewが利用できない環境（テスト・CI）ではブラウザで開く
         logger.warning(

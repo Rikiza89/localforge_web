@@ -36,6 +36,60 @@ function _applyRagButtonState(ragReady) {
 }
 
 // =========================================================================
+// UI ロック管理 — 生成中は操作ボタンを無効化し、停止ボタンのみ表示する
+// =========================================================================
+
+const _LOCKABLE_IDS = [
+  "generate-plan-btn", "approve-plan-btn", "edit-plan-btn", "reprompt-btn",
+  "apply-json-btn", "cancel-edit-btn",
+  "continue-generation-btn", "modify-plan-btn", "view-full-report-btn",
+  "continue-qa-btn", "generate-new-files-btn",
+  "build-index-btn", "migrate-vector-btn", "generate-report-btn",
+  "open-project-btn",
+];
+
+let _uiLocked = false;
+let _savedDisabledState = {};
+let _activeCancel = null;
+
+function _lockUI(cancelFn) {
+  if (_uiLocked) return;
+  _uiLocked = true;
+  _activeCancel = cancelFn || null;
+  _savedDisabledState = {};
+
+  _LOCKABLE_IDS.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { _savedDisabledState[id] = el.disabled; el.disabled = true; }
+  });
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    _savedDisabledState["_tab_" + btn.id] = btn.disabled;
+    btn.disabled = true;
+  });
+
+  const stopBtn = document.getElementById("global-stop-btn");
+  if (stopBtn) stopBtn.style.display = "";
+}
+
+function _unlockUI() {
+  if (!_uiLocked) return;
+  _uiLocked = false;
+  _activeCancel = null;
+
+  _LOCKABLE_IDS.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = _savedDisabledState[id] ?? false;
+  });
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.disabled = _savedDisabledState["_tab_" + btn.id] ?? false;
+  });
+  _savedDisabledState = {};
+
+  const stopBtn = document.getElementById("global-stop-btn");
+  if (stopBtn) stopBtn.style.display = "none";
+}
+
+// =========================================================================
 // タブ切替
 // =========================================================================
 
@@ -294,6 +348,7 @@ async function generatePlan() {
   _currentPlanText = "";
   updateStatusBar("プランを生成中...");
 
+  _lockUI(null);
   await startPostStream(
     "/api/generate/plan",
     { prompt },
@@ -301,6 +356,7 @@ async function generatePlan() {
     {
       onToken: (token) => { _currentPlanText += token; },
       onDone: () => {
+        _unlockUI();
         if (planStream) planStream.style.display = "none";
         renderPlanTree(_currentPlanText);
         updateStatusBar("プラン生成完了");
@@ -310,11 +366,13 @@ async function generatePlan() {
         if (textarea) textarea.value = _currentPlanText;
       },
       onError: (err) => {
+        _unlockUI();
         showAlert(`プラン生成エラー: ${err}`, "error");
         updateStatusBar("エラーが発生しました");
       },
     }
   );
+  _unlockUI();
 }
 
 /**
@@ -404,7 +462,7 @@ async function approvePlanAndGenerate() {
 
   updateStatusBar("ファイルを生成中...");
 
-  const cancelFn = startStream("/api/generate/start", genStream, {
+  const _es = startStream("/api/generate/start", genStream, {
     onProgress: (done, total, currentFile) => {
       if (genProgress) {
         genProgress.max = total;
@@ -419,6 +477,7 @@ async function approvePlanAndGenerate() {
       refreshFileTree();
     },
     onDone: () => {
+      _unlockUI();
       updateStatusBar("ファイル生成完了");
       showAlert("すべてのファイルを生成しました！", "success");
       if (genSection) genSection.style.display = "none";
@@ -427,11 +486,13 @@ async function approvePlanAndGenerate() {
       refreshGitLog();
     },
     onError: (err) => {
+      _unlockUI();
       showAlert(`生成エラー: ${err}`, "error");
       updateStatusBar("エラーが発生しました");
     },
   });
-  _cancelGenStream = cancelFn;
+  _lockUI(() => _es.close());
+  _cancelGenStream = _es;
 }
 
 // =========================================================================
@@ -466,7 +527,7 @@ async function buildIndex() {
   if (progressContainer) progressContainer.style.display = "block";
   updateStatusBar("インデックスを構築中...");
 
-  startStream("/api/explain/index", null, {
+  const _es = startStream("/api/explain/index", null, {
     onProgress: (done, total, currentFile) => {
       if (indexProgress) {
         indexProgress.max = Math.max(total, 1);
@@ -479,6 +540,7 @@ async function buildIndex() {
       }
     },
     onDone: async () => {
+      _unlockUI();
       if (progressContainer) progressContainer.style.display = "none";
       if (reportBtn) reportBtn.disabled = false;
       _indexBuilt = true;
@@ -496,11 +558,13 @@ async function buildIndex() {
       }
     },
     onError: (err) => {
+      _unlockUI();
       if (progressContainer) progressContainer.style.display = "none";
       showAlert(`インデックス構築エラー: ${err}`, "error");
       updateStatusBar("エラーが発生しました");
     },
   });
+  _lockUI(() => _es.close());
 }
 
 /**
@@ -521,7 +585,7 @@ async function migrateVectorIndex() {
   if (migrateBtn) migrateBtn.disabled = true;
   updateStatusBar("RAGベクトルインデックス移行中...");
 
-  startStream("/api/explain/migrate-vector", null, {
+  const _es = startStream("/api/explain/migrate-vector", null, {
     onProgress: (done, total, currentFile) => {
       if (indexProgress) {
         indexProgress.max = Math.max(total, 1);
@@ -534,18 +598,19 @@ async function migrateVectorIndex() {
       }
     },
     onDone: () => {
+      _unlockUI();
       if (progressContainer) progressContainer.style.display = "none";
-      if (migrateBtn) migrateBtn.disabled = false;
       updateStatusBar("RAGベクトルインデックス移行完了");
       showAlert("RAG移行完了 — セマンティック検索が有効になりました。", "success");
     },
     onError: (err) => {
+      _unlockUI();
       if (progressContainer) progressContainer.style.display = "none";
-      if (migrateBtn) migrateBtn.disabled = false;
       showAlert(`RAG移行エラー: ${err}`, "error");
       updateStatusBar("エラーが発生しました");
     },
   });
+  _lockUI(() => _es.close());
 }
 
 /**
@@ -605,7 +670,7 @@ function generateReport() {
   const _renderedSections = new Set();
   updateStatusBar("レポートを生成中...");
 
-  startStream("/api/explain/report", null, {
+  const _es = startStream("/api/explain/report", null, {
     onSection: (name) => {
       if (!reportOutput) return;
       // 同じセクションが再度来た場合（SSE再接続によるリスタート）はスキップ
@@ -643,15 +708,18 @@ function generateReport() {
       updateStatusBar(`レポート生成中: ${currentFile} (${done}/${total}セクション)`);
     },
     onDone: () => {
+      _unlockUI();
       updateStatusBar("レポート生成完了");
       showAlert("レポートが完成しました！Q&Aで質問できます。", "success");
       enableChat();
     },
     onError: (err) => {
+      _unlockUI();
       showAlert(`レポート生成エラー: ${err}`, "error");
       updateStatusBar("エラーが発生しました");
     },
   });
+  _lockUI(() => _es.close());
 }
 
 // =========================================================================
@@ -727,7 +795,7 @@ async function continueGeneration() {
 
   updateStatusBar("生成を再開中...");
 
-  startStream("/api/generate/start", genStream, {
+  const _es = startStream("/api/generate/start", genStream, {
     onProgress: (done, total, currentFile) => {
       if (genProgress) {
         genProgress.max = total;
@@ -739,16 +807,19 @@ async function continueGeneration() {
     },
     onFileWritten: () => refreshFileTree(),
     onDone: () => {
+      _unlockUI();
       updateStatusBar("生成再開完了");
       showAlert("すべてのファイルを生成しました！", "success");
       if (genSection) genSection.style.display = "none";
       refreshFileTree();
     },
     onError: (err) => {
+      _unlockUI();
       showAlert(`再開エラー: ${err}`, "error");
       updateStatusBar("エラーが発生しました");
     },
   });
+  _lockUI(() => _es.close());
 }
 
 // =========================================================================
@@ -897,6 +968,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     cancelGenBtn.addEventListener("click", async () => {
       await apiRequest("/api/generate/cancel", "POST");
       updateStatusBar("生成をキャンセルしました");
+    });
+  }
+
+  // グローバル停止ボタン
+  const globalStopBtn = document.getElementById("global-stop-btn");
+  if (globalStopBtn) {
+    globalStopBtn.addEventListener("click", () => {
+      if (_activeCancel) _activeCancel();
+      apiRequest("/api/generate/cancel", "POST").catch(() => {});
+      _unlockUI();
+      updateStatusBar("生成を停止しました");
     });
   }
 

@@ -49,6 +49,7 @@ async function sendChatMessage(question) {
 
   _chatSending = true;
   disableChat();
+  _lockUI(null);
 
   // 会話ターンのDOM要素を作成
   const historyEl = document.getElementById("chat-history");
@@ -99,6 +100,7 @@ async function sendChatMessage(question) {
         _chatHistory.push({ role: "assistant", content: answerBuffer });
         _chatSending = false;
         enableChat();
+        _unlockUI();
 
         // Q&Aをディスクに保存（エラーは無視してUIをブロックしない）
         apiRequest("/api/explain/qa-save", "POST", { question, answer: answerBuffer })
@@ -113,6 +115,7 @@ async function sendChatMessage(question) {
         aEl.style.color = "var(--danger)";
         _chatSending = false;
         enableChat();
+        _unlockUI();
       },
     }
   );
