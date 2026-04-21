@@ -475,6 +475,8 @@ class AnalysisService:
         changed_count = len(tier0_chunks) + len(files_needing_read)
         done_count = 0
         all_chunks: List[FileChunk] = list(cached_chunks)
+        # 並列埋め込みフェーズ用のキュー（新規/変更チャンクを収集）
+        embed_queue: List[FileChunk] = []
 
         # キャッシュ済みファイルをひとつずつ表示してプログレスバーを正しい位置まで進める
         for cached in cached_chunks:
@@ -491,7 +493,7 @@ class AnalysisService:
             done_count += 1
             t0_since_flush += 1
             if self._vector is not None:
-                self._vector.upsert_chunk(chunk)
+                embed_queue.append(chunk)
             yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
             if t0_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
                 try:
@@ -532,7 +534,7 @@ class AnalysisService:
                     done_count += 1
                     t1_since_flush += 1
                     if self._vector is not None:
-                        self._vector.upsert_chunk(chunk)
+                        embed_queue.append(chunk)
                     yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
                     if t1_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
                         try:
@@ -578,7 +580,7 @@ class AnalysisService:
                         all_chunks.append(chunk)
                         done_count += 1
                         if self._vector is not None:
-                            self._vector.upsert_chunk(chunk)
+                            embed_queue.append(chunk)
                         yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
                     # LLMバッチ完了ごとにディスクへフラッシュ（再起動時の復元ポイント）
                     try:
@@ -592,7 +594,39 @@ class AnalysisService:
         except Exception as exc:
             raise IndexBuildError(f"インデックス保存失敗: {exc}") from exc
 
-        # Change 6: 変更が10%未満の増分再インデックス時はProjectIndex再生成をスキップ
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        # ベクトル埋め込みフェーズ: 並列処理でChromaDBに登録
+        # キャッシュ済みチャンクのうちChromaDBから欠落しているものも追加
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        if self._vector is not None:
+            for cached in cached_chunks:
+                if cached.summary and self._vector.needs_reembedding(cached):
+                    embed_queue.append(cached)
+
+            if embed_queue:
+                embed_total = len(embed_queue)
+                embed_done = 0
+                yield {"status": f"ベクトルインデックス構築中: 0/{embed_total}"}
+
+                _vec = self._vector
+
+                def _do_embed(chunk: FileChunk) -> None:
+                    try:
+                        if _vec.needs_reembedding(chunk):
+                            _vec.upsert_chunk(chunk)
+                    except Exception as exc:
+                        logger.warning("埋め込みエラー (%s): %s", chunk.path, exc)
+
+                with ThreadPoolExecutor(max_workers=4) as embed_ex:
+                    futures = {embed_ex.submit(_do_embed, c): c for c in embed_queue}
+                    for future in as_completed(futures):
+                        future.result()
+                        embed_done += 1
+                        yield {"status": f"ベクトルインデックス構築中: {embed_done}/{embed_total}"}
+
+                yield {"status": "ベクトルインデックス完了"}
+
+        # 変更が10%未満の増分再インデックス時はProjectIndex再生成をスキップ
         pi_path = lf_dir / "project_index.json"
         existing_index = self._index_adapter.load_index(pi_path)
         should_regenerate = (
