@@ -124,6 +124,11 @@ def stream_index():
         return _sse_response(err_gen())
 
     model = project.config.model
+    if not model:
+        def err_gen():
+            yield {"error": "モデルが選択されていません。UIでモデルを選択してください"}
+        return _sse_response(err_gen())
+
     root = project.root
 
     try:
@@ -153,6 +158,11 @@ def stream_report():
         return _sse_response(err_gen())
 
     model = project.config.model
+    if not model:
+        def err_gen():
+            yield {"error": "モデルが選択されていません。UIでモデルを選択してください"}
+        return _sse_response(err_gen())
+
     root = project.root
 
     gen = explanation_svc.stream_report(root=root, model=model)

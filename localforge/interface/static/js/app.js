@@ -348,6 +348,14 @@ async function generatePlan() {
   _currentPlanText = "";
   updateStatusBar("プランを生成中...");
 
+  // UIで選択中のモデルをプロジェクト設定に同期する
+  const modelSelectEl = document.getElementById("model-selector");
+  const selectedModel = modelSelectEl ? modelSelectEl.value : null;
+  if (selectedModel) {
+    try { await apiRequest("/api/project/model", "POST", { model: selectedModel }); }
+    catch (e) { console.warn("モデル同期エラー:", e.message); }
+  }
+
   _lockUI(null);
   await startPostStream(
     "/api/generate/plan",
@@ -461,6 +469,14 @@ async function approvePlanAndGenerate() {
   if (genStream) genStream.textContent = "";
 
   updateStatusBar("ファイルを生成中...");
+
+  // UIで選択中のモデルをプロジェクト設定に同期する
+  const approveModelEl = document.getElementById("model-selector");
+  const approveModel = approveModelEl ? approveModelEl.value : null;
+  if (approveModel) {
+    try { await apiRequest("/api/project/model", "POST", { model: approveModel }); }
+    catch (e) { console.warn("モデル同期エラー:", e.message); }
+  }
 
   const _es = startStream("/api/generate/start", genStream, {
     onProgress: (done, total, currentFile) => {
@@ -794,6 +810,14 @@ async function continueGeneration() {
   if (genStream) genStream.textContent = "";
 
   updateStatusBar("生成を再開中...");
+
+  // UIで選択中のモデルをプロジェクト設定に同期する
+  const resumeModelEl = document.getElementById("model-selector");
+  const resumeModel = resumeModelEl ? resumeModelEl.value : null;
+  if (resumeModel) {
+    try { await apiRequest("/api/project/model", "POST", { model: resumeModel }); }
+    catch (e) { console.warn("モデル同期エラー:", e.message); }
+  }
 
   const _es = startStream("/api/generate/start", genStream, {
     onProgress: (done, total, currentFile) => {

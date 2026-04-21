@@ -131,6 +131,9 @@ def stream_plan():
         return jsonify({"error": "NoPrompt", "message": "プロンプトが指定されていません"}), 400
 
     model = project.config.model
+    if not model:
+        return jsonify({"error": "NoModel", "message": "モデルが選択されていません。UIでモデルを選択してください"}), 400
+
     root = project.root
 
     # ファイルツリーのテキスト表現を構築
@@ -218,6 +221,11 @@ def stream_generation():
         return _sse_response(err_gen())
 
     model = project.config.model
+    if not model:
+        def err_gen():
+            yield {"error": "モデルが選択されていません。UIでモデルを選択してください"}
+        return _sse_response(err_gen())
+
     root = project.root
     context_md = project_svc.get_context_md(root)
 
@@ -269,6 +277,9 @@ def regenerate_file():
         return jsonify({"error": "NoPlan", "message": "承認済みプランが見つかりません"}), 400
 
     model = project.config.model
+    if not model:
+        return jsonify({"error": "NoModel", "message": "モデルが選択されていません。UIでモデルを選択してください"}), 400
+
     root = project.root
     context_md = project_svc.get_context_md(root)
 
