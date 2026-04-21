@@ -138,7 +138,7 @@ class TestProjectConfig:
 
     def test_defaults(self):
         config = ProjectConfig()
-        assert config.model == "llama3.2"
+        assert config.model == ""
         assert config.token_limit == 6000
         assert config.mode == ProjectMode.GENERATE
 

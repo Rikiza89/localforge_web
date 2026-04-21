@@ -160,7 +160,7 @@ class ProjectConfig(BaseModel):
     """プロジェクトごとの設定ファイル（.localforge/config.json）のモデル。"""
     project_name: str = ""
     mode: ProjectMode = ProjectMode.GENERATE
-    model: str = "llama3.2"
+    model: str = ""
     token_limit: int = 6000
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

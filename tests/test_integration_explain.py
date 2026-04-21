@@ -25,6 +25,8 @@ class TestExplainPipelineE2E:
     def explain_env(self, python_fixture_project):
         """テスト環境を構築するフィクスチャ。"""
         mock_llm = MagicMock(spec=OllamaClient)
+        mock_llm.cuda_available = False
+        mock_llm.num_thread = None
         mock_llm.generate_sync.return_value = "モックファイルサマリー: このファイルはテスト用のモジュールです。"
 
         fs = FileSystemAdapter()
