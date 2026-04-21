@@ -634,7 +634,9 @@ function generateReport() {
     onToken: (token) => {
       if (currentSectionEl) {
         currentSectionEl.textContent += token;
-        if (reportOutput) reportOutput.scrollTop = reportOutput.scrollHeight;
+        if (reportOutput && _isNearBottom(reportOutput)) {
+          reportOutput.scrollTop = reportOutput.scrollHeight;
+        }
       }
     },
     onProgress: (done, total, currentFile) => {

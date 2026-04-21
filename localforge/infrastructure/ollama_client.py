@@ -189,6 +189,13 @@ class OllamaClient:
                     if token:
                         yield token
 
+                    # 思考モデル（Gemma, QwQ など）は "thinking" フィールドに推論トークンを持つ。
+                    # \x01 プレフィックスで思考トークンをマークし、
+                    # ルート層がメイン表示をスキップしてOllamaパネルにのみ転送する。
+                    thinking = chunk_data.get("thinking", "")
+                    if thinking:
+                        yield f"\x01{thinking}"
+
                     if chunk_data.get("done"):
                         logger.debug("Ollamaストリーミング完了")
                         break
