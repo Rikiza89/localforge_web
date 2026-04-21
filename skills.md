@@ -89,18 +89,76 @@ app.config["my_adapter"] = my_adapter
 
 **Key files**:
 - `infrastructure/vector_adapter.py` — all ChromaDB and Ollama embedding logic
-- `application/analysis_service.py` — calls `self._vector.upsert_chunk(chunk)` after each file is summarised
+- `application/analysis_service.py` — collects chunks in `embed_queue`, then embeds in parallel with `ThreadPoolExecutor(max_workers=4)` after JSONL indexing completes
 - `application/analysis_service.py:get_top_chunks_semantic()` — single entry point for all semantic search
 
 **To change embedding model**:
 - Update `_EMBED_MODEL` constant in `vector_adapter.py`
 - Delete `.localforge/chroma/` in existing projects to force re-embedding on next index run
 
+**To change embedding parallelism**:
+- Update `max_workers=4` in the `ThreadPoolExecutor` call inside `build_index()` in `analysis_service.py`
+- Higher values speed up embedding but increase Ollama memory pressure
+
 **To add metadata filters** (e.g., search only Python files):
 - Update `VectorAdapter.get_top_chunks_semantic()` to pass `where={"language": "python"}` to `self._collection.query()`
 
 **To add hybrid search** (semantic + keyword reranking):
 - In `get_top_chunks_semantic()`, after getting ChromaDB results, apply keyword scoring on top-K and re-sort
+
+**Embedding flow** (as of current implementation):
+1. Tier-0/1/2 chunks are collected into `embed_queue` during JSONL indexing (non-blocking)
+2. Cached JSONL chunks missing from ChromaDB are detected via `needs_reembedding()` and added to `embed_queue`
+3. All queued chunks are embedded in parallel after JSONL save completes
+4. Status bar events `{"status": "ベクトルインデックス構築中: X/Y"}` show progress
+
+---
+
+## Skill: Add UI Lock to a New Streaming Function
+
+**When**: You add a new frontend function that starts an SSE stream and want all action buttons disabled while it runs.
+
+**For GET streams** (`startStream` — returns an EventSource):
+```javascript
+async function myStreamFn() {
+  // Start stream first so we have the EventSource reference for the cancel fn
+  const _es = startStream("/api/my/endpoint", outputEl, {
+    onDone: () => {
+      _unlockUI();
+      // ... rest of done handler
+    },
+    onError: (err) => {
+      _unlockUI();
+      // ... rest of error handler
+    },
+  });
+  // Lock after stream starts; pass cancel fn so ⏹ 停止 can close EventSource
+  _lockUI(() => _es.close());
+}
+```
+
+**For POST streams** (`startPostStream` — async, returns cancel fn after completion):
+```javascript
+async function myPostStreamFn() {
+  _lockUI(null);   // lock before await; no client-side cancel available
+  await startPostStream("/api/my/endpoint", body, outputEl, {
+    onDone: () => {
+      _unlockUI();
+      // ...
+    },
+    onError: (err) => {
+      _unlockUI();
+      // ...
+    },
+  });
+  _unlockUI();  // safety net — idempotent if already called by onDone/onError
+}
+```
+
+**Rules**:
+- `_lockUI` is idempotent — calling it twice is safe (second call is a no-op)
+- `_unlockUI` restores each button's pre-lock `disabled` state, so buttons that were already disabled (e.g., `generate-report-btn` before an index is built) remain disabled after unlock
+- The global **⏹ 停止** button calls `_activeCancel()` (if set), signals `/api/generate/cancel`, then calls `_unlockUI()`
 
 ---
 
@@ -109,11 +167,13 @@ app.config["my_adapter"] = my_adapter
 **Symptoms**: "stream idle timeout", partial responses, frozen progress bar.
 
 **Checklist**:
-1. **Heartbeat**: `_sse_response()` in both route files emits `{"heartbeat": true}` every 15s. Verify it's present in both `generation_routes.py` and `explain_routes.py`.
-2. **Client idle timer**: `startStream()` in `stream.js` reconnects after 30s without any event. Check `IDLE_TIMEOUT = 30000`.
-3. **Large batches**: `analysis_service.py` saves JSONL every `_INCREMENTAL_SAVE_INTERVAL = 50` files. For very slow LLMs, this may still trigger timeouts — reduce to 20.
-4. **Ollama read timeout**: `_READ_TIMEOUT = 120` in `ollama_client.py`. For very large models, increase to 300+.
-5. **Flask buffering**: `X-Accel-Buffering: no` header is set in `_SSE_HEADERS`. If behind nginx, ensure `proxy_buffering off` is set.
+1. **Heartbeat**: `_sse_response()` in both route files emits `{"heartbeat": true}` every 15s via a background thread — independent of the LLM generator blocking. Verify both `generation_routes.py` and `explain_routes.py` use the thread-based version.
+2. **Client idle timer**: `startStream()` in `stream.js` reconnects after `IDLE_TIMEOUT = 300000` ms (5 min). With thread-based heartbeats this should never fire.
+3. **Ollama read timeout**: `_READ_TIMEOUT = 7200` (2h) in `ollama_client.py`. Only increase this if you're using an extremely large model.
+4. **Embedding timeout**: `_EMBED_TIMEOUT = 60` in `vector_adapter.py`. Increase if embedding calls are timing out (rare — `nomic-embed-text` is fast).
+5. **Large batches**: `analysis_service.py` saves JSONL every `_INCREMENTAL_SAVE_INTERVAL = 50` files. For very slow LLMs, reduce to 20.
+6. **Flask buffering**: `X-Accel-Buffering: no` header is set in `_SSE_HEADERS`. If behind nginx, ensure `proxy_buffering off` is set.
+7. **UI stuck locked**: If a stream exits without firing `onDone`/`onError`, click **⏹ 停止** to manually call `_unlockUI()`.
 
 ---
 
@@ -135,11 +195,38 @@ if (data.my_event !== undefined && handlers.onMyEvent) {
 
 **Call site** (`app.js`):
 ```javascript
-startStream("/api/endpoint", null, {
+const _es = startStream("/api/endpoint", null, {
     onMyEvent: (payload) => { /* handle it */ },
-    onDone: () => { ... },
+    onDone: () => { _unlockUI(); },
+    onError: (err) => { _unlockUI(); },
 });
+_lockUI(() => _es.close());
 ```
+
+**Note**: The `status` event type (`{"status": "message"}`) is already handled by `_dispatch()` and calls `updateStatusBar(data.status)` — reuse it for any text status update rather than adding a new event type.
+
+---
+
+## Skill: Support a New Thinking Model
+
+**When**: A new Ollama model exposes reasoning in a non-standard way.
+
+**Two patterns already supported**:
+
+1. **`thinking` JSON field** (Gemma, QwQ, etc.):
+   - Ollama returns `{"response": "...", "thinking": "..."}` chunks
+   - `ollama_client.py` yields thinking text with `\x01` prefix: `yield f"\x01{thinking}"`
+   - Route layer (`_sse_response`) detects `\x01`, wraps in `<think>...</think>`, emits as `raw_token` only
+   - No changes needed — handled automatically
+
+2. **`<think>` XML tags** (DeepSeek-R1, etc.):
+   - Model outputs `<think>...</think>` inline in the `response` field
+   - `OllamaPanel.appendToken()` in `stream.js` parses these tags and routes content to the thinking pane
+   - No changes needed — handled automatically
+
+**To add a new pattern**:
+- If the model uses a different field name (e.g., `"reasoning"`): add a third `yield` block in `ollama_client.py:stream_completion()` following the `thinking` field pattern
+- If the model uses different XML tags: update `OllamaPanel.appendToken()` in `stream.js` to detect them
 
 ---
 
