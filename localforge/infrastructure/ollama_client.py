@@ -20,9 +20,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BASE_URL = "http://localhost:11434"
 # HTTPリクエストのタイムアウト秒数（ストリーミング時は別途設定）
 _CONNECT_TIMEOUT = 5
-_READ_TIMEOUT = 120
-# generate_sync 用タイムアウト（大型ローカルモデル向けに長めに設定）
-_GENERATE_READ_TIMEOUT = 600
+# ストリーミング読み込みタイムアウト: 2時間（大規模プロジェクトの長時間生成に対応）
+_READ_TIMEOUT = 7200
+# generate_sync 用タイムアウト（バッチサマリー生成など同期呼び出し用）
+_GENERATE_READ_TIMEOUT = 7200
 
 
 def _detect_cuda() -> bool:
