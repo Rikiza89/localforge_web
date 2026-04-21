@@ -9,6 +9,25 @@
 // Ollamaライブ出力パネル
 // =========================================================================
 
+/**
+ * スクロール位置がボトムから threshold px 以内かどうかを返す。
+ * @param {HTMLElement} el
+ * @param {number} threshold
+ * @returns {boolean}
+ */
+function _isNearBottom(el, threshold = 80) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+}
+
+/**
+ * ユーザーが既にボトム付近にいる場合のみスクロールする。
+ * 手動でスクロールアップ中の場合は何もしない。
+ * @param {HTMLElement} el
+ */
+function _autoScroll(el) {
+  if (_isNearBottom(el)) el.scrollTop = el.scrollHeight;
+}
+
 const OllamaPanel = (() => {
   let _inThinkBlock = false;
   let _thinkingVisible = false;
@@ -31,13 +50,13 @@ const OllamaPanel = (() => {
         const thinkStart = remaining.indexOf("<think>");
         if (thinkStart === -1) {
           const el = _normalEl();
-          if (el) { el.textContent += remaining; el.scrollTop = el.scrollHeight; }
+          if (el) { el.textContent += remaining; _autoScroll(el); }
           break;
         }
         const before = remaining.slice(0, thinkStart);
         if (before) {
           const el = _normalEl();
-          if (el) { el.textContent += before; el.scrollTop = el.scrollHeight; }
+          if (el) { el.textContent += before; _autoScroll(el); }
         }
         _inThinkBlock = true;
         remaining = remaining.slice(thinkStart + "<think>".length);
@@ -45,13 +64,13 @@ const OllamaPanel = (() => {
         const thinkEnd = remaining.indexOf("</think>");
         if (thinkEnd === -1) {
           const el = _thinkingContent();
-          if (el) { el.textContent += remaining; el.parentElement.scrollTop = el.parentElement.scrollHeight; }
+          if (el) { el.textContent += remaining; _autoScroll(el.parentElement); }
           break;
         }
         const thinkText = remaining.slice(0, thinkEnd);
         if (thinkText) {
           const el = _thinkingContent();
-          if (el) { el.textContent += thinkText; el.parentElement.scrollTop = el.parentElement.scrollHeight; }
+          if (el) { el.textContent += thinkText; _autoScroll(el.parentElement); }
         }
         _inThinkBlock = false;
         remaining = remaining.slice(thinkEnd + "</think>".length);
@@ -162,7 +181,7 @@ function startStream(url, outputEl, handlers) {
     if (data.token !== undefined) {
       if (outputEl) {
         outputEl.textContent += data.token;
-        outputEl.scrollTop = outputEl.scrollHeight;
+        _autoScroll(outputEl);
       }
       if (handlers.onToken) handlers.onToken(data.token);
       return;
@@ -289,7 +308,7 @@ async function startPostStream(url, body, outputEl, handlers) {
         if (data.token !== undefined) {
           if (outputEl) {
             outputEl.textContent += data.token;
-            outputEl.scrollTop = outputEl.scrollHeight;
+            _autoScroll(outputEl);
           }
           if (handlers.onToken) handlers.onToken(data.token);
         }

@@ -83,7 +83,14 @@ def _sse_response(generator):
                 if payload is None:
                     break
                 if "token" in payload:
-                    yield f"data: {json.dumps({'raw_token': payload['token']}, ensure_ascii=False)}\n\n"
+                    tok = payload["token"]
+                    if tok.startswith("\x01"):
+                        # 思考トークン: Ollamaパネル専用（メイン表示には送らない）
+                        thinking_text = tok[1:]
+                        yield f"data: {json.dumps({'raw_token': '<think>' + thinking_text + '</think>'}, ensure_ascii=False)}\n\n"
+                        continue  # メイン token イベントを送出しない
+                    else:
+                        yield f"data: {json.dumps({'raw_token': tok}, ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         finally:
             stop.set()
