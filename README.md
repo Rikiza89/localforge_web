@@ -10,6 +10,19 @@ A production-grade, fully local Python desktop application that serves as an AI-
 2. **Resume** — Continue and extend any existing project (LocalForge-generated or foreign)
 3. **Explain** — Deeply analyze any codebase, produce a structured intelligence report, and answer questions interactively
 
+### RAG-Powered Code Intelligence
+
+LocalForge uses **Retrieval-Augmented Generation (RAG)** for the Explain mode:
+- Every file is summarized and embedded into a **ChromaDB** vector store using `nomic-embed-text:latest`
+- Q&A and report generation retrieve the most semantically relevant file summaries rather than scanning everything
+- Embeddings are built **in parallel** (4 concurrent workers) after the JSONL indexing phase — status bar shows progress
+- Incremental: only changed files are re-indexed and re-embedded on subsequent runs
+- Fallback: if ChromaDB or the embedding model is unavailable, keyword search is used automatically
+
+### Thinking Model Support
+
+Models that expose a `thinking` field (e.g., Gemma) have their reasoning streamed to the **Ollama live panel** (collapsible right sidebar) without polluting the main generation output. Models using `<think>` XML tags (e.g., DeepSeek-R1) are also supported.
+
 ## Prerequisites
 
 ### 1. Install Ollama
@@ -18,6 +31,12 @@ Download and install Ollama from [https://ollama.com](https://ollama.com), then 
 
 ```bash
 ollama pull llama3.2
+```
+
+For RAG-powered Explain mode, also pull the embedding model:
+
+```bash
+ollama pull nomic-embed-text:latest
 ```
 
 Start the Ollama server (runs automatically on most systems):
@@ -62,6 +81,7 @@ python main.py
 This will:
 1. Start a Flask server on `http://127.0.0.1:7331`
 2. Open a native desktop window via pywebview
+3. On close, automatically terminate the Ollama process to free VRAM/RAM
 
 If pywebview is not available, open your browser to `http://127.0.0.1:7331` manually.
 
@@ -73,7 +93,9 @@ If pywebview is not available, open your browser to `http://127.0.0.1:7331` manu
 2. Type your project description in the prompt area
 3. Click **Generate Plan** to create an AI-generated project structure
 4. Review the plan, edit if needed, then click **Approve & Generate**
-5. Watch as LocalForge generates each file sequentially with git commits
+5. Watch as LocalForge generates each file with git commits
+
+> During any generation, all action buttons are disabled and a **⏹ 停止** button appears in the header. Click it to stop generation and unlock the UI immediately.
 
 ### Resume Mode
 
@@ -84,9 +106,10 @@ Opens automatically when a previously-worked project folder is detected:
 ### Explain Mode
 
 Opens automatically when a code-containing folder without `.localforge/` is detected:
-1. Click **Build Index** to analyze the codebase (incremental re-indexing supported)
-2. Click **Generate Report** to create an 11-section intelligence report
-3. Use the **Q&A Chat** at the bottom to ask questions about the codebase
+1. Click **⚙ インデックス構築** to analyze the codebase (incremental re-indexing supported)
+2. The indexing phase runs in two steps: LLM summary generation → parallel RAG embedding
+3. Click **レポート生成** to create an 11-section intelligence report
+4. Use the **Q&A Chat** to ask questions about the codebase
 
 ## Architecture
 
@@ -94,18 +117,22 @@ Opens automatically when a code-containing folder without `.localforge/` is dete
 localforge/
 ├── domain/           # Models, ports (interfaces), exceptions
 ├── application/      # Business logic services
-├── infrastructure/   # Ollama client, filesystem, git, index adapters
+├── infrastructure/   # Ollama client, filesystem, git, index, vector adapters
 └── interface/        # Flask routes, Jinja2 templates, static assets
 ```
 
 ### Key Design Decisions
 
 - **Clean Architecture**: Strict layer separation — no business logic in routes
-- **SSE Streaming**: All LLM output streamed via Server-Sent Events
+- **SSE Streaming**: All LLM output streamed via Server-Sent Events with thread-based heartbeats (every 15s, independent of LLM blocking)
 - **Incremental Indexing**: Only re-processes files that have changed (mtime + size check)
+- **Parallel RAG Embedding**: `ThreadPoolExecutor(max_workers=4)` embeds chunks into ChromaDB after JSONL indexing; status bar shows `ベクトルインデックス構築中: X/Y`
+- **Auto-Heal ChromaDB**: If `.localforge/chroma/` is missing or stale, `build_index()` automatically backfills it from the existing JSONL index
+- **UI Lock**: All action buttons are disabled during any active stream; a global stop button (`⏹ 停止`) lets users cancel immediately
 - **Token Budget Guard**: Every LLM call checks token budget before execution
-- **Parallel Summarization**: `ThreadPoolExecutor(max_workers=3)` for file analysis
-- **Hybrid File Reading**: Files >200 lines use structural landmarks (AST for Python)
+- **Hybrid File Reading**: Files >200 lines use structural landmarks (AST for Python, regex for JS/TS)
+- **Thinking Model Support**: Models emitting a `thinking` field (Gemma) or `<think>` tags (DeepSeek) have their reasoning routed to the Ollama live panel
+- **Ollama Cleanup**: Ollama process is killed on app close via SIGTERM handler, atexit, and post-webview shutdown call
 
 ## `.localforge/` Directory
 
@@ -117,7 +144,10 @@ Each project gets a `.localforge/` metadata directory:
 ├── context.md            # Rolling project memory
 ├── project_index.json    # Master project summary document
 ├── index.jsonl           # Per-file summaries (incremental index)
+├── chroma/               # ChromaDB vector collection (RAG embeddings)
 ├── generation_log.jsonl  # LLM interaction log
+├── report.md             # Saved explanation report
+├── qa_history.md         # Q&A conversation log
 └── app.log               # Rotating application log (not git-tracked)
 ```
 
@@ -128,11 +158,14 @@ pip install pytest pytest-mock
 python -m pytest tests/ -v
 ```
 
+Tests use mock adapters — no real Ollama, ChromaDB, or filesystem access required.
+
 ## Security
 
 - Flask binds to `127.0.0.1` only — never accessible from the network
 - File access API validates paths against project root (no path traversal)
 - All LLM calls routed through `ollama_client.py` only
+- ChromaDB telemetry disabled (`anonymized_telemetry=False`)
 
 ## Configuration
 
