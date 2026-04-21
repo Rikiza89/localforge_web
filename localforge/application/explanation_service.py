@@ -100,8 +100,8 @@ class ExplanationService:
                 }
             }
 
-            # セクションに関連するチャンクを選択
-            relevant_chunks = self._analysis.get_top_chunks_by_keywords(
+            # セクションに関連するチャンクを選択（セマンティック検索 → キーワードフォールバック）
+            relevant_chunks = self._analysis.get_top_chunks_semantic(
                 chunks, section_name, top_n=5
             )
             relevant_summaries = [
@@ -193,8 +193,8 @@ class ExplanationService:
         )
         chunks = project_index.file_chunks
 
-        # キーワードで上位5件を選択
-        top_chunks = self._analysis.get_top_chunks_by_keywords(chunks, question, top_n=5)
+        # セマンティック検索で上位5件を選択（ChromaDB未使用時はキーワードフォールバック）
+        top_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=5)
 
         # ハイブリッドファイルのフルコンテンツ（top_5のうちhybridのもの）
         full_contents: List[tuple[str, str]] = []

@@ -45,9 +45,18 @@ def _get_git() -> GitAdapter:
 
 
 def _sse_response(generator):
-    """SSEレスポンスを生成する。"""
+    """SSEレスポンスを生成する。tokenイベントごとにraw_tokenも送出する。"""
+    import time
+
     def wrapped():
+        last_heartbeat = time.time()
         for payload in generator:
+            now = time.time()
+            if now - last_heartbeat >= 15:
+                yield f"data: {json.dumps({'heartbeat': True})}\n\n"
+                last_heartbeat = now
+            if "token" in payload:
+                yield f"data: {json.dumps({'raw_token': payload['token']})}\n\n"
             yield f"data: {json.dumps(payload)}\n\n"
 
     return Response(

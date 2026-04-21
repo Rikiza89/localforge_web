@@ -1192,3 +1192,127 @@ progress::-moz-progress-bar {
   display: flex;
   gap: 6px;
 }
+
+/* =========================================================================
+   Ollamaライブ出力パネル（固定位置オーバーレイ）
+   ========================================================================= */
+.ollama-panel {
+  position: fixed;
+  top: var(--header-h);
+  right: 0;
+  width: 320px;
+  height: calc(100vh - var(--header-h) - var(--status-h));
+  z-index: 900;
+  display: flex;
+  flex-direction: row;
+  pointer-events: none;
+  transition: transform 0.25s ease;
+}
+
+.ollama-panel.collapsed {
+  transform: translateX(320px);
+}
+
+.ollama-panel-tab {
+  pointer-events: all;
+  position: absolute;
+  left: -28px;
+  top: 50%;
+  transform: translateY(-50%) rotate(-90deg);
+  transform-origin: center center;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  padding: 5px 10px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  letter-spacing: 0.05em;
+  transition: color 0.15s, background 0.15s;
+}
+
+.ollama-panel-tab:hover,
+.ollama-panel.active .ollama-panel-tab {
+  color: var(--accent);
+  background: var(--bg-secondary);
+}
+
+.ollama-tab-label {
+  display: inline-block;
+}
+
+.ollama-panel-body {
+  pointer-events: all;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.ollama-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  flex-shrink: 0;
+}
+
+.ollama-panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ollama-panel-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.ollama-output {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ollama-thinking {
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-style: italic;
+  flex: 0 0 40%;
+  max-height: 40%;
+}
+
+.ollama-thinking-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+}
+
+/* アクティブ（ストリーミング中）インジケーター */
+.ollama-panel.streaming .ollama-panel-tab {
+  color: var(--success);
+}
+
+.ollama-panel.streaming .ollama-panel-tab::before {
+  content: "● ";
+  color: var(--success);
+}

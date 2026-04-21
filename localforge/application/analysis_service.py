@@ -30,6 +30,7 @@ from localforge.infrastructure.filesystem_adapter import (
 )
 from localforge.infrastructure.index_adapter import IndexAdapter
 from localforge.infrastructure.ollama_client import OllamaClient
+from localforge.infrastructure.vector_adapter import VectorAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +302,7 @@ class AnalysisService:
         index_adapter: IndexAdapter,
         llm: OllamaClient,
         context: ContextService,
+        vector: Optional[VectorAdapter] = None,
     ) -> None:
         """
         AnalysisServiceを初期化する。
@@ -310,11 +312,13 @@ class AnalysisService:
             index_adapter: インデックスアダプター
             llm: OllamaクライアントLLMバックエンド
             context: コンテキストサービス
+            vector: ベクトルインデックスアダプター（省略可能）
         """
         self._fs = fs
         self._index_adapter = index_adapter
         self._llm = llm
         self._context = context
+        self._vector = vector
 
     def read_file_chunk(self, path: Path, root: Path) -> FileChunk:
         """
@@ -407,6 +411,14 @@ class AnalysisService:
         else:
             logger.info("インデックス構築: CPU推論モード")
 
+        # ベクトルインデックス初期化
+        if self._vector is not None:
+            try:
+                self._vector.init_collection(root)
+            except Exception as exc:
+                logger.warning("ChromaDB初期化失敗（スキップ）: %s", exc)
+                self._vector = None
+
         # 既存チャンクを読み込んでmtime+sizeでキャッシュを作成
         existing_chunks = self._index_adapter.load_chunks(index_path)
         chunk_cache: dict[str, FileChunk] = {
@@ -478,6 +490,8 @@ class AnalysisService:
             all_chunks.append(chunk)
             done_count += 1
             t0_since_flush += 1
+            if self._vector is not None:
+                self._vector.upsert_chunk(chunk)
             yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
             if t0_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
                 try:
@@ -517,6 +531,8 @@ class AnalysisService:
                     all_chunks.append(chunk)
                     done_count += 1
                     t1_since_flush += 1
+                    if self._vector is not None:
+                        self._vector.upsert_chunk(chunk)
                     yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
                     if t1_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
                         try:
@@ -561,6 +577,8 @@ class AnalysisService:
                         chunk.indexed_at = datetime.utcnow()
                         all_chunks.append(chunk)
                         done_count += 1
+                        if self._vector is not None:
+                            self._vector.upsert_chunk(chunk)
                         yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
                     # LLMバッチ完了ごとにディスクへフラッシュ（再起動時の復元ポイント）
                     try:
@@ -724,6 +742,73 @@ class AnalysisService:
         """
         pi_path = root / _LOCALFORGE_DIR / "project_index.json"
         return self._index_adapter.load_index(pi_path)
+
+    def migrate_vector_index(self, root: Path) -> Generator[dict, None, None]:
+        """
+        既存のJSONLインデックスからChromaDBベクトルインデックスへ移行する。
+        サマリーが存在するチャンクのみ埋め込みを生成する。
+        移行中は進捗をSSEイベントとして生成する。
+
+        Args:
+            root: プロジェクトルート
+
+        Yields:
+            SSEペイロード辞書
+        """
+        if self._vector is None:
+            yield {"error": "VectorAdapterが設定されていません"}
+            return
+
+        lf_dir = root / _LOCALFORGE_DIR
+        index_path = lf_dir / "index.jsonl"
+        chunks = self._index_adapter.load_chunks(index_path)
+
+        if not chunks:
+            yield {"error": "インデックスが見つかりません。先にインデックスを構築してください。"}
+            return
+
+        try:
+            self._vector.init_collection(root)
+        except Exception as exc:
+            yield {"error": f"ChromaDB初期化エラー: {exc}"}
+            return
+
+        chunks_with_summary = [c for c in chunks if c.summary]
+        total = len(chunks_with_summary)
+        yield {"progress": {"done": 0, "total": total, "current_file": ""}}
+
+        done = 0
+        for chunk in chunks_with_summary:
+            if self._vector.needs_reembedding(chunk):
+                self._vector.upsert_chunk(chunk)
+            done += 1
+            yield {"progress": {"done": done, "total": total, "current_file": chunk.path}}
+
+        yield {"progress": {"done": total, "total": total, "current_file": "完了"}}
+        yield {"done": True}
+
+    def get_top_chunks_semantic(
+        self,
+        chunks: List[FileChunk],
+        query: str,
+        top_n: int = 5,
+    ) -> List[FileChunk]:
+        """
+        セマンティック検索でFileChunkをランキングして上位N件を返す。
+        VectorAdapterが利用可能な場合は埋め込みベクトル検索を使用し、
+        そうでない場合はキーワードフォールバックを使用する。
+
+        Args:
+            chunks: 全FileChunkのリスト
+            query: 検索クエリ文字列
+            top_n: 返す件数
+
+        Returns:
+            上位N件のFileChunkリスト
+        """
+        if self._vector is not None and self._vector.is_initialized():
+            return self._vector.get_top_chunks_semantic(chunks, query, top_n)
+        return self.get_top_chunks_by_keywords(chunks, query, top_n)
 
     def get_top_chunks_by_keywords(
         self,

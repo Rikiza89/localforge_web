@@ -42,9 +42,18 @@ def _get_explanation_svc() -> ExplanationService:
 
 
 def _sse_response(generator):
-    """SSEレスポンスを生成する。"""
+    """SSEレスポンスを生成する。tokenイベントごとにraw_tokenも送出する。"""
+    import time
+
     def wrapped():
+        last_heartbeat = time.time()
         for payload in generator:
+            now = time.time()
+            if now - last_heartbeat >= 15:
+                yield f"data: {json.dumps({'heartbeat': True}, ensure_ascii=False)}\n\n"
+                last_heartbeat = now
+            if "token" in payload:
+                yield f"data: {json.dumps({'raw_token': payload['token']}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     return Response(
@@ -209,6 +218,28 @@ def get_saved_report():
         return jsonify({"content": content})
     except OSError as exc:
         return jsonify({"error": "ReadError", "message": str(exc)}), 500
+
+
+@bp.route("/migrate-vector", methods=["GET"])
+def migrate_vector_index():
+    """
+    既存のJSONLインデックスからChromaDBベクトルインデックスへ移行する。
+    インデックス済みプロジェクトを初めてRAGに移行する際に使用する。
+    進捗をSSEストリーミングで返す。
+
+    SSE Events:
+        progress, done, error
+    """
+    project_svc = _get_project_svc()
+    analysis_svc = _get_analysis_svc()
+    project = project_svc.current_project
+    if not project:
+        def err_gen():
+            yield {"error": "プロジェクトが開かれていません"}
+        return _sse_response(err_gen())
+
+    gen = analysis_svc.migrate_vector_index(root=project.root)
+    return _sse_response(gen)
 
 
 @bp.route("/summary", methods=["GET"])

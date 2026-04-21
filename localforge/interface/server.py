@@ -20,6 +20,7 @@ from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
 from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
 from localforge.infrastructure.ollama_client import OllamaClient
+from localforge.infrastructure.vector_adapter import VectorAdapter
 
 # ログレベル設定
 _LOG_FORMAT = (
@@ -87,6 +88,7 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     git = GitAdapter()
     index_adapter = IndexAdapter()
     llm = OllamaClient()
+    vector = VectorAdapter()
 
     # ---------------------------------------------------------------------------
     # アプリケーション層のサービスを構築
@@ -94,7 +96,7 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     context_svc = ContextService()
     project_svc = ProjectService(fs=fs, git=git, index=index_adapter)
     analysis_svc = AnalysisService(
-        fs=fs, index_adapter=index_adapter, llm=llm, context=context_svc
+        fs=fs, index_adapter=index_adapter, llm=llm, context=context_svc, vector=vector
     )
     explanation_svc = ExplanationService(
         analysis=analysis_svc, llm=llm, context=context_svc
@@ -122,6 +124,7 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     app.config["llm"] = llm
     app.config["git"] = git
     app.config["fs"] = fs
+    app.config["vector"] = vector
 
     # ---------------------------------------------------------------------------
     # ブループリントの登録
