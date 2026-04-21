@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 from pathlib import Path
 from typing import List
 
@@ -41,20 +43,50 @@ def _get_explanation_svc() -> ExplanationService:
     return current_app.config["explanation_service"]
 
 
-def _sse_response(generator):
-    """SSEレスポンスを生成する。tokenイベントごとにraw_tokenも送出する。"""
-    import time
+_HEARTBEAT_INTERVAL = 15  # 秒
 
+_HB = {"heartbeat": True}
+_HB_LINE = f"data: {json.dumps(_HB, ensure_ascii=False)}\n\n"
+
+
+def _sse_response(generator):
+    """
+    SSEレスポンスを生成する。
+    ハートビートはバックグラウンドスレッドからキューに投入するため、
+    LLM呼び出しでジェネレーターがブロックされていても15秒ごとに送出される。
+    """
     def wrapped():
-        last_heartbeat = time.time()
-        for payload in generator:
-            now = time.time()
-            if now - last_heartbeat >= 15:
-                yield f"data: {json.dumps({'heartbeat': True}, ensure_ascii=False)}\n\n"
-                last_heartbeat = now
-            if "token" in payload:
-                yield f"data: {json.dumps({'raw_token': payload['token']}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        q: queue.Queue = queue.Queue()
+        stop = threading.Event()
+
+        def _produce():
+            try:
+                for payload in generator:
+                    if stop.is_set():
+                        break
+                    q.put(payload)
+            except Exception as exc:
+                q.put({"error": str(exc)})
+            finally:
+                q.put(None)  # 終了センチネル
+
+        def _heartbeat():
+            while not stop.wait(_HEARTBEAT_INTERVAL):
+                q.put(_HB)
+
+        threading.Thread(target=_produce, daemon=True).start()
+        threading.Thread(target=_heartbeat, daemon=True).start()
+
+        try:
+            while True:
+                payload = q.get()
+                if payload is None:
+                    break
+                if "token" in payload:
+                    yield f"data: {json.dumps({'raw_token': payload['token']}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        finally:
+            stop.set()
 
     return Response(
         stream_with_context(wrapped()),

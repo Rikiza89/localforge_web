@@ -601,13 +601,29 @@ function generateReport() {
   if (reportOutput) reportOutput.innerHTML = "";
 
   let currentSectionEl = null;
+  // 重複セクション防止: 既にレンダリング済みのセクション名を追跡する
+  const _renderedSections = new Set();
   updateStatusBar("レポートを生成中...");
 
   startStream("/api/explain/report", null, {
     onSection: (name) => {
       if (!reportOutput) return;
+      // 同じセクションが再度来た場合（SSE再接続によるリスタート）はスキップ
+      if (_renderedSections.has(name)) {
+        // 既存のセクション要素を currentSectionEl として再利用してトークンを追記する
+        const existing = reportOutput.querySelector(`h3[data-section="${CSS.escape(name)}"]`);
+        if (existing) {
+          currentSectionEl = existing.nextElementSibling
+            ? existing.nextElementSibling.nextElementSibling
+            : null;
+        }
+        return;
+      }
+      _renderedSections.add(name);
+
       const h3 = document.createElement("h3");
       h3.textContent = name;
+      h3.dataset.section = name;
       const hr = document.createElement("hr");
       reportOutput.appendChild(h3);
       reportOutput.appendChild(hr);

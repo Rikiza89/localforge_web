@@ -116,7 +116,9 @@ function startStream(url, outputEl, handlers) {
   let es = null;
   let _closed = false;
   let _idleTimer = null;
-  const IDLE_TIMEOUT = 30000;
+  // 5分 — モデルロード時間を考慮した余裕のあるタイムアウト。
+  // スレッドベースのハートビート（15秒間隔）が正常に機能すれば実際には発火しない。
+  const IDLE_TIMEOUT = 300000;
 
   function _resetIdle() {
     if (_idleTimer) clearTimeout(_idleTimer);
