@@ -5,6 +5,100 @@
 
 "use strict";
 
+// =========================================================================
+// Ollamaライブ出力パネル
+// =========================================================================
+
+const OllamaPanel = (() => {
+  let _inThinkBlock = false;
+  let _thinkingVisible = false;
+
+  function _normalEl() { return document.getElementById("ollama-output-normal"); }
+  function _thinkingEl() { return document.getElementById("ollama-output-thinking"); }
+  function _thinkingContent() { return document.getElementById("ollama-thinking-content"); }
+  function _panel() { return document.getElementById("ollama-panel"); }
+
+  function appendToken(token) {
+    const panel = _panel();
+    if (!panel) return;
+
+    panel.classList.add("streaming");
+
+    // <think>...</think> タグ検出
+    let remaining = token;
+    while (remaining.length > 0) {
+      if (!_inThinkBlock) {
+        const thinkStart = remaining.indexOf("<think>");
+        if (thinkStart === -1) {
+          const el = _normalEl();
+          if (el) { el.textContent += remaining; el.scrollTop = el.scrollHeight; }
+          break;
+        }
+        const before = remaining.slice(0, thinkStart);
+        if (before) {
+          const el = _normalEl();
+          if (el) { el.textContent += before; el.scrollTop = el.scrollHeight; }
+        }
+        _inThinkBlock = true;
+        remaining = remaining.slice(thinkStart + "<think>".length);
+      } else {
+        const thinkEnd = remaining.indexOf("</think>");
+        if (thinkEnd === -1) {
+          const el = _thinkingContent();
+          if (el) { el.textContent += remaining; el.parentElement.scrollTop = el.parentElement.scrollHeight; }
+          break;
+        }
+        const thinkText = remaining.slice(0, thinkEnd);
+        if (thinkText) {
+          const el = _thinkingContent();
+          if (el) { el.textContent += thinkText; el.parentElement.scrollTop = el.parentElement.scrollHeight; }
+        }
+        _inThinkBlock = false;
+        remaining = remaining.slice(thinkEnd + "</think>".length);
+      }
+    }
+  }
+
+  function markDone() {
+    const panel = _panel();
+    if (panel) panel.classList.remove("streaming");
+    _inThinkBlock = false;
+  }
+
+  function clear() {
+    const normal = _normalEl();
+    const thinking = _thinkingContent();
+    if (normal) normal.textContent = "";
+    if (thinking) thinking.textContent = "";
+    _inThinkBlock = false;
+    markDone();
+  }
+
+  function toggleThinking() {
+    _thinkingVisible = !_thinkingVisible;
+    const el = _thinkingEl();
+    const btn = document.getElementById("ollama-thinking-toggle");
+    if (el) el.classList.toggle("hidden", !_thinkingVisible);
+    if (btn) btn.textContent = _thinkingVisible ? "思考を隠す" : "思考を表示";
+  }
+
+  function init() {
+    const toggleBtn = document.getElementById("ollama-panel-toggle");
+    const panel = _panel();
+    if (toggleBtn && panel) {
+      toggleBtn.addEventListener("click", () => {
+        panel.classList.toggle("collapsed");
+      });
+    }
+    const thinkingBtn = document.getElementById("ollama-thinking-toggle");
+    if (thinkingBtn) thinkingBtn.addEventListener("click", toggleThinking);
+    const clearBtn = document.getElementById("ollama-clear-btn");
+    if (clearBtn) clearBtn.addEventListener("click", clear);
+  }
+
+  return { appendToken, markDone, clear, init };
+})();
+
 /**
  * SSEストリームを開始する。
  * @param {string} url - SSEエンドポイントURL
@@ -19,25 +113,46 @@
  * @returns {EventSource} 開いたEventSourceインスタンス
  */
 function startStream(url, outputEl, handlers) {
-  const es = new EventSource(url);
+  let es = null;
+  let _closed = false;
+  let _idleTimer = null;
+  const IDLE_TIMEOUT = 30000;
 
-  es.onmessage = (event) => {
-    let data;
-    try {
-      data = JSON.parse(event.data);
-    } catch (e) {
-      console.warn("SSEデータのJSONパースエラー:", event.data);
+  function _resetIdle() {
+    if (_idleTimer) clearTimeout(_idleTimer);
+    _idleTimer = setTimeout(() => {
+      if (!_closed) {
+        console.warn("SSEアイドルタイムアウト — 再接続します");
+        es.close();
+        es = _open();
+      }
+    }, IDLE_TIMEOUT);
+  }
+
+  function _dispatch(data) {
+    _resetIdle();
+
+    if (data.heartbeat) return;
+
+    if (data.raw_token !== undefined) {
+      OllamaPanel.appendToken(data.raw_token);
       return;
     }
 
     if (data.done) {
+      _closed = true;
+      if (_idleTimer) clearTimeout(_idleTimer);
       es.close();
+      OllamaPanel.markDone();
       if (handlers.onDone) handlers.onDone();
       return;
     }
 
     if (data.error) {
+      _closed = true;
+      if (_idleTimer) clearTimeout(_idleTimer);
       es.close();
+      OllamaPanel.markDone();
       if (handlers.onError) handlers.onError(data.error);
       return;
     }
@@ -71,13 +186,25 @@ function startStream(url, outputEl, handlers) {
       updateStatusBar(data.status);
       return;
     }
-  };
+  }
 
-  es.onerror = () => {
-    es.close();
-    if (handlers.onError) handlers.onError("SSE接続エラーが発生しました。");
-  };
+  function _open() {
+    const source = new EventSource(url);
+    source.onmessage = (event) => {
+      let data;
+      try { data = JSON.parse(event.data); }
+      catch (e) { console.warn("SSEデータのJSONパースエラー:", event.data); return; }
+      _dispatch(data);
+    };
+    source.onerror = () => {
+      source.close();
+      if (!_closed && handlers.onError) handlers.onError("SSE接続エラーが発生しました。");
+    };
+    _resetIdle();
+    return source;
+  }
 
+  es = _open();
   return es;
 }
 
@@ -140,11 +267,20 @@ async function startPostStream(url, body, outputEl, handlers) {
           continue;
         }
 
+        if (data.heartbeat) continue;
+
+        if (data.raw_token !== undefined) {
+          OllamaPanel.appendToken(data.raw_token);
+          continue;
+        }
+
         if (data.done) {
+          OllamaPanel.markDone();
           if (handlers.onDone) handlers.onDone();
           return cancel;
         }
         if (data.error) {
+          OllamaPanel.markDone();
           if (handlers.onError) handlers.onError(data.error);
           return cancel;
         }

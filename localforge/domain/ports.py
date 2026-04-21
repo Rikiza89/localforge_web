@@ -208,6 +208,43 @@ class GitPort(Protocol):
         ...
 
 
+class VectorIndexPort(Protocol):
+    """ベクトルインデックスの永続化・検索を抽象化するポートインターフェース。"""
+
+    def init_collection(self, project_root: Path) -> None:
+        """プロジェクトルートに対応するコレクションを初期化する。"""
+        ...
+
+    def is_initialized(self) -> bool:
+        """コレクションが初期化済みかどうかを返す。"""
+        ...
+
+    def collection_exists(self, project_root: Path) -> bool:
+        """ディスク上にコレクションが存在するかどうかを返す。"""
+        ...
+
+    def upsert_chunk(self, chunk: "FileChunk") -> bool:
+        """FileChunkをベクトルインデックスに追加または更新する。"""
+        ...
+
+    def needs_reembedding(self, chunk: "FileChunk") -> bool:
+        """チャンクの再埋め込みが必要かどうかを返す。"""
+        ...
+
+    def migrate_from_chunks(self, chunks: "List[FileChunk]") -> int:
+        """既存チャンクリストからベクトルインデックスへ一括移行する。"""
+        ...
+
+    def get_top_chunks_semantic(
+        self,
+        all_chunks: "List[FileChunk]",
+        query: str,
+        top_n: int = 5,
+    ) -> "List[FileChunk]":
+        """クエリに意味的に近い上位N件のFileChunkを返す。"""
+        ...
+
+
 class IndexPort(Protocol):
     """ProjectIndexの永続化を抽象化するポートインターフェース。"""
 

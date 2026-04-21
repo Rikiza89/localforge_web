@@ -144,6 +144,12 @@ async function refreshContextPanel() {
         <div class="index-stat" style="margin-top:6px; color:var(--text-muted); font-size:11px;">${(summary.summary || "").slice(0, 120)}...</div>
       `;
     }
+    // インデックスが存在する場合はRAG移行ボタンと生成ボタンを有効化
+    const reportBtn = document.getElementById("generate-report-btn");
+    if (reportBtn) reportBtn.disabled = false;
+    const migrateBtn = document.getElementById("migrate-vector-btn");
+    if (migrateBtn) migrateBtn.disabled = false;
+    _indexBuilt = true;
   } catch (e) {
     // インデックスが存在しない場合はスキップ
   }
@@ -427,6 +433,8 @@ async function buildIndex() {
       if (reportBtn) reportBtn.disabled = false;
       _indexBuilt = true;
       updateStatusBar("インデックス構築完了");
+      const migrateBtn = document.getElementById("migrate-vector-btn");
+      if (migrateBtn) migrateBtn.disabled = false;
       refreshContextPanel();
 
       // 保存済みレポートがあればロードしてQ&Aをそのまま有効化する
@@ -441,6 +449,51 @@ async function buildIndex() {
     onError: (err) => {
       if (progressContainer) progressContainer.style.display = "none";
       showAlert(`インデックス構築エラー: ${err}`, "error");
+      updateStatusBar("エラーが発生しました");
+    },
+  });
+}
+
+/**
+ * 既存のJSONLインデックスをChromaDBベクトルインデックスへ移行する。
+ */
+async function migrateVectorIndex() {
+  if (!_currentProjectRoot) {
+    showAlert("先にフォルダを開いてください。", "warning");
+    return;
+  }
+
+  const progressContainer = document.getElementById("index-progress-container");
+  const indexProgress = document.getElementById("index-progress");
+  const progressLabel = document.getElementById("index-progress-label");
+  const migrateBtn = document.getElementById("migrate-vector-btn");
+
+  if (progressContainer) progressContainer.style.display = "block";
+  if (migrateBtn) migrateBtn.disabled = true;
+  updateStatusBar("RAGベクトルインデックス移行中...");
+
+  startStream("/api/explain/migrate-vector", null, {
+    onProgress: (done, total, currentFile) => {
+      if (indexProgress) {
+        indexProgress.max = Math.max(total, 1);
+        indexProgress.value = done;
+      }
+      if (progressLabel) {
+        progressLabel.textContent = total > 0
+          ? `RAG移行: ${done} / ${total}: ${currentFile}`
+          : "RAGベクトルインデックス移行中...";
+      }
+    },
+    onDone: () => {
+      if (progressContainer) progressContainer.style.display = "none";
+      if (migrateBtn) migrateBtn.disabled = false;
+      updateStatusBar("RAGベクトルインデックス移行完了");
+      showAlert("RAG移行完了 — セマンティック検索が有効になりました。", "success");
+    },
+    onError: (err) => {
+      if (progressContainer) progressContainer.style.display = "none";
+      if (migrateBtn) migrateBtn.disabled = false;
+      showAlert(`RAG移行エラー: ${err}`, "error");
       updateStatusBar("エラーが発生しました");
     },
   });
@@ -787,6 +840,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   const generateReportBtn = document.getElementById("generate-report-btn");
   if (generateReportBtn) generateReportBtn.addEventListener("click", generateReport);
 
+  const migrateVectorBtn = document.getElementById("migrate-vector-btn");
+  if (migrateVectorBtn) migrateVectorBtn.addEventListener("click", migrateVectorIndex);
+
   // Resumeタブのボタン
   const continueGenBtn = document.getElementById("continue-generation-btn");
   if (continueGenBtn) continueGenBtn.addEventListener("click", continueGeneration);
@@ -865,6 +921,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (cpuAutoBtn) {
     cpuAutoBtn.addEventListener("click", () => applyCpuThread(null));
   }
+
+  // Ollamaライブ出力パネル初期化
+  OllamaPanel.init();
 
   // 初期化: モデル一覧とCPU情報を読み込む
   await loadModels();

@@ -116,6 +116,27 @@
     </footer>
   </div>
 
+  <!-- Ollamaライブ出力パネル（固定位置オーバーレイ、右端） -->
+  <div id="ollama-panel" class="ollama-panel collapsed">
+    <button id="ollama-panel-toggle" class="ollama-panel-tab" title="Ollamaライブ出力">
+      <span class="ollama-tab-label">Ollama</span>
+    </button>
+    <div class="ollama-panel-body">
+      <div class="ollama-panel-header">
+        <span class="ollama-panel-title">Ollamaライブ出力</span>
+        <div class="ollama-panel-actions">
+          <button id="ollama-thinking-toggle" class="btn btn-secondary btn-sm" title="思考トークンを表示">思考を表示</button>
+          <button id="ollama-clear-btn" class="btn btn-secondary btn-sm" title="クリア">クリア</button>
+        </div>
+      </div>
+      <div id="ollama-output-normal" class="ollama-output"></div>
+      <div id="ollama-output-thinking" class="ollama-output ollama-thinking hidden">
+        <div class="ollama-thinking-label">— 思考トークン —</div>
+        <div id="ollama-thinking-content"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- ファイル内容モーダル -->
   <div class="modal-overlay" id="file-modal" style="display:none;">
     <div class="modal">
