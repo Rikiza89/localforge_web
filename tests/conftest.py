@@ -67,6 +67,8 @@ def mock_llm() -> MagicMock:
     mock = MagicMock(spec=OllamaClient)
     mock.is_available.return_value = True
     mock.list_models.return_value = ["llama3.2", "codellama"]
+    mock.cuda_available = False
+    mock.num_thread = None
 
     def fake_stream(model, prompt, system=None):
         yield '{"project_name": "test", "description": "test", "files": []}'
@@ -119,13 +121,41 @@ def generation_service(fs_adapter, git_adapter, index_adapter, mock_llm, context
 
 
 @pytest.fixture
+def mock_vector() -> MagicMock:
+    """
+    VectorAdapterのモックを返すフィクスチャ。
+    テスト時にChromaDBへの実際の接続を避けるために使用する。
+    """
+    from localforge.infrastructure.vector_adapter import VectorAdapter
+    mock = MagicMock(spec=VectorAdapter)
+    mock.needs_reembedding.return_value = True
+    mock.upsert_chunk.return_value = True
+    mock.collection_exists.return_value = True
+    mock.get_top_chunks_semantic.return_value = []
+    return mock
+
+
+@pytest.fixture
 def analysis_service(fs_adapter, index_adapter, mock_llm, context_service) -> AnalysisService:
-    """AnalysisServiceのインスタンスを返すフィクスチャ（LLMはモック）。"""
+    """AnalysisServiceのインスタンスを返すフィクスチャ（LLMはモック、Vectorなし）。"""
     return AnalysisService(
         fs=fs_adapter,
         index_adapter=index_adapter,
         llm=mock_llm,
         context=context_service,
+        vector=None,
+    )
+
+
+@pytest.fixture
+def analysis_service_with_vector(fs_adapter, index_adapter, mock_llm, context_service, mock_vector) -> AnalysisService:
+    """VectorAdapterモックつきAnalysisServiceのインスタンスを返すフィクスチャ。"""
+    return AnalysisService(
+        fs=fs_adapter,
+        index_adapter=index_adapter,
+        llm=mock_llm,
+        context=context_service,
+        vector=mock_vector,
     )
 
 

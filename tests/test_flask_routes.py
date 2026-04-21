@@ -232,8 +232,73 @@ class TestExplainRoutes:
         assert data["project_name"] == "test_project"
         assert "summary" in data
 
+    def test_summary_includes_rag_ready_field(self, flask_client, tmp_path):
+        """サマリーレスポンスにrag_readyフィールドが含まれることをテスト。"""
+        from localforge.domain.models import ProjectIndex
+        from localforge.infrastructure.index_adapter import IndexAdapter
+
+        lf_dir = tmp_path / ".localforge"
+        lf_dir.mkdir()
+        index = ProjectIndex(
+            project_root=str(tmp_path),
+            project_name="rag_test",
+            summary="RAGテスト",
+            total_files=3,
+            indexed_files=3,
+        )
+        IndexAdapter().save_index(lf_dir / "project_index.json", index)
+
+        project_svc = flask_client.application.config["project_service"]
+        project_svc.open_project(tmp_path)
+
+        response = flask_client.get("/api/explain/summary")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "rag_ready" in data
+        assert isinstance(data["rag_ready"], bool)
+
     def test_main_page_returns_html(self, flask_client):
         """メインページがHTMLを返すことをテスト。"""
         response = flask_client.get("/")
         assert response.status_code == 200
         assert b"LocalForge" in response.data
+
+
+class TestProjectOllamaStatus:
+    """Ollamaステータスエンドポイントのテスト。"""
+
+    def test_ollama_status_endpoint_returns_available_field(self, flask_client):
+        """ollama-statusエンドポイントがavailableフィールドを返すことをテスト。"""
+        llm = flask_client.application.config["llm"]
+        llm.is_available = MagicMock(return_value=True)
+        llm.list_models = MagicMock(return_value=["llama3.2"])
+
+        response = flask_client.get("/api/project/ollama-status")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "available" in data
+        assert isinstance(data["available"], bool)
+
+    def test_ollama_status_endpoint_when_available(self, flask_client):
+        """Ollamaが利用可能な場合のステータスをテスト。"""
+        llm = flask_client.application.config["llm"]
+        llm.is_available = MagicMock(return_value=True)
+        llm.list_models = MagicMock(return_value=["llama3.2", "codellama"])
+
+        response = flask_client.get("/api/project/ollama-status")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["available"] is True
+        assert "models" in data
+        assert isinstance(data["models"], list)
+
+    def test_ollama_status_endpoint_when_unavailable(self, flask_client):
+        """Ollamaが利用不可の場合のステータスをテスト。"""
+        llm = flask_client.application.config["llm"]
+        llm.is_available = MagicMock(return_value=False)
+        llm.list_models = MagicMock(side_effect=Exception("Connection refused"))
+
+        response = flask_client.get("/api/project/ollama-status")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["available"] is False
