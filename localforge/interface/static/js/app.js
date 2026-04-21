@@ -227,6 +227,39 @@ async function loadModels() {
   }
 }
 
+/**
+ * 起動時にOllamaの接続状態を確認し、問題があれば永続バナーを表示する。
+ */
+async function checkOllamaHealth() {
+  try {
+    const data = await apiRequest("/api/project/ollama-status");
+    if (!data.available) {
+      _showOllamaWarning(data.error || "Ollamaサーバーに接続できません。");
+      return;
+    }
+    if (data.models.length === 0) {
+      _showOllamaWarning(
+        "Ollamaは起動していますがモデルがありません。" +
+        " ターミナルで ollama pull <モデル名> を実行してください。"
+      );
+      return;
+    }
+    // 正常: ステータスバーにモデル数を表示
+    updateStatusBar(`Ollama OK — ${data.models.length} モデル利用可能`);
+  } catch (err) {
+    _showOllamaWarning("Ollamaヘルスチェックに失敗しました: " + err.message);
+  }
+}
+
+/**
+ * Ollamaの問題を通知する永続バナーを表示する（手動で閉じるまで消えない）。
+ * @param {string} message
+ */
+function _showOllamaWarning(message) {
+  updateStatusBar("⚠ Ollama 未接続");
+  showAlert("⚠ Ollama: " + message, "error", 0); // timeout=0 → 自動消去しない
+}
+
 // =========================================================================
 // Generate タブのロジック
 // =========================================================================
@@ -944,5 +977,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 初期化: モデル一覧とCPU情報を読み込む
   await loadModels();
   await loadCpuThreadInfo();
+
+  // 起動時Ollamaヘルスチェック
+  await checkOllamaHealth();
+
   updateStatusBar("LocalForge 準備完了 — フォルダを開いてください");
 });

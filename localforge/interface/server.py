@@ -149,5 +149,21 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
         """メインSPAシェルを返す。"""
         return render_template("index.html")
 
+    # ---------------------------------------------------------------------------
+    # 起動時Ollamaヘルスチェック
+    # ---------------------------------------------------------------------------
+    if llm.is_available():
+        try:
+            models = llm.list_models()
+            logger.info("Ollama接続確認: OK — 利用可能なモデル: %s", models)
+        except Exception as exc:
+            logger.warning("Ollama接続: サーバーは起動中だがモデル一覧取得失敗: %s", exc)
+    else:
+        logger.error(
+            "Ollama接続失敗: http://localhost:11434 に到達できません。"
+            " Ollamaが起動していることを確認してください。"
+            " アプリは起動しますが、LLM機能はすべて使用不可です。"
+        )
+
     logger.info("LocalForge Flaskアプリケーション初期化完了")
     return app

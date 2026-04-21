@@ -302,3 +302,36 @@ def set_num_thread():
         "num_thread": llm.num_thread,
         "cpu_count": os.cpu_count(),
     })
+
+
+@bp.route("/ollama-status", methods=["GET"])
+def ollama_status():
+    """
+    Ollamaサーバーの状態と利用可能なモデル一覧を返す。
+    フロントエンドが起動時ヘルスチェックに使用する。
+
+    Response JSON:
+        available (bool): Ollamaサーバーが接続可能かどうか
+        models (list[str]): 利用可能なモデル名のリスト
+        error (str|null): エラーメッセージ（利用不可の場合）
+    """
+    llm = _get_llm()
+    if not llm.is_available():
+        return jsonify({
+            "available": False,
+            "models": [],
+            "error": "Ollamaサーバーに接続できません。Ollamaが起動しているか確認してください。",
+        })
+    try:
+        models = llm.list_models()
+        return jsonify({
+            "available": True,
+            "models": models,
+            "error": None,
+        })
+    except Exception as exc:
+        return jsonify({
+            "available": True,
+            "models": [],
+            "error": f"モデル一覧の取得に失敗しました: {exc}",
+        })
