@@ -125,6 +125,7 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     app.config["git"] = git
     app.config["fs"] = fs
     app.config["vector"] = vector
+    app.config["index_adapter"] = index_adapter
 
     # ---------------------------------------------------------------------------
     # ブループリントの登録

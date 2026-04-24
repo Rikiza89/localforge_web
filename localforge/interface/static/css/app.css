@@ -1413,3 +1413,59 @@ progress::-moz-progress-bar {
   border-top: 1px solid var(--border);
   margin: 8px 0;
 }
+
+/* =========================================================================
+   プランビューワー — NEW/EDIT バッジ・サマリー・変更ノート (D + F)
+   ========================================================================= */
+
+/* F: AIプランサマリー（Markdownレンダリング済み） */
+.plan-summary {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 3px;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* D: NEW / EDIT アクションバッジ */
+.plan-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 1px;
+}
+
+.plan-badge-new {
+  background: rgba(78, 201, 176, 0.15);
+  color: var(--success);
+  border: 1px solid rgba(78, 201, 176, 0.5);
+}
+
+.plan-badge-edit {
+  background: rgba(206, 145, 120, 0.15);
+  color: var(--warning);
+  border: 1px solid rgba(206, 145, 120, 0.5);
+}
+
+/* plan-file-item: badge が入るので flex-wrap 対応 */
+.plan-file-item {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  row-gap: 2px;
+}
+
+/* D: 修正内容ノート（modification_notes） */
+.plan-mod-notes {
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding-left: 54px;
+  line-height: 1.4;
+}

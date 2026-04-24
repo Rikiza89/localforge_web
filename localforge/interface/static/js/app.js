@@ -385,11 +385,28 @@ async function generatePlan() {
 
 /**
  * 生成プランをビジュアルツリーとしてレンダリングする。
- * @param {string} planText - プランのJSON文字列
+ * LLMが出力するMarkdownサマリー（F）を上部に表示し、
+ * ファイルリストにはNEW/EDITバッジ（D）を付与する。
+ * @param {string} planText - プランテキスト（Markdownサマリー + ```json...``` ブロック）
  */
 function renderPlanTree(planText) {
   const treeEl = document.getElementById("plan-tree");
+  const summaryEl = document.getElementById("plan-summary");
   if (!treeEl) return;
+
+  // F: ```json ブロック前のMarkdownサマリーを抽出して表示
+  const jsonBlockIdx = planText.indexOf("```json");
+  const plainBlockIdx = planText.indexOf("```");
+  const firstBlockIdx = jsonBlockIdx >= 0 ? jsonBlockIdx : plainBlockIdx;
+  if (summaryEl) {
+    const md = firstBlockIdx > 0 ? planText.slice(0, firstBlockIdx).trim() : "";
+    if (md) {
+      summaryEl.innerHTML = _renderMd(md);
+      summaryEl.style.display = "block";
+    } else {
+      summaryEl.style.display = "none";
+    }
+  }
 
   // JSONを抽出してパース
   let data = null;
@@ -426,12 +443,16 @@ function renderPlanTree(planText) {
     treeEl.appendChild(header);
   }
 
+  // D: NEW / EDIT バッジ付きでファイルリストをレンダリング
   files.forEach(f => {
+    const isModify = f.action === "modify";
     const item = document.createElement("div");
     item.className = "plan-file-item";
     item.innerHTML = `
+      <span class="plan-badge ${isModify ? "plan-badge-edit" : "plan-badge-new"}">${isModify ? "EDIT" : "NEW"}</span>
       <span class="plan-file-path">${escapeHtml(f.path || "")}</span>
       <span class="plan-file-desc">${escapeHtml(f.description || "")}</span>
+      ${f.modification_notes ? `<span class="plan-mod-notes">${escapeHtml(f.modification_notes)}</span>` : ""}
     `;
     treeEl.appendChild(item);
   });
@@ -945,6 +966,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       const planSection = document.getElementById("plan-section");
       if (planSection) planSection.style.display = "none";
       _currentPlanText = "";
+      const summaryEl = document.getElementById("plan-summary");
+      if (summaryEl) { summaryEl.innerHTML = ""; summaryEl.style.display = "none"; }
     });
   }
 

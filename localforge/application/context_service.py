@@ -85,9 +85,11 @@ class ContextService:
         file_tree_text: str,
         context_md: str,
         git_log: str,
+        file_summaries: Optional[List[tuple[str, str]]] = None,
     ) -> str:
         """
-        プロジェクト生成プランのプロンプトを組み立てる。
+        プロジェクト生成・改善プランのプロンプトを組み立てる。
+        既存プロジェクトのインデックスサマリーがある場合はRAGコンテキストとして注入する。
 
         Args:
             user_prompt: ユーザーの自然言語プロンプト
@@ -95,6 +97,7 @@ class ContextService:
             file_tree_text: ファイルツリーのテキスト表現
             context_md: context.mdの内容
             git_log: gitログ（直近5コミット）
+            file_summaries: RAG検索で選出した既存ファイルサマリーのリスト（任意）
 
         Returns:
             組み立てたプロンプト文字列
@@ -104,6 +107,14 @@ class ContextService:
         ]
         if file_tree_text.strip():
             parts.append(f"現在のファイル構成:\n{file_tree_text}")
+
+        # E: RAG-based existing file summaries for context-awareness
+        if file_summaries:
+            used = [(p, s) for p, s in file_summaries if s][:25]
+            if used:
+                summaries_text = "\n".join(f"- {p}: {s}" for p, s in used)
+                parts.append(f"既存ファイルの内容サマリー（関連度順）:\n{summaries_text}")
+
         if context_md.strip():
             parts.append(f"プロジェクトコンテキスト:\n{context_md}")
         if git_log.strip():
@@ -111,7 +122,12 @@ class ContextService:
 
         parts.append(
             f"\nユーザーの要求:\n{user_prompt}\n\n"
-            "上記の要求を実現するためのプロジェクトファイル構成計画を以下のJSON形式で出力してください。\n"
+            "まず、このプランで何をするかを2〜3文のMarkdown形式で簡潔に説明してください"
+            "（新規作成ファイル数・修正ファイル数・主な変更点を含む）。\n"
+            "その後、以下のJSON形式でプランを出力してください。\n"
+            "既存ファイルを改善・修正する場合は action を \"modify\" にして"
+            " modification_notes に変更内容を具体的に記述してください。\n"
+            "新規ファイルは action を \"create\" にしてください。\n"
             "```json\n"
             "{\n"
             '  "project_name": "プロジェクト名",\n'
@@ -120,12 +136,13 @@ class ContextService:
             '    {\n'
             '      "path": "相対ファイルパス",\n'
             '      "description": "このファイルの役割・内容の説明",\n'
+            '      "action": "create または modify",\n'
+            '      "modification_notes": "修正の場合: 変更内容の詳細（新規ファイルはnull）",\n'
             '      "dependencies": ["依存するファイルパスのリスト"]\n'
             '    }\n'
             '  ]\n'
             "}\n"
-            "```\n"
-            "JSONのみを出力し、それ以外のテキストは含めないでください。"
+            "```"
         )
 
         prompt = "\n\n".join(parts)
@@ -186,6 +203,65 @@ class ContextService:
 
         prompt = "\n\n".join(parts)
         return self._guard_budget(prompt, f"generate_file:{target_file}")
+
+    def build_file_edit_prompt(
+        self,
+        target_file: str,
+        modification_notes: str,
+        existing_content: str,
+        context_md: str,
+        plan_json: str,
+        dependency_contents: List[tuple[str, str]],
+    ) -> str:
+        """
+        既存ファイル編集のプロンプトを組み立てる。
+        既存のファイル内容と変更指示を渡し、LLMに修正済み完全ソースを出力させる。
+
+        Args:
+            target_file: 編集対象ファイルの相対パス
+            modification_notes: 何をどう変更するかの具体的な説明
+            existing_content: 現在のファイル内容
+            context_md: context.mdの内容
+            plan_json: 承認済みプランのJSON文字列
+            dependency_contents: [(依存ファイルパス, 内容)] のリスト
+
+        Returns:
+            組み立てたプロンプト文字列
+        """
+        parts = [
+            f"編集対象ファイル: {target_file}",
+            f"変更内容: {modification_notes}",
+            f"現在のファイル内容:\n{existing_content}",
+        ]
+
+        if context_md.strip():
+            parts.append(f"プロジェクトコンテキスト:\n{context_md}")
+        if plan_json.strip():
+            parts.append(f"プロジェクト全体の計画:\n{plan_json}")
+
+        dep_parts: List[str] = []
+        for dep_path, dep_content in dependency_contents:
+            dep_parts.append(f"--- {dep_path} ---\n{dep_content}")
+
+        available = self._token_limit - _estimate_tokens("\n\n".join(parts))
+        for dep_text in dep_parts:
+            if _estimate_tokens(dep_text) < available:
+                parts.append(f"依存ファイル:\n{dep_text}")
+                available -= _estimate_tokens(dep_text)
+            else:
+                logger.warning(
+                    "トークン予算不足のため依存ファイルを省略: %s", dep_text[:100]
+                )
+                break
+
+        parts.append(
+            f"\n上記の変更内容を反映した {target_file} の完全なソースコードを出力してください。"
+            " 変更に関係のない部分も含め、ファイル全体を出力してください。"
+            " マークダウンのコードブロック（```）は使用せず、ソースコードだけを出力してください。"
+        )
+
+        prompt = "\n\n".join(parts)
+        return self._guard_budget(prompt, f"edit_file:{target_file}")
 
     def build_context_update_prompt(
         self,
