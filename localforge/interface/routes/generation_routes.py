@@ -13,6 +13,7 @@ from pathlib import Path
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
+from localforge.application.analysis_service import AnalysisService
 from localforge.application.generation_service import (
     GenerationService,
     request_cancel,
@@ -21,6 +22,7 @@ from localforge.application.generation_service import (
 from localforge.application.project_service import ProjectService
 from localforge.domain.exceptions import LocalForgeError, PlanParseError
 from localforge.infrastructure.git_adapter import GitAdapter
+from localforge.infrastructure.index_adapter import IndexAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,14 @@ def _get_project_svc() -> ProjectService:
 
 def _get_git() -> GitAdapter:
     return current_app.config["git"]
+
+
+def _get_analysis_svc() -> AnalysisService:
+    return current_app.config["analysis_service"]
+
+
+def _get_index_adapter() -> IndexAdapter:
+    return current_app.config["index_adapter"]
 
 
 _HEARTBEAT_INTERVAL = 15  # 秒
@@ -144,6 +154,19 @@ def stream_plan():
         f"- {e['hash']} {e['message']}" for e in git_log_entries
     )
 
+    # E: RAGで既存ファイルの関連サマリーを取得してプランプロンプトに注入する
+    file_summaries = []
+    try:
+        index_path = root / ".localforge" / "index.jsonl"
+        chunks = _get_index_adapter().load_chunks(index_path)
+        if chunks:
+            top_chunks = _get_analysis_svc().get_top_chunks_semantic(
+                chunks, user_prompt, top_n=15
+            )
+            file_summaries = [(c.path, c.summary) for c in top_chunks if c.summary]
+    except Exception as exc:
+        logger.warning("RAGファイルサマリー取得エラー: %s", exc)
+
     gen = generation_svc.stream_plan(
         root=root,
         model=model,
@@ -152,6 +175,7 @@ def stream_plan():
         file_tree_text=file_tree_text,
         context_md=context_md,
         git_log=git_log,
+        file_summaries=file_summaries,
     )
     return _sse_response(gen)
 

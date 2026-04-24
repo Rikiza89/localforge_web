@@ -1,16 +1,16 @@
 <!-- プラン生成・承認UIコンポーネント -->
 <div class="plan-viewer">
   <div class="workspace-header">
-    <h2>Generate — 新しいプロジェクトを生成</h2>
+    <h2>Generate — プロジェクトを生成・改善</h2>
   </div>
 
   <!-- プロンプト入力エリア -->
   <div class="prompt-section">
-    <label for="generate-prompt" class="field-label">プロジェクトの説明</label>
+    <label for="generate-prompt" class="field-label">プロジェクトの説明・改善要求</label>
     <textarea
       id="generate-prompt"
       class="prompt-input"
-      placeholder="例: FlaskとSQLiteを使ったTodoアプリを作ってください。ユーザー認証、タスク管理、REST APIを含めてください。"
+      placeholder="例（新規）: FlaskとSQLiteを使ったTodoアプリを作ってください。&#10;例（改善）: エラーハンドリングを改善して、型ヒントを追加してください。&#10;例（質問）: このプロジェクトの問題点を分析して改善プランを作成してください。"
       rows="5"
     ></textarea>
     <div class="prompt-actions">
@@ -31,7 +31,10 @@
       </div>
     </div>
 
-    <!-- プランのビジュアルツリー -->
+    <!-- F: AIによるプランサマリー（Markdownレンダリング） -->
+    <div class="plan-summary md-body" id="plan-summary" style="display:none;"></div>
+
+    <!-- プランのビジュアルツリー（NEW/EDIT バッジ付き） -->
     <div class="plan-tree" id="plan-tree"></div>
 
     <!-- 編集可能な生JSONテキストエリア -->

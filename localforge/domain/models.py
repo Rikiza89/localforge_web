@@ -65,6 +65,8 @@ class PlannedFile(BaseModel):
     path: str
     description: str
     dependencies: List[str] = Field(default_factory=list)
+    action: Literal["create", "modify"] = "create"
+    modification_notes: Optional[str] = None
 
 
 class GenerationPlan(BaseModel):

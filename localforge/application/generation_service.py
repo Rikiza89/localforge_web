@@ -79,9 +79,11 @@ class GenerationService:
         file_tree_text: str,
         context_md: str,
         git_log: str,
+        file_summaries: Optional[List[tuple[str, str]]] = None,
     ) -> Generator[dict, None, None]:
         """
         ユーザープロンプトからプロジェクト生成プランをストリーミング生成する。
+        既存プロジェクトのRAGサマリーがあれば渡すことでコンテキスト精度が上がる。
 
         Args:
             root: プロジェクトルート
@@ -91,6 +93,7 @@ class GenerationService:
             file_tree_text: ファイルツリーのテキスト表現
             context_md: context.mdの内容
             git_log: gitログテキスト
+            file_summaries: RAGで選出した既存ファイルサマリーのリスト（任意）
 
         Yields:
             SSEペイロード辞書（token, done, error）
@@ -102,6 +105,7 @@ class GenerationService:
             file_tree_text=file_tree_text,
             context_md=context_md,
             git_log=git_log,
+            file_summaries=file_summaries,
         )
 
         start_time = time.time()
@@ -173,6 +177,8 @@ class GenerationService:
                         path=f.get("path", ""),
                         description=f.get("description", ""),
                         dependencies=f.get("dependencies", []),
+                        action=f.get("action", "create"),
+                        modification_notes=f.get("modification_notes"),
                     )
                     for f in data.get("files", [])
                 ],
@@ -215,6 +221,9 @@ class GenerationService:
             except Exception as exc:
                 logger.warning("git init失敗: %s", exc)
 
+        # .bak ファイルを git 管理対象外にする（.gitignore への追記）
+        self._ensure_bak_ignored(root)
+
         for idx, planned_file in enumerate(files[start_idx:], start=start_idx):
             if _cancel_flag:
                 yield {"error": "キャンセルされました"}
@@ -239,21 +248,39 @@ class GenerationService:
                     except Exception:
                         pass
 
-            # ファイル生成プロンプトを組み立て
-            prompt = self._context.build_file_generation_prompt(
-                target_file=planned_file.path,
-                target_description=planned_file.description,
-                context_md=context_md,
-                plan_json=plan_json,
-                dependency_contents=dependency_contents,
-            )
+            # action に応じてプロンプトとコミットメッセージを選択
+            file_path = root / planned_file.path
+            is_modify = planned_file.action == "modify" and file_path.exists()
+
+            if is_modify:
+                existing_content = self._create_backup(file_path)
+                prompt = self._context.build_file_edit_prompt(
+                    target_file=planned_file.path,
+                    modification_notes=planned_file.modification_notes or planned_file.description,
+                    existing_content=existing_content,
+                    context_md=context_md,
+                    plan_json=plan_json,
+                    dependency_contents=dependency_contents,
+                )
+                commit_message = f"LocalForge: {planned_file.path} を編集"
+                operation = "edit_file"
+            else:
+                prompt = self._context.build_file_generation_prompt(
+                    target_file=planned_file.path,
+                    target_description=planned_file.description,
+                    context_md=context_md,
+                    plan_json=plan_json,
+                    dependency_contents=dependency_contents,
+                )
+                commit_message = f"LocalForge: {planned_file.path} を生成"
+                operation = "generate_file"
 
             # ログエントリを生成開始として記録
             log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
             log_entry = GenerationLogEntry(
                 mode="generate",
                 model=model,
-                operation="generate_file",
+                operation=operation,
                 file_path=planned_file.path,
                 status="pending",
             )
@@ -278,7 +305,6 @@ class GenerationService:
             file_content = "".join(file_content_parts)
 
             # ファイルを書き込み
-            file_path = root / planned_file.path
             try:
                 self._fs.write_text(file_path, file_content)
             except Exception as exc:
@@ -288,10 +314,7 @@ class GenerationService:
 
             # ファイルを即座にgitコミット
             try:
-                self._git.commit_all(
-                    root,
-                    f"LocalForge: {planned_file.path} を生成",
-                )
+                self._git.commit_all(root, commit_message)
             except Exception as exc:
                 logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
 
@@ -349,13 +372,30 @@ class GenerationService:
                 except Exception:
                     pass
 
-        prompt = self._context.build_file_generation_prompt(
-            target_file=planned_file.path,
-            target_description=planned_file.description,
-            context_md=context_md,
-            plan_json=plan.model_dump_json(indent=2),
-            dependency_contents=dependency_contents,
-        )
+        full_path = root / planned_file.path
+        is_modify = planned_file.action == "modify" and full_path.exists()
+
+        if is_modify:
+            self._ensure_bak_ignored(root)
+            existing_content = self._create_backup(full_path)
+            prompt = self._context.build_file_edit_prompt(
+                target_file=planned_file.path,
+                modification_notes=planned_file.modification_notes or planned_file.description,
+                existing_content=existing_content,
+                context_md=context_md,
+                plan_json=plan.model_dump_json(indent=2),
+                dependency_contents=dependency_contents,
+            )
+            commit_message = f"LocalForge: {planned_file.path} を再編集"
+        else:
+            prompt = self._context.build_file_generation_prompt(
+                target_file=planned_file.path,
+                target_description=planned_file.description,
+                context_md=context_md,
+                plan_json=plan.model_dump_json(indent=2),
+                dependency_contents=dependency_contents,
+            )
+            commit_message = f"LocalForge: {planned_file.path} を再生成"
 
         file_content_parts: List[str] = []
         try:
@@ -370,7 +410,6 @@ class GenerationService:
             return
 
         file_content = "".join(file_content_parts)
-        full_path = root / planned_file.path
         try:
             self._fs.write_text(full_path, file_content)
         except Exception as exc:
@@ -378,15 +417,49 @@ class GenerationService:
             return
 
         try:
-            self._git.commit_all(
-                root,
-                f"LocalForge: {planned_file.path} を再生成",
-            )
+            self._git.commit_all(root, commit_message)
         except Exception as exc:
             logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
 
         yield {"file_written": planned_file.path}
         yield {"done": True}
+
+    def _ensure_bak_ignored(self, root: Path) -> None:
+        """
+        .gitignore に *.bak エントリがなければ追記して、
+        バックアップファイルが誤ってgit管理されないようにする。
+        """
+        gitignore = root / ".gitignore"
+        try:
+            existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+            if "*.bak" not in existing:
+                with gitignore.open("a", encoding="utf-8") as fh:
+                    fh.write("\n# LocalForge バックアップファイル\n*.bak\n")
+        except Exception as exc:
+            logger.warning(".gitignore への *.bak 追記失敗: %s", exc)
+
+    def _create_backup(self, file_path: Path) -> str:
+        """
+        ファイルを編集前に .bak ファイルとしてバックアップし、
+        既存コンテンツを返す。ファイルが存在しない場合は空文字列を返す。
+
+        Args:
+            file_path: バックアップするファイルのフルパス
+
+        Returns:
+            既存ファイルの内容（存在しない場合は空文字列）
+        """
+        if not file_path.exists():
+            return ""
+        try:
+            existing = self._fs.read_text(file_path)
+            backup_path = file_path.with_suffix(file_path.suffix + ".bak")
+            self._fs.write_text(backup_path, existing)
+            logger.info("バックアップ作成: %s", backup_path)
+            return existing
+        except Exception as exc:
+            logger.warning("バックアップ作成失敗 [%s]: %s", file_path, exc)
+            return ""
 
     def _update_log_status(
         self, log_path: Path, file_path: str, elapsed_ms: float
