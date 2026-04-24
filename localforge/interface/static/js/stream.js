@@ -31,6 +31,8 @@ function _autoScroll(el) {
 const OllamaPanel = (() => {
   let _inThinkBlock = false;
   let _thinkingVisible = false;
+  let _normalBuf = "";
+  let _thinkBuf = "";
 
   function _normalEl() { return document.getElementById("ollama-output-normal"); }
   function _thinkingEl() { return document.getElementById("ollama-output-thinking"); }
@@ -49,28 +51,32 @@ const OllamaPanel = (() => {
       if (!_inThinkBlock) {
         const thinkStart = remaining.indexOf("<think>");
         if (thinkStart === -1) {
+          _normalBuf += remaining;
           const el = _normalEl();
-          if (el) { el.textContent += remaining; _autoScroll(el); }
+          if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
           break;
         }
         const before = remaining.slice(0, thinkStart);
         if (before) {
+          _normalBuf += before;
           const el = _normalEl();
-          if (el) { el.textContent += before; _autoScroll(el); }
+          if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
         }
         _inThinkBlock = true;
         remaining = remaining.slice(thinkStart + "<think>".length);
       } else {
         const thinkEnd = remaining.indexOf("</think>");
         if (thinkEnd === -1) {
+          _thinkBuf += remaining;
           const el = _thinkingContent();
-          if (el) { el.textContent += remaining; _autoScroll(el.parentElement); }
+          if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
           break;
         }
         const thinkText = remaining.slice(0, thinkEnd);
         if (thinkText) {
+          _thinkBuf += thinkText;
           const el = _thinkingContent();
-          if (el) { el.textContent += thinkText; _autoScroll(el.parentElement); }
+          if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
         }
         _inThinkBlock = false;
         remaining = remaining.slice(thinkEnd + "</think>".length);
@@ -85,10 +91,12 @@ const OllamaPanel = (() => {
   }
 
   function clear() {
+    _normalBuf = "";
+    _thinkBuf = "";
     const normal = _normalEl();
     const thinking = _thinkingContent();
-    if (normal) normal.textContent = "";
-    if (thinking) thinking.textContent = "";
+    if (normal) normal.innerHTML = "";
+    if (thinking) thinking.innerHTML = "";
     _inThinkBlock = false;
     markDone();
   }
@@ -382,6 +390,19 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/**
+ * MarkdownテキストをHTMLにレンダリングする。
+ * marked.jsが利用可能な場合は変換し、なければエスケープしてpreで囲む。
+ * @param {string} text
+ * @returns {string} HTML文字列
+ */
+function _renderMd(text) {
+  if (typeof marked !== "undefined") {
+    return marked.parse(text || "");
+  }
+  return "<pre>" + escapeHtml(text || "") + "</pre>";
 }
 
 /**

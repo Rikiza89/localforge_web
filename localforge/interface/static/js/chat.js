@@ -64,7 +64,7 @@ async function sendChatMessage(question) {
   turn.appendChild(qEl);
 
   const aEl = document.createElement("div");
-  aEl.className = "chat-a";
+  aEl.className = "chat-a md-body";
   aEl.textContent = "回答生成中...";
   turn.appendChild(aEl);
 
@@ -88,11 +88,11 @@ async function sendChatMessage(question) {
     {
       onToken: (token) => {
         if (isFirstToken) {
-          aEl.textContent = "";
+          aEl.innerHTML = "";
           isFirstToken = false;
         }
         answerBuffer += token;
-        aEl.textContent = answerBuffer;
+        aEl.innerHTML = _renderMd(answerBuffer);
         historyEl.scrollTop = historyEl.scrollHeight;
       },
       onDone: () => {
@@ -111,8 +111,8 @@ async function sendChatMessage(question) {
         if (input) input.focus();
       },
       onError: (err) => {
-        aEl.textContent = `[エラー: ${err}]`;
-        aEl.style.color = "var(--danger)";
+        aEl.innerHTML = `<span style="color:var(--danger)">[エラー: ${escapeHtml(String(err))}]</span>`;
+        aEl.style.color = "";
         _chatSending = false;
         enableChat();
         _unlockUI();

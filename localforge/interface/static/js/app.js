@@ -642,27 +642,7 @@ async function loadSavedReport() {
     const reportOutput = document.getElementById("report-output");
     if (!reportOutput) return false;
 
-    reportOutput.innerHTML = "";
-
-    // Markdown を解析して generateReport と同じDOM構造を再現する
-    // ## セクション名 → h3 + hr + p
-    let currentP = null;
-    for (const line of data.content.split("\n")) {
-      if (line.startsWith("## ")) {
-        const h3 = document.createElement("h3");
-        h3.textContent = line.slice(3).trim();
-        const hr = document.createElement("hr");
-        reportOutput.appendChild(h3);
-        reportOutput.appendChild(hr);
-        currentP = document.createElement("p");
-        reportOutput.appendChild(currentP);
-      } else if (line === "---" || line.startsWith("# ")) {
-        // セクション区切り・ドキュメントタイトルはスキップ
-      } else if (currentP !== null) {
-        currentP.textContent += (currentP.textContent ? "\n" : "") + line;
-      }
-    }
-
+    reportOutput.innerHTML = _renderMd(data.content);
     return true;
   } catch (e) {
     return false;
@@ -709,12 +689,14 @@ function generateReport() {
       reportOutput.appendChild(h3);
       reportOutput.appendChild(hr);
 
-      currentSectionEl = document.createElement("p");
+      currentSectionEl = document.createElement("div");
+      currentSectionEl.className = "md-body";
       reportOutput.appendChild(currentSectionEl);
     },
     onToken: (token) => {
       if (currentSectionEl) {
-        currentSectionEl.textContent += token;
+        currentSectionEl._mdBuf = (currentSectionEl._mdBuf || "") + token;
+        currentSectionEl.innerHTML = _renderMd(currentSectionEl._mdBuf);
         if (reportOutput && _isNearBottom(reportOutput)) {
           reportOutput.scrollTop = reportOutput.scrollHeight;
         }
