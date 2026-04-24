@@ -133,6 +133,8 @@ localforge/
 - **Hybrid File Reading**: Files >200 lines use structural landmarks (AST for Python, regex for JS/TS)
 - **Thinking Model Support**: Models emitting a `thinking` field (Gemma) or `<think>` tags (DeepSeek) have their reasoning routed to the Ollama live panel
 - **Ollama Cleanup**: Ollama process is killed on app close via SIGTERM handler, atexit, and post-webview shutdown call
+- **Model VRAM Unload on Switch**: When the user selects a different model, the previous model is immediately evicted from VRAM via `keep_alive: 0` before the new model loads — prevents multiple large models accumulating in memory
+- **No Default Model**: `ProjectConfig.model` defaults to empty string; every route validates it and returns a clear error before calling Ollama if no model is selected
 
 ## `.localforge/` Directory
 

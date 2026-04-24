@@ -65,6 +65,20 @@ localforge/
 3. Call `self._llm.stream_completion(model, prompt)` and yield `{"token": t}` for each token
 4. Yield `{"done": True}` at the end
 
+### Where All Prompts Live
+
+Every prompt sent to Ollama is built in **`application/context_service.py`** — one method per operation:
+
+| Method | Used by |
+|---|---|
+| `build_plan_prompt()` | `GenerationService.stream_plan()` — project plan from user description |
+| `build_file_generation_prompt()` | `GenerationService.stream_all_files()` — per-file code generation |
+| `build_file_summary_prompt()` | `AnalysisService.build_index()` — summarise a single file during indexing |
+| `build_qa_prompt()` | `ExplanationService.stream_qa()` — Q&A with RAG context |
+| `build_report_section_prompt()` | `ExplanationService.stream_report()` — one section of the 11-part report |
+
+To modify any LLM behaviour, edit only `context_service.py`. No prompts exist anywhere else.
+
 ### Adding a New Infrastructure Adapter
 1. Define a `Protocol` in `domain/ports.py`
 2. Implement it in `infrastructure/`
@@ -148,6 +162,17 @@ Models that emit a `thinking` field in Ollama's JSON response (e.g., Gemma) are 
 - **SIGKILL**: cannot be caught — unavoidable OS limitation
 
 `_kill_ollama()` uses `pkill -x ollama` on Linux/Mac and `taskkill /F /IM ollama.exe` on Windows.
+
+### Model Switching and VRAM Management
+
+When the user selects a different model via the UI selector, `POST /api/project/model` is called. The route handler:
+1. Captures `old_model = project.config.model` before overwriting
+2. Calls `project_svc.set_model()` to save the new model to `config.json`
+3. Calls `llm.unload_model(old_model)` — sends `keep_alive: 0` to Ollama's `/api/generate` endpoint, which immediately evicts the previous model from VRAM/RAM
+
+`OllamaClient.unload_model()` is fire-and-forget: if Ollama is unavailable or the model was not loaded, the failure is logged as a warning and the switch still completes. The method is also declared in `LLMPort` (domain/ports.py) so any mock in tests can implement it.
+
+**Model default**: `ProjectConfig.model` defaults to `""` (empty string). Every generation route (`stream_plan`, `stream_generation`, `stream_index`, `stream_report`, `regenerate_file`) checks for an empty model and returns a clear error — *"モデルが選択されていません"* — before touching the LLM. The UI selector always syncs the model to the project config before starting any stream.
 
 ## Running the App
 
