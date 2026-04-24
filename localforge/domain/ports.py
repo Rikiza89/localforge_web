@@ -51,6 +51,16 @@ class LLMPort(Protocol):
         """
         ...
 
+    def unload_model(self, model: str) -> None:
+        """
+        指定モデルをVRAM/RAMから即時アンロードする。
+        失敗しても例外を送出せず警告のみ出力する。
+
+        Args:
+            model: アンロードするOllamaモデル名
+        """
+        ...
+
 
 class FileSystemPort(Protocol):
     """ファイルシステム操作を抽象化するポートインターフェース。"""

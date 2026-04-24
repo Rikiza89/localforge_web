@@ -207,6 +207,26 @@ class OllamaClient:
         except requests.RequestException as exc:
             raise OllamaConnectionError(f"Ollamaリクエストに失敗しました: {exc}") from exc
 
+    def unload_model(self, model: str) -> None:
+        """
+        Ollamaのkeep_alive=0を使ってモデルをVRAM/RAMから即時アンロードする。
+        モデルが読み込まれていない・Ollamaが停止中など失敗しても警告のみでスキップする。
+
+        Args:
+            model: アンロードするOllamaモデル名
+        """
+        if not model:
+            return
+        try:
+            self._session.post(
+                f"{self._base_url}/api/generate",
+                json={"model": model, "prompt": "", "keep_alive": 0},
+                timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
+            )
+            logger.info("モデルをアンロードしました: %s", model)
+        except Exception as exc:
+            logger.warning("モデルアンロード失敗 (%s): %s", model, exc)
+
     def generate_sync(
         self,
         model: str,
