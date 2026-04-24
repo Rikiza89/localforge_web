@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Generator, List, Optional
+from typing import Generator, List, Optional, Tuple
 
 from localforge.application.context_service import ContextService
 from localforge.domain.exceptions import PlanParseError
@@ -248,23 +249,118 @@ class GenerationService:
                     except Exception:
                         pass
 
-            # action に応じてプロンプトとコミットメッセージを選択
             file_path = root / planned_file.path
             is_modify = planned_file.action == "modify" and file_path.exists()
+            log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
+            start_time = time.time()
 
             if is_modify:
-                existing_content = self._create_backup(file_path)
-                prompt = self._context.build_file_edit_prompt(
-                    target_file=planned_file.path,
-                    modification_notes=planned_file.modification_notes or planned_file.description,
-                    existing_content=existing_content,
-                    context_md=context_md,
-                    plan_json=plan_json,
-                    dependency_contents=dependency_contents,
-                )
-                commit_message = f"LocalForge: {planned_file.path} を編集"
+                # ── DIFF路: SEARCH/REPLACE ブロックで差分のみ生成して適用 ──
                 operation = "edit_file"
+                log_entry = GenerationLogEntry(
+                    mode="generate", model=model, operation=operation,
+                    file_path=planned_file.path, status="pending",
+                )
+                self._index_adapter.append_log_entry(log_path, log_entry)
+
+                existing_content = self._create_backup(file_path)
+                modification_notes = planned_file.modification_notes or planned_file.description
+
+                # ファイルをチャンク分割（コンテキスト窓に収まるサイズに）
+                max_chars = self._context.max_chunk_chars()
+                chunks = self._split_into_chunks(existing_content, max_chars)
+                total_chunks = len(chunks)
+
+                all_diff_parts: List[str] = []
+                generation_error = False
+
+                for chunk_idx, chunk_content in enumerate(chunks):
+                    if _cancel_flag:
+                        yield {"error": "キャンセルされました"}
+                        return
+
+                    if total_chunks > 1:
+                        yield {"status": (
+                            f"{planned_file.path}: "
+                            f"チャンク {chunk_idx + 1}/{total_chunks} を分析中..."
+                        )}
+
+                    prompt = self._context.build_file_diff_prompt(
+                        target_file=planned_file.path,
+                        modification_notes=modification_notes,
+                        chunk_content=chunk_content,
+                        context_md=context_md,
+                        chunk_idx=chunk_idx,
+                        total_chunks=total_chunks,
+                    )
+
+                    chunk_parts: List[str] = []
+                    try:
+                        for token in self._llm.stream_completion(model, prompt):
+                            if _cancel_flag:
+                                yield {"error": "キャンセルされました"}
+                                return
+                            chunk_parts.append(token)
+                            yield {"token": token}
+                    except Exception as exc:
+                        logger.error(
+                            "diff生成エラー [%s] チャンク%d: %s",
+                            planned_file.path, chunk_idx, exc,
+                        )
+                        yield {"error": str(exc)}
+                        generation_error = True
+                        break
+
+                    all_diff_parts.append("".join(chunk_parts))
+
+                if generation_error:
+                    continue
+
+                # 全チャンクの SEARCH/REPLACE ブロックを original に適用
+                combined_diff = "\n".join(all_diff_parts)
+                modified_content, applied, failed = self._apply_search_replace_blocks(
+                    existing_content, combined_diff
+                )
+
+                elapsed = (time.time() - start_time) * 1000
+                self._update_log_status(log_path, planned_file.path, elapsed)
+
+                if applied == 0:
+                    yield {"status": (
+                        f"ℹ {planned_file.path}: 変更なし — ファイルはそのまま維持されます"
+                    )}
+                    yield {"file_written": planned_file.path}
+                    continue
+
+                if failed:
+                    yield {"status": (
+                        f"⚠ {planned_file.path}: {len(failed)}件のブロックが一致しませんでした"
+                    )}
+
+                try:
+                    self._fs.write_text(file_path, modified_content)
+                except Exception as exc:
+                    logger.error("ファイル書き込みエラー [%s]: %s", planned_file.path, exc)
+                    yield {"error": str(exc)}
+                    continue
+
+                try:
+                    self._git.commit_all(
+                        root,
+                        f"LocalForge: {planned_file.path} を編集 ({applied}件の変更)",
+                    )
+                except Exception as exc:
+                    logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
+
             else:
+                # ── CREATE路: ファイル全体をゼロから生成（従来通り） ──
+                operation = "generate_file"
+                log_entry = GenerationLogEntry(
+                    mode="generate", model=model, operation=operation,
+                    file_path=planned_file.path, status="pending",
+                )
+                self._index_adapter.append_log_entry(log_path, log_entry)
+
                 prompt = self._context.build_file_generation_prompt(
                     target_file=planned_file.path,
                     target_description=planned_file.description,
@@ -272,56 +368,39 @@ class GenerationService:
                     plan_json=plan_json,
                     dependency_contents=dependency_contents,
                 )
-                commit_message = f"LocalForge: {planned_file.path} を生成"
-                operation = "generate_file"
 
-            # ログエントリを生成開始として記録
-            log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
-            log_entry = GenerationLogEntry(
-                mode="generate",
-                model=model,
-                operation=operation,
-                file_path=planned_file.path,
-                status="pending",
-            )
-            self._index_adapter.append_log_entry(log_path, log_entry)
+                file_content_parts: List[str] = []
+                try:
+                    for token in self._llm.stream_completion(model, prompt):
+                        if _cancel_flag:
+                            yield {"error": "キャンセルされました"}
+                            return
+                        file_content_parts.append(token)
+                        yield {"token": token}
+                except Exception as exc:
+                    logger.error("ファイル生成エラー [%s]: %s", planned_file.path, exc)
+                    yield {"error": str(exc)}
+                    continue
 
-            start_time = time.time()
-            file_content_parts: List[str] = []
+                elapsed = (time.time() - start_time) * 1000
+                file_content = "".join(file_content_parts)
+                self._update_log_status(log_path, planned_file.path, elapsed)
 
-            try:
-                for token in self._llm.stream_completion(model, prompt):
-                    if _cancel_flag:
-                        yield {"error": "キャンセルされました"}
-                        return
-                    file_content_parts.append(token)
-                    yield {"token": token}
-            except Exception as exc:
-                logger.error("ファイル生成エラー [%s]: %s", planned_file.path, exc)
-                yield {"error": str(exc)}
-                continue
+                try:
+                    self._fs.write_text(file_path, file_content)
+                except Exception as exc:
+                    logger.error("ファイル書き込みエラー [%s]: %s", planned_file.path, exc)
+                    yield {"error": str(exc)}
+                    continue
 
-            elapsed = (time.time() - start_time) * 1000
-            file_content = "".join(file_content_parts)
+                try:
+                    self._git.commit_all(
+                        root, f"LocalForge: {planned_file.path} を生成"
+                    )
+                except Exception as exc:
+                    logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
 
-            # ファイルを書き込み
-            try:
-                self._fs.write_text(file_path, file_content)
-            except Exception as exc:
-                logger.error("ファイル書き込みエラー [%s]: %s", planned_file.path, exc)
-                yield {"error": str(exc)}
-                continue
-
-            # ファイルを即座にgitコミット
-            try:
-                self._git.commit_all(root, commit_message)
-            except Exception as exc:
-                logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
-
-            # ログエントリを完了に更新
-            self._update_log_status(log_path, planned_file.path, elapsed)
-
-            yield {"file_written": planned_file.path}
+                yield {"file_written": planned_file.path}
 
         yield {
             "progress": {
@@ -378,15 +457,74 @@ class GenerationService:
         if is_modify:
             self._ensure_bak_ignored(root)
             existing_content = self._create_backup(full_path)
-            prompt = self._context.build_file_edit_prompt(
-                target_file=planned_file.path,
-                modification_notes=planned_file.modification_notes or planned_file.description,
-                existing_content=existing_content,
-                context_md=context_md,
-                plan_json=plan.model_dump_json(indent=2),
-                dependency_contents=dependency_contents,
+            modification_notes = planned_file.modification_notes or planned_file.description
+            context_md_val = context_md
+
+            max_chars = self._context.max_chunk_chars()
+            chunks = self._split_into_chunks(existing_content, max_chars)
+            total_chunks = len(chunks)
+            all_diff_parts: List[str] = []
+
+            for chunk_idx, chunk_content in enumerate(chunks):
+                if _cancel_flag:
+                    yield {"error": "キャンセルされました"}
+                    return
+
+                if total_chunks > 1:
+                    yield {"status": (
+                        f"{planned_file.path}: チャンク {chunk_idx + 1}/{total_chunks} を分析中..."
+                    )}
+
+                prompt = self._context.build_file_diff_prompt(
+                    target_file=planned_file.path,
+                    modification_notes=modification_notes,
+                    chunk_content=chunk_content,
+                    context_md=context_md_val,
+                    chunk_idx=chunk_idx,
+                    total_chunks=total_chunks,
+                )
+
+                chunk_parts: List[str] = []
+                try:
+                    for token in self._llm.stream_completion(model, prompt):
+                        if _cancel_flag:
+                            yield {"error": "キャンセルされました"}
+                            return
+                        chunk_parts.append(token)
+                        yield {"token": token}
+                except Exception as exc:
+                    yield {"error": str(exc)}
+                    return
+                all_diff_parts.append("".join(chunk_parts))
+
+            combined_diff = "\n".join(all_diff_parts)
+            modified_content, applied, failed = self._apply_search_replace_blocks(
+                existing_content, combined_diff
             )
-            commit_message = f"LocalForge: {planned_file.path} を再編集"
+
+            if applied == 0:
+                yield {"status": f"ℹ {planned_file.path}: 変更なし"}
+                yield {"file_written": planned_file.path}
+                yield {"done": True}
+                return
+
+            if failed:
+                yield {"status": f"⚠ {len(failed)}件のブロックが一致しませんでした"}
+
+            try:
+                self._fs.write_text(full_path, modified_content)
+            except Exception as exc:
+                yield {"error": str(exc)}
+                return
+
+            try:
+                self._git.commit_all(
+                    root,
+                    f"LocalForge: {planned_file.path} を再編集 ({applied}件の変更)",
+                )
+            except Exception as exc:
+                logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
+
         else:
             prompt = self._context.build_file_generation_prompt(
                 target_file=planned_file.path,
@@ -395,34 +533,143 @@ class GenerationService:
                 plan_json=plan.model_dump_json(indent=2),
                 dependency_contents=dependency_contents,
             )
-            commit_message = f"LocalForge: {planned_file.path} を再生成"
+            file_content_parts: List[str] = []
+            try:
+                for token in self._llm.stream_completion(model, prompt):
+                    if _cancel_flag:
+                        yield {"error": "キャンセルされました"}
+                        return
+                    file_content_parts.append(token)
+                    yield {"token": token}
+            except Exception as exc:
+                yield {"error": str(exc)}
+                return
 
-        file_content_parts: List[str] = []
-        try:
-            for token in self._llm.stream_completion(model, prompt):
-                if _cancel_flag:
-                    yield {"error": "キャンセルされました"}
-                    return
-                file_content_parts.append(token)
-                yield {"token": token}
-        except Exception as exc:
-            yield {"error": str(exc)}
-            return
+            file_content = "".join(file_content_parts)
+            try:
+                self._fs.write_text(full_path, file_content)
+            except Exception as exc:
+                yield {"error": str(exc)}
+                return
 
-        file_content = "".join(file_content_parts)
-        try:
-            self._fs.write_text(full_path, file_content)
-        except Exception as exc:
-            yield {"error": str(exc)}
-            return
-
-        try:
-            self._git.commit_all(root, commit_message)
-        except Exception as exc:
-            logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
+            try:
+                self._git.commit_all(root, f"LocalForge: {planned_file.path} を再生成")
+            except Exception as exc:
+                logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
 
         yield {"file_written": planned_file.path}
         yield {"done": True}
+
+    def _split_into_chunks(self, content: str, max_chars: int) -> List[str]:
+        """
+        コードをチャンクに分割する。
+        空行・トップレベルのdef/class/function宣言を優先的な分割点として使い、
+        論理的なまとまりが壊れにくいようにする。
+
+        Args:
+            content: 分割するコード全文
+            max_chars: 1チャンクの最大文字数
+
+        Returns:
+            チャンク文字列のリスト
+        """
+        if len(content) <= max_chars:
+            return [content]
+
+        lines = content.split("\n")
+        chunks: List[str] = []
+        current: List[str] = []
+        current_len = 0
+
+        # トップレベル境界パターン（インデントなし）
+        _boundary = re.compile(
+            r"^(def |class |async def |function |export |module\.exports)"
+        )
+
+        for line in lines:
+            line_len = len(line) + 1  # +1 for newline
+            if current_len + line_len > max_chars and current:
+                # 好ましい分割点: 直前の空行またはトップレベル宣言
+                split_at = len(current)
+                for i in range(len(current) - 1, max(0, len(current) - 30), -1):
+                    if current[i].strip() == "" or _boundary.match(current[i]):
+                        split_at = i
+                        break
+                chunks.append("\n".join(current[:split_at]))
+                current = current[split_at:]
+                current_len = sum(len(l) + 1 for l in current)
+
+            current.append(line)
+            current_len += line_len
+
+        if current:
+            chunks.append("\n".join(current))
+
+        return [c for c in chunks if c.strip()]
+
+    def _apply_search_replace_blocks(
+        self,
+        original: str,
+        llm_output: str,
+    ) -> Tuple[str, int, List[str]]:
+        """
+        LLM出力からSEARCH/REPLACEブロックを抽出してoriginalに適用する。
+        <<<<<<< SEARCH / ======= / >>>>>>> REPLACE 形式（記号数は3以上で許容）。
+
+        Returns:
+            (modified_content, applied_count, list_of_unmatched_search_snippets)
+        """
+        pattern = re.compile(
+            r"<{3,}[ \t]*SEARCH[ \t]*\r?\n(.*?)\r?\n={5,}[ \t]*\r?\n(.*?)\r?\n>{3,}[ \t]*REPLACE",
+            re.DOTALL,
+        )
+
+        result = original
+        applied = 0
+        failed: List[str] = []
+
+        for match in pattern.finditer(llm_output):
+            search_text = match.group(1)
+            replace_text = match.group(2)
+
+            # 1) 完全一致
+            if search_text in result:
+                result = result.replace(search_text, replace_text, 1)
+                applied += 1
+                continue
+
+            # 2) 改行コード正規化
+            norm_result = result.replace("\r\n", "\n").replace("\r", "\n")
+            norm_search = search_text.replace("\r\n", "\n").replace("\r", "\n")
+            if norm_search in norm_result:
+                result = norm_result.replace(norm_search, replace_text, 1)
+                applied += 1
+                continue
+
+            # 3) 行末空白を除去して再試行（LLMが行末スペースを省略する場合）
+            def rstrip_lines(s: str) -> str:
+                return "\n".join(l.rstrip() for l in s.replace("\r\n", "\n").split("\n"))
+
+            stripped_result = rstrip_lines(norm_result)
+            stripped_search = rstrip_lines(norm_search)
+
+            if stripped_search in stripped_result:
+                pos = stripped_result.find(stripped_search)
+                line_start = stripped_result[:pos].count("\n")
+                search_line_count = stripped_search.count("\n") + 1
+                result_lines = norm_result.split("\n")
+                replace_lines = replace_text.replace("\r\n", "\n").split("\n")
+                result_lines[line_start : line_start + search_line_count] = replace_lines
+                result = "\n".join(result_lines)
+                applied += 1
+                continue
+
+            failed.append(search_text[:120])
+            logger.warning(
+                "SEARCH/REPLACE: 一致するコードが見つかりません: %s...", search_text[:80]
+            )
+
+        return result, applied, failed
 
     def _ensure_bak_ignored(self, root: Path) -> None:
         """

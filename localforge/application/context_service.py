@@ -204,64 +204,76 @@ class ContextService:
         prompt = "\n\n".join(parts)
         return self._guard_budget(prompt, f"generate_file:{target_file}")
 
-    def build_file_edit_prompt(
+    def max_chunk_chars(self) -> int:
+        """
+        ファイルチャンク1つに割り当て可能な最大文字数を返す。
+        トークン上限からプロンプトオーバーヘッド分を差し引き、
+        4文字≒1トークンで換算する。最小値は3000文字。
+        """
+        overhead_tokens = 600  # 指示文・メタデータ用に予約
+        return max(3000, (self._token_limit - overhead_tokens) * 4)
+
+    def build_file_diff_prompt(
         self,
         target_file: str,
         modification_notes: str,
-        existing_content: str,
+        chunk_content: str,
         context_md: str,
-        plan_json: str,
-        dependency_contents: List[tuple[str, str]],
+        chunk_idx: int = 0,
+        total_chunks: int = 1,
     ) -> str:
         """
-        既存ファイル編集のプロンプトを組み立てる。
-        既存のファイル内容と変更指示を渡し、LLMに修正済み完全ソースを出力させる。
+        ファイル編集差分（SEARCH/REPLACE形式）生成のプロンプトを組み立てる。
+        ファイルが大きい場合はチャンク単位で呼び出し、全チャンクの出力を合成して適用する。
 
         Args:
             target_file: 編集対象ファイルの相対パス
-            modification_notes: 何をどう変更するかの具体的な説明
-            existing_content: 現在のファイル内容
+            modification_notes: 変更要求の具体的な説明
+            chunk_content: 今回分析するコードチャンク
             context_md: context.mdの内容
-            plan_json: 承認済みプランのJSON文字列
-            dependency_contents: [(依存ファイルパス, 内容)] のリスト
+            chunk_idx: 現在のチャンクインデックス（0始まり）
+            total_chunks: 全チャンク数
 
         Returns:
             組み立てたプロンプト文字列
         """
         parts = [
-            f"編集対象ファイル: {target_file}",
-            f"変更内容: {modification_notes}",
-            f"現在のファイル内容:\n{existing_content}",
+            f"ファイル: {target_file}",
+            f"変更要求: {modification_notes}",
         ]
+
+        if total_chunks > 1:
+            parts.append(
+                f"[注意: このファイルは {total_chunks} チャンクに分割されています。"
+                f" 現在はチャンク {chunk_idx + 1}/{total_chunks} を分析中です。"
+                f" このチャンク内の変更のみを出力してください。]"
+            )
 
         if context_md.strip():
             parts.append(f"プロジェクトコンテキスト:\n{context_md}")
-        if plan_json.strip():
-            parts.append(f"プロジェクト全体の計画:\n{plan_json}")
 
-        dep_parts: List[str] = []
-        for dep_path, dep_content in dependency_contents:
-            dep_parts.append(f"--- {dep_path} ---\n{dep_content}")
-
-        available = self._token_limit - _estimate_tokens("\n\n".join(parts))
-        for dep_text in dep_parts:
-            if _estimate_tokens(dep_text) < available:
-                parts.append(f"依存ファイル:\n{dep_text}")
-                available -= _estimate_tokens(dep_text)
-            else:
-                logger.warning(
-                    "トークン予算不足のため依存ファイルを省略: %s", dep_text[:100]
-                )
-                break
+        parts.append(f"現在のコード:\n```\n{chunk_content}\n```")
 
         parts.append(
-            f"\n上記の変更内容を反映した {target_file} の完全なソースコードを出力してください。"
-            " 変更に関係のない部分も含め、ファイル全体を出力してください。"
-            " マークダウンのコードブロック（```）は使用せず、ソースコードだけを出力してください。"
+            "変更要求を実現するために必要な変更を SEARCH/REPLACE ブロックで出力してください。\n"
+            "変更不要な場合は「変更なし」とだけ出力してください。\n\n"
+            "出力形式:\n"
+            "<<<<<<< SEARCH\n"
+            "<変更・削除する既存コードの完全一致テキスト（空白・インデント含む）>\n"
+            "=======\n"
+            "<置き換える新しいコード（削除の場合は空行のみ）>\n"
+            ">>>>>>> REPLACE\n\n"
+            "ルール:\n"
+            "- SEARCH には既存コードを空白・インデントも含めて正確にコピーしてください\n"
+            "- 追加の場合は挿入位置のアンカーコードを SEARCH に含めてください\n"
+            "- 複数の変更は個別のブロックで出力してください\n"
+            "- ファイル全体は出力しないでください（変更部分のみ）"
         )
 
         prompt = "\n\n".join(parts)
-        return self._guard_budget(prompt, f"edit_file:{target_file}")
+        return self._guard_budget(
+            prompt, f"diff_file:{target_file}[{chunk_idx + 1}/{total_chunks}]"
+        )
 
     def build_context_update_prompt(
         self,
