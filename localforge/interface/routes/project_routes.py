@@ -193,8 +193,11 @@ def set_model():
     if not model:
         return jsonify({"error": "InvalidModel", "message": "モデル名が指定されていません"}), 400
 
+    old_model = project.config.model
     try:
         project_svc.set_model(project.root, model)
+        if old_model and old_model != model:
+            _get_llm().unload_model(old_model)
         return jsonify({"model": model})
     except LocalForgeError as exc:
         return _error_response(exc)

@@ -83,6 +83,52 @@ app.config["my_adapter"] = my_adapter
 
 ---
 
+## Skill: Manage Ollama Model Switching and VRAM
+
+**When**: You need to understand or change how LocalForge frees memory when the user changes the active model.
+
+**How it works now**:
+- `POST /api/project/model` (in `project_routes.py`) captures `old_model` before saving the new one
+- Calls `llm.unload_model(old_model)` → `OllamaClient.unload_model()` sends `{"model": old_model, "prompt": "", "keep_alive": 0}` to Ollama `/api/generate`
+- Ollama immediately evicts the model from VRAM/RAM on receipt of `keep_alive: 0`
+- Failure is logged as a warning only — the model switch always completes regardless
+- The method is declared in `LLMPort` (`domain/ports.py`) so mocks in tests can implement it
+
+**To force-unload a model programmatically** (e.g. before a large embedding run):
+```python
+llm = current_app.config["llm"]
+llm.unload_model("some-large-model")
+```
+
+**To disable unloading** (e.g. for fast model toggling in dev):
+- Comment out the `llm.unload_model(old_model)` call in `project_routes.py:set_model()`
+
+**Where model is stored**: `ProjectConfig.model` in `.localforge/config.json`. Defaults to `""` (no default model). All generation routes return a `400` error with message *"モデルが選択されていません"* if the model is empty.
+
+**Model sync from UI**: Every streaming function in `app.js` (`generatePlan`, `approvePlanAndGenerate`, `continueGeneration`, `buildIndex`) syncs the model selector value to the project config via `POST /api/project/model` before starting the stream — so the model is always current and the unload always fires at the right moment.
+
+---
+
+## Skill: Modify LLM Prompts
+
+**When**: You want to change what LocalForge sends to Ollama for any operation.
+
+**Single source of truth**: All prompts live in **`application/context_service.py`** — one method per operation.
+
+| Method | Operation |
+|---|---|
+| `build_plan_prompt()` | Generate-mode: project plan from user description |
+| `build_file_generation_prompt()` | Generate-mode: per-file code generation |
+| `build_file_summary_prompt()` | Explain-mode: file summary during indexing |
+| `build_qa_prompt()` | Explain-mode: Q&A with RAG context |
+| `build_report_section_prompt()` | Explain-mode: one section of the 11-part report |
+
+**To change a prompt**: Edit the corresponding method in `context_service.py`. The calling service passes the return value directly to `self._llm.stream_completion(model, prompt)` — no other changes needed.
+
+**To add a new prompt**: Add a new method following the naming pattern `build_<operation>_prompt()`, then call it from the relevant application service before the `stream_completion` call.
+
+---
+
 ## Skill: Extend the RAG Vector Index
 
 **When**: You want to change embedding model, vector DB, or search strategy.
