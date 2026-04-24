@@ -4,3 +4,4 @@ requests==2.32.3
 gitpython==3.1.43
 pydantic==2.8.2
 chromadb==0.5.23
+posthog>=2.4.0,<3.0.0
