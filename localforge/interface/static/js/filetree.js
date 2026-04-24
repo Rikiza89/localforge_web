@@ -193,7 +193,8 @@ async function showFileContent(filePath) {
     if (!modal || !title || !content) return;
 
     title.textContent = filePath;
-    content.textContent = data.content;
+    content.className = "modal-content";
+    content.innerHTML = '<pre class="code-block">' + escapeHtml(data.content) + "</pre>";
     modal.style.display = "flex";
   } catch (err) {
     showAlert(`ファイルの読み込みに失敗しました: ${err.message}`, "error");
@@ -216,17 +217,23 @@ async function explainSingleFile(filePath) {
     if (!modal || !title || !content) return;
 
     title.textContent = `説明: ${filePath}`;
-    content.textContent = "説明を生成中...";
+    content.className = "modal-content md-body";
+    content.innerHTML = "説明を生成中...";
     modal.style.display = "flex";
 
+    let explainBuf = "";
     await startPostStream(
       "/api/explain/ask",
       { question, history: [] },
       null,
       {
-        onToken: (token) => { content.textContent += token; },
+        onToken: (token) => {
+          if (explainBuf === "") content.innerHTML = "";
+          explainBuf += token;
+          content.innerHTML = _renderMd(explainBuf);
+        },
         onDone: () => { updateStatusBar("説明完了"); },
-        onError: (err) => { content.textContent += `\n[エラー: ${err}]`; },
+        onError: (err) => { content.innerHTML += `<p style="color:var(--danger)">[エラー: ${escapeHtml(String(err))}]</p>`; },
       }
     );
   } catch (err) {

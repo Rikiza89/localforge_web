@@ -148,7 +148,7 @@
         <span id="modal-title">ファイル内容</span>
         <button class="modal-close" id="modal-close">✕</button>
       </div>
-      <pre class="modal-content" id="modal-content"></pre>
+      <div class="modal-content" id="modal-content"></div>
     </div>
   </div>
 
@@ -161,6 +161,12 @@
     </ul>
   </div>
 
+  <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
+  <script>
+    if (typeof marked !== "undefined") {
+      marked.use({ breaks: true, gfm: true });
+    }
+  </script>
   <script src="{{ url_for('static', filename='js/stream.js') }}"></script>
   <script src="{{ url_for('static', filename='js/filetree.js') }}"></script>
   <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
