@@ -21,6 +21,7 @@ from localforge.application.generation_service import (
 )
 from localforge.application.project_service import ProjectService
 from localforge.domain.exceptions import LocalForgeError, PlanParseError
+from localforge.domain.models import GenerationPlan, PlannedFile
 from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
 
@@ -278,6 +279,7 @@ def cancel_generation():
 def regenerate_file():
     """
     単一ファイルを再生成してSSEストリーミングする。
+    プランにないファイルでも、プロジェクトインデックスから合成したプランで再生成できる。
 
     Request JSON:
         file_path (str): 再生成するファイルの相対パス
@@ -296,16 +298,17 @@ def regenerate_file():
     if not file_path:
         return jsonify({"error": "NoFilePath", "message": "ファイルパスが指定されていません"}), 400
 
-    plan = project_svc.load_generation_plan(project.root)
-    if not plan:
-        return jsonify({"error": "NoPlan", "message": "承認済みプランが見つかりません"}), 400
-
     model = project.config.model
     if not model:
         return jsonify({"error": "NoModel", "message": "モデルが選択されていません。UIでモデルを選択してください"}), 400
 
     root = project.root
     context_md = project_svc.get_context_md(root)
+
+    # プランを読み込み、ファイルが含まれていない場合はインデックスから合成する
+    plan = project_svc.load_generation_plan(root)
+    if not plan or not any(f.path == file_path for f in plan.files):
+        plan = _synthesize_plan_for_file(root, file_path)
 
     gen = generation_svc.stream_regenerate_file(
         root=root,
@@ -315,6 +318,57 @@ def regenerate_file():
         file_path=file_path,
     )
     return _sse_response(gen)
+
+
+def _synthesize_plan_for_file(root: Path, file_path: str) -> GenerationPlan:
+    """
+    プランが存在しない、またはファイルがプランにない場合、
+    プロジェクトインデックス（JSONL）から合成したGenerationPlanを返す。
+    LLMがプロジェクト全体の文脈を持った状態でファイルを再生成できるようにする。
+    """
+    index_adapter = current_app.config["index_adapter"]
+    localforge_dir = root / ".localforge"
+
+    chunks = []
+    try:
+        chunks = index_adapter.load_chunks(localforge_dir / "index.jsonl")
+    except Exception:
+        pass
+
+    project_index = None
+    try:
+        project_index = index_adapter.load_index(localforge_dir / "project_index.json")
+    except Exception:
+        pass
+
+    project_name = project_index.project_name if project_index else root.name
+    project_description = project_index.summary if project_index else ""
+
+    # 各ファイルの最初のチャンクのサマリーを使ってPlannedFileを合成
+    file_map: dict[str, str] = {}
+    for chunk in chunks:
+        if chunk.path not in file_map:
+            file_map[chunk.path] = chunk.summary or chunk.path
+
+    planned_files = [
+        PlannedFile(path=p, description=s, action="create")
+        for p, s in file_map.items()
+    ]
+
+    # 対象ファイルがインデックスにない場合でも必ずリストに含める
+    if not any(f.path == file_path for f in planned_files):
+        planned_files.append(PlannedFile(
+            path=file_path,
+            description=f"{file_path} を再生成する",
+            action="create",
+        ))
+
+    return GenerationPlan(
+        project_name=project_name,
+        description=project_description,
+        files=planned_files,
+        approved=True,
+    )
 
 
 def _build_tree_text(root: Path, path: Path | None = None, prefix: str = "") -> str:
