@@ -163,7 +163,7 @@ function hideContextMenu() {
 
 /**
  * コンテキストメニューのアクションを処理する。
- * @param {string} action - アクション名 ("view", "regenerate", "explain-file")
+ * @param {string} action - アクション名 ("view", "edit-file", "regenerate", "explain-file")
  */
 async function handleContextMenuAction(action) {
   const filePath = _contextMenuTarget;
@@ -172,6 +172,8 @@ async function handleContextMenuAction(action) {
 
   if (action === "view") {
     await showFileContent(filePath);
+  } else if (action === "edit-file") {
+    await openFileEditor(filePath);
   } else if (action === "regenerate") {
     await triggerRegenerateFile(filePath);
   } else if (action === "explain-file") {
@@ -196,6 +198,80 @@ async function showFileContent(filePath) {
     content.className = "modal-content";
     content.innerHTML = '<pre class="code-block">' + escapeHtml(data.content) + "</pre>";
     modal.style.display = "flex";
+  } catch (err) {
+    showAlert(`ファイルの読み込みに失敗しました: ${err.message}`, "error");
+  }
+}
+
+/**
+ * ファイルを編集モードのモーダルで開く。
+ * @param {string} filePath - 編集するファイルの相対パス
+ */
+async function openFileEditor(filePath) {
+  try {
+    const data = await apiRequest(`/api/project/file-content?path=${encodeURIComponent(filePath)}`);
+    const modal = document.getElementById("file-modal");
+    const title = document.getElementById("modal-title");
+    const content = document.getElementById("modal-content");
+
+    if (!modal || !title || !content) return;
+
+    title.textContent = `✏ 編集: ${filePath}`;
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "modal-edit-toolbar";
+
+    const saveBtn = document.createElement("button");
+    saveBtn.className = "btn btn-primary btn-sm";
+    saveBtn.textContent = "保存";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn btn-secondary btn-sm";
+    cancelBtn.textContent = "キャンセル";
+
+    const statusSpan = document.createElement("span");
+    statusSpan.style.marginLeft = "auto";
+    statusSpan.style.color = "var(--text-muted)";
+    statusSpan.style.fontSize = "11px";
+
+    toolbar.appendChild(saveBtn);
+    toolbar.appendChild(cancelBtn);
+    toolbar.appendChild(statusSpan);
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "modal-edit-textarea";
+    textarea.value = data.content;
+    textarea.spellcheck = false;
+
+    content.className = "modal-content";
+    content.innerHTML = "";
+    content.appendChild(toolbar);
+    content.appendChild(textarea);
+
+    modal.style.display = "flex";
+    textarea.focus();
+
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      statusSpan.textContent = "保存中...";
+      try {
+        await apiRequest("/api/project/save-file", "POST", { path: filePath, content: textarea.value });
+        statusSpan.textContent = "保存完了 ✓";
+        statusSpan.style.color = "var(--success)";
+        showAlert(`保存しました: ${filePath}`, "success");
+        refreshFileTree();
+      } catch (err) {
+        statusSpan.textContent = "保存失敗";
+        statusSpan.style.color = "var(--danger)";
+        showAlert(`保存エラー: ${err.message}`, "error");
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    cancelBtn.addEventListener("click", () => {
+      modal.style.display = "none";
+    });
   } catch (err) {
     showAlert(`ファイルの読み込みに失敗しました: ${err.message}`, "error");
   }

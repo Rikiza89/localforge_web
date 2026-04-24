@@ -307,6 +307,74 @@ def set_num_thread():
     })
 
 
+def _get_git():
+    """現在のアプリコンテキストからGitAdapterを取得する。"""
+    return current_app.config["git"]
+
+
+@bp.route("/save-file", methods=["POST"])
+def save_file():
+    """
+    ファイルを手動編集して保存する（バックアップ + gitコミット）。
+
+    Request JSON:
+        path (str): プロジェクトルートからの相対パス
+        content (str): 新しいファイル内容
+
+    Response JSON:
+        saved: True
+        path: 保存されたファイルパス
+    """
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    data = request.get_json(silent=True) or {}
+    rel_path = data.get("path", "").strip()
+    content = data.get("content")
+
+    if not rel_path:
+        return jsonify({"error": "NoPath", "message": "パスが指定されていません"}), 400
+    if content is None:
+        return jsonify({"error": "NoContent", "message": "コンテンツが指定されていません"}), 400
+
+    file_path = project.root / rel_path
+    try:
+        file_path.resolve().relative_to(project.root.resolve())
+    except ValueError:
+        return jsonify({"error": "AccessDenied", "message": "プロジェクトルート外へのアクセスは禁止されています"}), 403
+
+    try:
+        # バックアップ作成
+        if file_path.is_file():
+            bak_path = file_path.with_suffix(file_path.suffix + ".bak")
+            bak_path.write_bytes(file_path.read_bytes())
+            # *.bak を .gitignore に追加
+            gitignore = project.root / ".gitignore"
+            if gitignore.exists():
+                existing = gitignore.read_text(encoding="utf-8")
+                if "*.bak" not in existing:
+                    gitignore.write_text(existing.rstrip() + "\n*.bak\n", encoding="utf-8")
+            else:
+                gitignore.write_text("*.bak\n", encoding="utf-8")
+
+        # ファイルを書き込む
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+
+        # gitコミット
+        git = _get_git()
+        try:
+            git.commit_all(project.root, f"LocalForge: {rel_path} を手動編集")
+        except Exception as exc:
+            logger.warning("手動編集のgitコミット失敗 (無視): %s", exc)
+
+        return jsonify({"saved": True, "path": rel_path})
+    except OSError as exc:
+        return jsonify({"error": "WriteError", "message": str(exc)}), 500
+
+
 @bp.route("/ollama-status", methods=["GET"])
 def ollama_status():
     """
