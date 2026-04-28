@@ -45,8 +45,9 @@ def _signal_handler(signum, frame) -> None:
     os._exit(0)
 
 # Flaskサーバーのホスト・ポート設定
-_HOST = "127.0.0.1"  # セキュリティ上の理由でローカルホストのみにバインド
-_PORT = 7331
+# FLASK_HOST=0.0.0.0 にするとDockerコンテナ外からもアクセス可能（LAN公開）
+_HOST = os.environ.get("FLASK_HOST", "127.0.0.1")
+_PORT = int(os.environ.get("FLASK_PORT", "7331"))
 
 
 def start_flask(app) -> None:

@@ -114,10 +114,11 @@ function switchTab(tabName) {
 /**
  * フォルダ選択ダイアログを開いてプロジェクトをロードする。
  */
-async function openProject() {
+async function openProject(pathOverride = null) {
   updateStatusBar("フォルダを選択中...");
   try {
-    const data = await apiRequest("/api/project/open", "POST");
+    const body = pathOverride ? { path: pathOverride } : null;
+    const data = await apiRequest("/api/project/open", "POST", body);
     _currentProjectRoot = data.project_root;
     _currentMode = data.mode;
 
@@ -166,7 +167,15 @@ async function openProject() {
 
   } catch (err) {
     if (err.message && err.message.includes("NoFolderSelected")) {
-      updateStatusBar("フォルダ選択がキャンセルされました");
+      // ネイティブダイアログが使えない環境（Docker等）ではパス入力にフォールバック
+      const typed = prompt(
+        "フォルダのパスを入力してください:\n例: /projects/my-app"
+      );
+      if (typed && typed.trim()) {
+        await openProject(typed.trim());
+      } else {
+        updateStatusBar("フォルダ選択がキャンセルされました");
+      }
     } else {
       showAlert(`プロジェクトを開けませんでした: ${err.message}`, "error");
       updateStatusBar("エラーが発生しました");

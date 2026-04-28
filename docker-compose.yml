@@ -1,0 +1,30 @@
+services:
+  localforge:
+    build: .
+    ports:
+      # Bind on all host interfaces → any device on the same LAN can reach :7331.
+      # To restrict to localhost only, change to "127.0.0.1:7331:7331".
+      - "0.0.0.0:7331:7331"
+    environment:
+      FLASK_HOST: "0.0.0.0"
+      FLASK_PORT: "7331"
+      # Ollama stays on the host machine so it can use the GPU.
+      # host.docker.internal resolves to the host IP on all platforms
+      # (Docker Desktop natively; Linux via extra_hosts below).
+      OLLAMA_HOST: "http://host.docker.internal:11434"
+    extra_hosts:
+      # Required on Linux to resolve host.docker.internal → host IP.
+      # No effect on Docker Desktop (Mac/Windows) where it works natively.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Persist .localforge metadata (indexes, vector DB, reports, logs)
+      # across container restarts.
+      - localforge_data:/app/.localforge
+      # Mount the directory that contains the projects you want to open.
+      # Adjust the left-hand path to wherever your projects live on the host.
+      # After mounting, open projects via the path /projects/<your-project>.
+      - ${PROJECTS_DIR:-$HOME/projects}:/projects
+    restart: unless-stopped
+
+volumes:
+  localforge_data:
