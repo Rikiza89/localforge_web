@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "localforge-web"
+version = "0.1.0"
+description = "Fully local AI-powered code generation and project intelligence tool"
+authors = []
+readme = "README.md"
+license = "MIT"
+packages = [
+    { include = "localforge" },
+    { include = "main.py" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+flask = "3.0.3"
+pywebview = "5.3.2"
+requests = "2.32.3"
+gitpython = "3.1.43"
+pydantic = "2.8.2"
+chromadb = "0.5.23"
+posthog = ">=2.4.0,<3.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7.0"
+pytest-mock = ">=3.0"
+
+[tool.poetry.scripts]
+localforge = "main:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
