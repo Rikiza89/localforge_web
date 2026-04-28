@@ -89,7 +89,8 @@ def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
     return False
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """LocalForgeアプリケーションを起動する。"""
     from localforge.interface.server import create_app
 
     # シグナルハンドラとatexitを登録（強制終了時にOllamaを確実に終了させる）
@@ -143,3 +144,8 @@ if __name__ == "__main__":
             flask_thread.join()
         except KeyboardInterrupt:
             print("\n終了します")
+
+
+if __name__ == "__main__":
+    main()
+

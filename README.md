@@ -50,6 +50,8 @@ Ensure you have Python 3.10 or newer installed.
 
 ## Installation
 
+### Option A — pip (classic)
+
 ```bash
 # Clone the repository
 git clone <repo-url>
@@ -63,6 +65,41 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+### Option B — Poetry
+
+#### 1. Install Poetry
+
+```bash
+curl -sSL https://install.python-poetry.org | python3 -
+```
+
+Verify the installation:
+
+```bash
+poetry --version
+```
+
+> On some systems you may need to add `~/.local/bin` to your `PATH`. The installer prints the exact command if needed.
+
+#### 2. Install project dependencies
+
+```bash
+git clone <repo-url>
+cd localforge_web
+
+poetry install
+```
+
+This creates an isolated virtual environment and installs all runtime and dev dependencies automatically.
+
+#### 3. Activate the environment (optional)
+
+```bash
+poetry shell
+```
+
+After this you can run `python main.py` or `localforge` directly without the `poetry run` prefix.
+
 ### Platform-specific notes for pywebview
 
 - **macOS**: No additional dependencies needed (uses WebKit)
@@ -74,8 +111,23 @@ pip install -r requirements.txt
 
 ## Running
 
+### pip
+
 ```bash
 python main.py
+```
+
+### Poetry
+
+```bash
+# Using the installed script entry point:
+poetry run localforge
+
+# Or the explicit form:
+poetry run python main.py
+
+# Or inside an activated shell (poetry shell):
+localforge
 ```
 
 This will:
@@ -156,8 +208,12 @@ Each project gets a `.localforge/` metadata directory:
 ## Running Tests
 
 ```bash
+# pip
 pip install pytest pytest-mock
 python -m pytest tests/ -v
+
+# Poetry (dev dependencies are already installed by `poetry install`)
+poetry run pytest tests/ -v
 ```
 
 Tests use mock adapters — no real Ollama, ChromaDB, or filesystem access required.
