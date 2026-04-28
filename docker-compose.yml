@@ -21,9 +21,12 @@ services:
       # across container restarts.
       - localforge_data:/app/.localforge
       # Mount the directory that contains the projects you want to open.
-      # Adjust the left-hand path to wherever your projects live on the host.
-      # After mounting, open projects via the path /projects/<your-project>.
-      - ${PROJECTS_DIR:-$HOME/projects}:/projects
+      # Defaults to a ./projects folder next to docker-compose.yml (created
+      # automatically if it does not exist).
+      # Override on Linux/macOS:  PROJECTS_DIR=/home/alice/code docker compose up
+      # Override on Windows CMD:  set PROJECTS_DIR=C:\Users\alice\code && docker compose up
+      # Override on Windows PS:   $env:PROJECTS_DIR="C:\Users\alice\code"; docker compose up
+      - ${PROJECTS_DIR:-./projects}:/projects
     restart: unless-stopped
 
 volumes:
