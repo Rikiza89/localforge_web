@@ -1,0 +1,13 @@
+.git
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.venv
+venv
+.pytest_cache
+tests/
+.localforge/
+*.log
+*.bak
+poetry.lock

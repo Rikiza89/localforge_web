@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from typing import Generator, List, Optional
 
@@ -16,8 +17,8 @@ from localforge.domain.exceptions import OllamaConnectionError, OllamaModelNotFo
 
 logger = logging.getLogger(__name__)
 
-# OllamaサーバーのデフォルトURL
-_DEFAULT_BASE_URL = "http://localhost:11434"
+# OllamaサーバーのデフォルトURL（OLLAMA_HOST環境変数で上書き可能）
+_DEFAULT_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 # HTTPリクエストのタイムアウト秒数（ストリーミング時は別途設定）
 _CONNECT_TIMEOUT = 5
 # ストリーミング読み込みタイムアウト: 2時間（大規模プロジェクトの長時間生成に対応）

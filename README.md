@@ -65,6 +65,97 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+### Option C — Docker (LAN access, headless)
+
+Run LocalForge as a headless Flask server inside a Docker container. The native
+desktop window is not available, but the full UI is accessible from **any browser
+on the same Wi-Fi network** — useful for doing the heavy Ollama work on a powerful
+machine while browsing from a laptop, tablet, or phone.
+
+#### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/) installed on the host
+- Ollama **running on the host machine** (the container connects to it so the GPU stays on the host)
+
+#### Build and start
+
+```bash
+git clone <repo-url>
+cd localforge_web
+
+# Optional: set the directory that holds your projects (default: ~/projects)
+export PROJECTS_DIR=~/projects
+
+docker compose up --build
+```
+
+The first build takes a few minutes (compiling chromadb native extensions).
+Subsequent starts are instant.
+
+#### Access from any device on the same network
+
+Find the host machine's local IP address:
+
+```bash
+# macOS / Linux
+hostname -I | awk '{print $1}'
+```
+
+```powershell
+# Windows PowerShell
+(Get-NetIPAddress -AddressFamily IPv4 | Where-Object InterfaceAlias -ne Loopback).IPAddress
+```
+
+Then open `http://<host-ip>:7331` in any browser on the same Wi-Fi.
+
+#### Opening projects
+
+Because there is no desktop environment inside the container, the native folder
+dialog is not available. When you click **📁 Open Folder** the app will show a
+text prompt — type the in-container path to your project:
+
+```
+/projects/my-app
+```
+
+The `~/projects` directory on the host is mounted at `/projects` inside the
+container. Set `PROJECTS_DIR` to a different path if your projects live elsewhere:
+
+```bash
+PROJECTS_DIR=/home/alice/code docker compose up
+```
+
+#### Ollama connectivity
+
+Ollama runs on the host machine and is reached via `host.docker.internal:11434`
+(pre-configured). No separate Ollama container is needed and the GPU is used
+directly by the host Ollama process.
+
+To point at a different Ollama instance, edit `docker-compose.yml`:
+
+```yaml
+environment:
+  OLLAMA_HOST: "http://192.168.1.10:11434"
+```
+
+#### Restrict to localhost only
+
+If you do not want LAN access, change the port binding in `docker-compose.yml`:
+
+```yaml
+ports:
+  - "127.0.0.1:7331:7331"
+```
+
+#### Stop the container
+
+```bash
+docker compose down          # stop; keep persisted index data
+docker compose down -v       # stop and delete persisted data
+```
+
+---
+
 ### Option B — Poetry
 
 #### 1. Install Poetry
@@ -115,6 +206,14 @@ After this you can run `python main.py` or `localforge` directly without the `po
 
 ```bash
 python main.py
+```
+
+### Docker
+
+```bash
+docker compose up            # starts and opens http://<host-ip>:7331
+docker compose up --build    # rebuild image first (after dependency changes)
+docker compose up -d         # run in background
 ```
 
 ### Poetry
