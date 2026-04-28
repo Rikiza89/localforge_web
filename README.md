@@ -82,10 +82,6 @@ machine while browsing from a laptop, tablet, or phone.
 ```bash
 git clone <repo-url>
 cd localforge_web
-
-# Optional: set the directory that holds your projects (default: ~/projects)
-export PROJECTS_DIR=~/projects
-
 docker compose up --build
 ```
 
@@ -118,11 +114,18 @@ text prompt — type the in-container path to your project:
 /projects/my-app
 ```
 
-The `~/projects` directory on the host is mounted at `/projects` inside the
-container. Set `PROJECTS_DIR` to a different path if your projects live elsewhere:
+By default a `projects/` folder is created next to `docker-compose.yml` and
+mounted at `/projects` inside the container. Point it at an existing directory:
 
 ```bash
+# Linux / macOS
 PROJECTS_DIR=/home/alice/code docker compose up
+
+# Windows CMD
+set PROJECTS_DIR=C:\Users\alice\code && docker compose up
+
+# Windows PowerShell
+$env:PROJECTS_DIR="C:\Users\alice\code"; docker compose up
 ```
 
 #### Ollama connectivity
