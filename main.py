@@ -133,10 +133,12 @@ def main() -> None:
         webview.start(debug=False)
         # ウィンドウが閉じられた後にOllamaを終了する
         _kill_ollama()
-    except ImportError:
-        # pywebviewが利用できない環境（テスト・CI）ではブラウザで開く
+    except Exception as exc:
+        # ImportError: pywebviewが未インストール
+        # WebViewException: GTK/QTがない環境（Docker・ヘッドレス）
         logger.warning(
-            "pywebviewが見つかりません。ブラウザで http://%s:%d を開いてください", _HOST, _PORT
+            "pywebviewが利用できません (%s)。ブラウザで http://%s:%d を開いてください",
+            type(exc).__name__, _HOST, _PORT,
         )
         print(f"\n✦ LocalForge が起動しました")
         print(f"  ブラウザで http://{_HOST}:{_PORT} を開いてください")
