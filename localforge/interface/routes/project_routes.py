@@ -55,7 +55,8 @@ def open_project():
     data = request.get_json(silent=True) or {}
 
     # pywebviewウィンドウからのフォルダ選択
-    folder_path: str | None = data.get("path")
+    _raw_path = data.get("path")
+    folder_path: str | None = _raw_path if isinstance(_raw_path, str) else None
 
     if not folder_path:
         # pywebviewのウィンドウAPIを試みる
@@ -65,7 +66,8 @@ def open_project():
             if windows:
                 result = windows[0].create_file_dialog(webview.FOLDER_DIALOG)
                 if result and len(result) > 0:
-                    folder_path = result[0]
+                    item = result[0]
+                    folder_path = item if isinstance(item, str) else None
         except (ImportError, Exception) as exc:
             logger.debug("pywebviewフォルダ選択不可: %s", exc)
 
