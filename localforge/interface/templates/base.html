@@ -18,6 +18,9 @@
         <select id="model-selector" class="model-select" title="使用するOllamaモデル">
           <option value="">モデル読み込み中...</option>
         </select>
+        <button class="btn btn-secondary btn-sm" id="unload-model-btn" title="現在のモデルをVRAMから解放">
+          ⏏ 解放
+        </button>
         <span class="project-path" id="project-path">プロジェクト未選択</span>
         <button class="btn btn-secondary" id="open-project-btn" title="フォルダを開く">
           📁 フォルダを開く
@@ -36,7 +39,7 @@
     </nav>
 
     <!-- ファイルツリー（左サイドバー） -->
-    <aside class="file-tree-panel">
+    <aside class="file-tree-panel" id="left-sidebar">
       <div class="panel-header">
         <span>ファイルツリー</span>
         <button class="icon-btn" id="refresh-tree-btn" title="ツリーを更新">↻</button>
@@ -45,6 +48,8 @@
         <div class="empty-state">フォルダを開いてください</div>
       </div>
     </aside>
+
+    <div class="resizer resizer-left" id="resizer-left"></div>
 
     <!-- メインワークスペース -->
     <main class="main-workspace">
@@ -67,8 +72,10 @@
       </div>
     </main>
 
+    <div class="resizer resizer-right" id="resizer-right"></div>
+
     <!-- コンテキストパネル（右サイドバー） -->
-    <aside class="context-panel">
+    <aside class="context-panel" id="right-sidebar">
       <div class="panel-header">コンテキスト</div>
       <div class="context-section">
         <div class="section-label">context.md</div>
