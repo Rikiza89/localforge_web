@@ -727,8 +727,8 @@ function generateReport() {
       if (currentSectionEl) {
         currentSectionEl._mdBuf = (currentSectionEl._mdBuf || "") + token;
         currentSectionEl.innerHTML = _renderMd(currentSectionEl._mdBuf);
-        if (reportOutput && _isNearBottom(reportOutput)) {
-          reportOutput.scrollTop = reportOutput.scrollHeight;
+        if (reportOutput) {
+          _autoScroll(reportOutput);
         }
       }
     },
