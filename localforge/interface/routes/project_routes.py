@@ -377,6 +377,30 @@ def save_file():
         return jsonify({"error": "WriteError", "message": str(exc)}), 500
 
 
+@bp.route("/unload", methods=["POST"])
+def unload_model():
+    """
+    指定されたモデルをVRAMから明示的にアンロードする。
+
+    Request JSON:
+        model (str): アンロードするモデル名
+
+    Response JSON:
+        unloaded: True
+    """
+    data = request.get_json(silent=True) or {}
+    model = data.get("model", "").strip()
+    if not model:
+        return jsonify({"error": "NoModel", "message": "モデル名が指定されていません"}), 400
+
+    llm = _get_llm()
+    try:
+        llm.unload_model(model)
+        return jsonify({"unloaded": True})
+    except Exception as exc:
+        return _error_response(exc)
+
+
 @bp.route("/ollama-status", methods=["GET"])
 def ollama_status():
     """

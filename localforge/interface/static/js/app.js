@@ -954,6 +954,26 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
+  // モデルアンロードボタン
+  const unloadBtn = document.getElementById("unload-model-btn");
+  if (unloadBtn) {
+    unloadBtn.addEventListener("click", async () => {
+      const model = modelSelect ? modelSelect.value : null;
+      if (!model) {
+        showAlert("アンロードするモデルが選択されていません。", "warning");
+        return;
+      }
+      try {
+        updateStatusBar(`${model} をアンロード中...`);
+        await apiRequest("/api/project/unload", "POST", { model });
+        updateStatusBar(`${model} をアンロードしました`);
+        showAlert(`${model} をVRAMから解放しました`, "success");
+      } catch (err) {
+        showAlert(`アンロード失敗: ${err.message}`, "error");
+      }
+    });
+  }
+
   // Generateタブのボタン
   const generatePlanBtn = document.getElementById("generate-plan-btn");
   if (generatePlanBtn) generatePlanBtn.addEventListener("click", generatePlan);
@@ -1119,5 +1139,63 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 起動時Ollamaヘルスチェック
   await checkOllamaHealth();
 
+  // リサイズ機能の初期化
+  initResizers();
+
   updateStatusBar("LocalForge 準備完了 — フォルダを開いてください");
 });
+
+/**
+ * サイドバーのリサイズ機能を初期化する。
+ */
+function initResizers() {
+  const layout = document.querySelector(".app-layout");
+  const leftResizer = document.getElementById("resizer-left");
+  const rightResizer = document.getElementById("resizer-right");
+  const leftSidebar = document.getElementById("left-sidebar");
+  const rightSidebar = document.getElementById("right-sidebar");
+
+  if (!leftResizer || !rightResizer) return;
+
+  // 左サイドバーのリサイズ
+  leftResizer.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    leftResizer.classList.add("resizing");
+    document.addEventListener("mousemove", resizeLeft);
+    document.addEventListener("mouseup", stopResizeLeft);
+  });
+
+  function resizeLeft(e) {
+    const newWidth = e.clientX;
+    if (newWidth > 100 && newWidth < 600) {
+      layout.style.setProperty("--sidebar-l", `${newWidth}px`);
+    }
+  }
+
+  function stopResizeLeft() {
+    leftResizer.classList.remove("resizing");
+    document.removeEventListener("mousemove", resizeLeft);
+    document.removeEventListener("mouseup", stopResizeLeft);
+  }
+
+  // 右サイドバーのリサイズ
+  rightResizer.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    rightResizer.classList.add("resizing");
+    document.addEventListener("mousemove", resizeRight);
+    document.addEventListener("mouseup", stopResizeRight);
+  });
+
+  function resizeRight(e) {
+    const newWidth = window.innerWidth - e.clientX;
+    if (newWidth > 150 && newWidth < 600) {
+      layout.style.setProperty("--sidebar-r", `${newWidth}px`);
+    }
+  }
+
+  function stopResizeRight() {
+    rightResizer.classList.remove("resizing");
+    document.removeEventListener("mousemove", resizeRight);
+    document.removeEventListener("mouseup", stopResizeRight);
+  }
+}

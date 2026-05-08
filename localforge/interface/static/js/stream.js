@@ -25,7 +25,12 @@ function _isNearBottom(el, threshold = 80) {
  * @param {HTMLElement} el
  */
 function _autoScroll(el) {
-  if (_isNearBottom(el)) el.scrollTop = el.scrollHeight;
+  // スクロール可能な場合のみ実行
+  if (el.scrollHeight > el.clientHeight) {
+    if (_isNearBottom(el)) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }
 }
 
 const OllamaPanel = (() => {
