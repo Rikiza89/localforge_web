@@ -35,7 +35,7 @@ class TestContextService:
         assert isinstance(estimated, int)
 
     def test_build_plan_prompt(self, context_service):
-        prompt = context_service.build_plan_prompt(
+        prompt, tokens = context_service.build_plan_prompt(
             user_prompt="Todoアプリを作って",
             folder_name="todo_app",
             file_tree_text="",
@@ -47,7 +47,7 @@ class TestContextService:
         assert "JSON" in prompt
 
     def test_build_plan_prompt_includes_context(self, context_service):
-        prompt = context_service.build_plan_prompt(
+        prompt, tokens = context_service.build_plan_prompt(
             user_prompt="test",
             folder_name="proj",
             file_tree_text="├── main.py",
@@ -59,7 +59,7 @@ class TestContextService:
         assert "abc1234" in prompt
 
     def test_build_file_generation_prompt(self, context_service):
-        prompt = context_service.build_file_generation_prompt(
+        prompt, tokens = context_service.build_file_generation_prompt(
             target_file="src/main.py",
             target_description="エントリーポイント",
             context_md="",
@@ -80,7 +80,7 @@ class TestContextService:
 
     def test_build_qa_prompt(self, context_service):
         from localforge.domain.models import Message
-        prompt = context_service.build_qa_prompt(
+        prompt, tokens = context_service.build_qa_prompt(
             question="このプロジェクトは何ですか？",
             project_index_json='{"summary": "test"}',
             top_summaries=[("main.py", "エントリーポイント")],
@@ -96,7 +96,7 @@ class TestContextService:
         assert svc._token_limit == 2000
 
     def test_build_report_section_prompt(self, context_service):
-        prompt = context_service.build_report_section_prompt(
+        prompt, tokens = context_service.build_report_section_prompt(
             section_name="Project Overview",
             project_index_json='{"summary": "web app"}',
             relevant_summaries=[("app.py", "Flaskアプリ")],

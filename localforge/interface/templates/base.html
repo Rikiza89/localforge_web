@@ -21,6 +21,8 @@
         <button class="btn btn-secondary btn-sm" id="unload-model-btn" title="現在のモデルをVRAMから解放">
           ⏏ 解放
         </button>
+        <button class="icon-btn" id="theme-toggle" title="テーマを切り替え">🌓</button>
+        <button class="icon-btn" id="show-logs-btn" title="生成ログを表示">📋</button>
         <span class="project-path" id="project-path">プロジェクト未選択</span>
         <button class="btn btn-secondary" id="open-project-btn" title="フォルダを開く">
           📁 フォルダを開く
@@ -120,6 +122,7 @@
     <!-- ステータスバー -->
     <footer class="status-bar">
       <span class="status-message" id="status-message">待機中</span>
+      <span class="status-vram" id="status-vram"></span>
       <span class="status-tokens" id="status-tokens"></span>
       <span class="status-git" id="status-git"></span>
       <span class="status-port">:7331</span>
@@ -156,6 +159,32 @@
         <button class="modal-close" id="modal-close">✕</button>
       </div>
       <div class="modal-content" id="modal-content"></div>
+    </div>
+  </div>
+
+  <!-- 生成ログモーダル -->
+  <div class="modal-overlay" id="logs-modal" style="display:none;">
+    <div class="modal">
+      <div class="modal-header">
+        <span>生成ログ & トークン使用量</span>
+        <button class="modal-close" id="logs-modal-close">✕</button>
+      </div>
+      <div class="modal-content">
+        <div id="token-usage-summary" style="margin-bottom:20px;"></div>
+        <table class="resume-file-table" id="logs-table">
+          <thead>
+            <tr>
+              <th>日時</th>
+              <th>モデル</th>
+              <th>操作</th>
+              <th>推定トークン</th>
+              <th>時間(ms)</th>
+              <th>状態</th>
+            </tr>
+          </thead>
+          <tbody id="logs-tbody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 

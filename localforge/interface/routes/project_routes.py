@@ -401,6 +401,19 @@ def unload_model():
         return _error_response(exc)
 
 
+@bp.route("/vram", methods=["GET"])
+def get_vram():
+    """
+    現在のVRAM使用状況を返す。
+
+    Response JSON:
+        total, used, free (int, MiB) or None
+    """
+    llm = _get_llm()
+    info = llm.get_vram_info()
+    return jsonify(info)
+
+
 @bp.route("/ollama-status", methods=["GET"])
 def ollama_status():
     """

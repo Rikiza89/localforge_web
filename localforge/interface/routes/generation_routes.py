@@ -263,6 +263,26 @@ def stream_generation():
     return _sse_response(gen)
 
 
+@bp.route("/logs", methods=["GET"])
+def get_generation_logs():
+    """
+    生成ログをすべて取得する。
+    """
+    project_svc = current_app.config["project_service"]
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    index_adapter = current_app.config["index_adapter"]
+    log_path = project.root / ".localforge" / "generation_log.jsonl"
+
+    if not log_path.exists():
+        return jsonify({"logs": []})
+
+    entries = index_adapter.load_log_entries(log_path)
+    return jsonify({"logs": [e.model_dump() for e in entries]})
+
+
 @bp.route("/cancel", methods=["POST"])
 def cancel_generation():
     """

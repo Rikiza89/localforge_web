@@ -86,6 +86,7 @@ class ContextService:
         context_md: str,
         git_log: str,
         file_summaries: Optional[List[tuple[str, str]]] = None,
+        model_name: str = "",
     ) -> str:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
@@ -120,6 +121,12 @@ class ContextService:
         if git_log.strip():
             parts.append(f"最近のgitコミット:\n{git_log}")
 
+        # モデル特有の指示の追加
+        if "deepseek-r1" in model_name.lower():
+            parts.append("思考プロセス（reasoning）を詳しく記述し、最終的な結論を明確にしてください。")
+        elif "llama3" in model_name.lower():
+            parts.append("簡潔かつ正確な回答を心がけてください。")
+
         parts.append(
             f"\nユーザーの要求:\n{user_prompt}\n\n"
             "まず、このプランで何をするかを2〜3文のMarkdown形式で簡潔に説明してください"
@@ -147,7 +154,7 @@ class ContextService:
         )
 
         prompt = "\n\n".join(parts)
-        return self._guard_budget(prompt, "generate_plan")
+        return self._guard_budget(prompt, "generate_plan"), _estimate_tokens(prompt)
 
     def build_file_generation_prompt(
         self,
@@ -203,7 +210,7 @@ class ContextService:
         )
 
         prompt = "\n\n".join(parts)
-        return self._guard_budget(prompt, f"generate_file:{target_file}")
+        return self._guard_budget(prompt, f"generate_file:{target_file}"), _estimate_tokens(prompt)
 
     def max_chunk_chars(self) -> int:
         """
@@ -264,6 +271,14 @@ class ContextService:
             "=======\n"
             "<置き換える新しいコード（削除の場合は空行のみ）>\n"
             ">>>>>>> REPLACE\n\n"
+            "例:\n"
+            "<<<<<<< SEARCH\n"
+            "def old_func():\n"
+            "    print(\"Hello\")\n"
+            "=======\n"
+            "def new_func():\n"
+            "    print(\"Hello World\")\n"
+            ">>>>>>> REPLACE\n\n"
             "ルール:\n"
             "- SEARCH ブロックには、既存のコードを **一字一句、空白やインデントも含めて正確に** 記述してください。\n"
             "- SEARCH ブロックは、変更箇所を特定するのに十分な長さ（数行程度）を確保してください。一意に特定できない短い断片は避けてください。\n"
@@ -276,7 +291,7 @@ class ContextService:
         prompt = "\n\n".join(parts)
         return self._guard_budget(
             prompt, f"diff_file:{target_file}[{chunk_idx + 1}/{total_chunks}]"
-        )
+        ), _estimate_tokens(prompt)
 
     def build_context_update_prompt(
         self,
@@ -418,7 +433,7 @@ class ContextService:
         section_name: str,
         project_index_json: str,
         relevant_summaries: List[tuple[str, str]],
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         レポートセクション生成のプロンプトを組み立てる。
 
@@ -441,7 +456,7 @@ class ContextService:
             f"セクション: {section_name}\n\n"
             f"このセクションの内容のみを出力してください。マークダウン形式で記述してください。"
         )
-        return self._guard_budget(prompt, f"report_section:{section_name}")
+        return self._guard_budget(prompt, f"report_section:{section_name}"), _estimate_tokens(prompt)
 
     def build_qa_prompt(
         self,
@@ -450,7 +465,7 @@ class ContextService:
         top_summaries: List[tuple[str, str]],
         full_contents: List[tuple[str, str]],
         conversation_history: List[Message],
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
 
@@ -493,7 +508,7 @@ class ContextService:
         parts.append(f"質問: {question}\n\n上記のコードベースに基づいて回答してください。")
 
         prompt = "\n\n".join(parts)
-        return self._guard_budget(prompt, "qa")
+        return self._guard_budget(prompt, "qa"), _estimate_tokens(prompt)
 
     # ------------------------------------------------------------------
     # Resumeモード用コンテキスト

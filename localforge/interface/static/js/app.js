@@ -1129,6 +1129,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     cpuAutoBtn.addEventListener("click", () => applyCpuThread(null));
   }
 
+  // 生成ログモーダル
+  const showLogsBtn = document.getElementById("show-logs-btn");
+  if (showLogsBtn) showLogsBtn.addEventListener("click", showGenerationLogs);
+
+  const logsModalClose = document.getElementById("logs-modal-close");
+  const logsModal = document.getElementById("logs-modal");
+  if (logsModalClose && logsModal) {
+    logsModalClose.addEventListener("click", () => {
+      logsModal.style.display = "none";
+    });
+  }
+
   // Ollamaライブ出力パネル初期化
   OllamaPanel.init();
 
@@ -1139,11 +1151,100 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 起動時Ollamaヘルスチェック
   await checkOllamaHealth();
 
+  // VRAM情報の定期更新（30秒おき）
+  setInterval(refreshVramInfo, 30000);
+  refreshVramInfo();
+
   // リサイズ機能の初期化
   initResizers();
 
+  // 生成ログを表示する
+  async function showGenerationLogs() {
+    try {
+      const data = await apiRequest("/api/generate/logs");
+      const logs = data.logs || [];
+      const tbody = document.getElementById("logs-tbody");
+      const summaryEl = document.getElementById("token-usage-summary");
+      const modal = document.getElementById("logs-modal");
+
+      if (modal) modal.style.display = "flex";
+      if (!tbody || !summaryEl) return;
+
+      tbody.innerHTML = logs.map(l => `
+        <tr>
+          <td>${new Date(l.timestamp).toLocaleString()}</td>
+          <td>${escapeHtml(l.model)}</td>
+          <td>${escapeHtml(l.operation)}</td>
+          <td>${l.prompt_tokens_estimated}</td>
+          <td>${l.response_time_ms ? Math.round(l.response_time_ms) : "-"}</td>
+          <td>${escapeHtml(l.status)}</td>
+        </tr>
+      `).join("");
+
+      // トークン使用量の集計
+      const usageByModel = {};
+      logs.forEach(l => {
+        usageByModel[l.model] = (usageByModel[l.model] || 0) + (l.prompt_tokens_estimated || 0);
+      });
+
+      summaryEl.innerHTML = "<strong>モデル別推定トークン使用量:</strong><br>" +
+        Object.entries(usageByModel).map(([m, t]) => `${escapeHtml(m)}: ${t} tokens`).join("<br>");
+
+    } catch (err) {
+      showAlert(`ログの取得に失敗しました: ${err.message}`, "error");
+    }
+  }
+
+  // 保存されたレイアウト状態を復元
+  restoreLayout();
+
+  // テーマの初期化
+  initTheme();
+
   updateStatusBar("LocalForge 準備完了 — フォルダを開いてください");
 });
+
+/**
+ * VRAM情報を取得してステータスバーを更新する。
+ */
+async function refreshVramInfo() {
+  const vramEl = document.getElementById("status-vram");
+  if (!vramEl) return;
+
+  try {
+    const data = await apiRequest("/api/project/vram");
+    if (data && data.total) {
+      const usedGb = (data.used / 1024).toFixed(1);
+      const totalGb = (data.total / 1024).toFixed(1);
+      const pct = Math.round((data.used / data.total) * 100);
+      vramEl.textContent = `VRAM: ${usedGb} / ${totalGb} GB (${pct}%)`;
+      vramEl.style.display = "inline";
+    } else {
+      vramEl.style.display = "none";
+    }
+  } catch (e) {
+    vramEl.style.display = "none";
+  }
+}
+
+/**
+ * テーマの切り替え機能を初期化する。
+ */
+function initTheme() {
+  const themeToggle = document.getElementById("theme-toggle");
+  if (!themeToggle) return;
+
+  const currentTheme = localStorage.getItem("localforge-theme") || "dark";
+  if (currentTheme === "light") {
+    document.body.classList.add("light-theme");
+  }
+
+  themeToggle.addEventListener("click", () => {
+    document.body.classList.toggle("light-theme");
+    const newTheme = document.body.classList.contains("light-theme") ? "light" : "dark";
+    localStorage.setItem("localforge-theme", newTheme);
+  });
+}
 
 /**
  * サイドバーのリサイズ機能を初期化する。
@@ -1176,6 +1277,7 @@ function initResizers() {
     leftResizer.classList.remove("resizing");
     document.removeEventListener("mousemove", resizeLeft);
     document.removeEventListener("mouseup", stopResizeLeft);
+    saveLayout();
   }
 
   // 右サイドバーのリサイズ
@@ -1197,5 +1299,30 @@ function initResizers() {
     rightResizer.classList.remove("resizing");
     document.removeEventListener("mousemove", resizeRight);
     document.removeEventListener("mouseup", stopResizeRight);
+    saveLayout();
   }
+}
+
+/**
+ * レイアウト状態をlocalStorageに保存する。
+ */
+function saveLayout() {
+  const layout = document.querySelector(".app-layout");
+  const leftWidth = layout.style.getPropertyValue("--sidebar-l");
+  const rightWidth = layout.style.getPropertyValue("--sidebar-r");
+
+  if (leftWidth) localStorage.setItem("localforge-sidebar-l", leftWidth);
+  if (rightWidth) localStorage.setItem("localforge-sidebar-r", rightWidth);
+}
+
+/**
+ * localStorageからレイアウト状態を復元する。
+ */
+function restoreLayout() {
+  const layout = document.querySelector(".app-layout");
+  const leftWidth = localStorage.getItem("localforge-sidebar-l");
+  const rightWidth = localStorage.getItem("localforge-sidebar-r");
+
+  if (leftWidth) layout.style.setProperty("--sidebar-l", leftWidth);
+  if (rightWidth) layout.style.setProperty("--sidebar-r", rightWidth);
 }

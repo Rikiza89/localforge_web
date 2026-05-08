@@ -236,6 +236,37 @@ class OllamaClient:
         except Exception as exc:
             logger.warning("モデルアンロード失敗 (%s): %s", model, exc)
 
+    def get_vram_info(self) -> Optional[dict]:
+        """
+        nvidia-smi を使用して現在のVRAM使用状況を取得する。
+        CUDAが利用できない・エラーが発生した場合は None を返す。
+
+        Returns:
+            {"total": int, "used": int, "free": int} or None (単位: MiB)
+        """
+        if not self.cuda_available:
+            return None
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.total,memory.used,memory.free",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return None
+
+            # 最初の1行（最初のGPU）のみを取得
+            line = result.stdout.strip().split("\n")[0]
+            total, used, free = map(int, line.split(","))
+            return {"total": total, "used": used, "free": free}
+        except Exception:
+            return None
+
     def generate_sync(
         self,
         model: str,
