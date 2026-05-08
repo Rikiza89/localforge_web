@@ -23,6 +23,21 @@
   --sidebar-r:    280px;
 }
 
+body.light-theme {
+  --bg-primary:   #ffffff;
+  --bg-secondary: #f3f3f3;
+  --bg-tertiary:  #e5e5e5;
+  --bg-input:     #ffffff;
+  --text-primary: #333333;
+  --text-muted:   #666666;
+  --accent:       #005fb8;
+  --accent-hover: #0078d4;
+  --success:      #107c10;
+  --warning:      #84572c;
+  --danger:       #a4262c;
+  --border:       #d1d1d1;
+}
+
 /* =========================================================================
    リセット・ベース
    ========================================================================= */
@@ -320,6 +335,18 @@ body {
   cursor: col-resize;
   transition: background 0.2s;
   z-index: 10;
+  position: relative;
+}
+
+/* 透明なヒットエリアの拡大 */
+.resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+  z-index: 11;
 }
 
 .resizer:hover, .resizer.resizing {

@@ -100,13 +100,14 @@ class GenerationService:
             SSEペイロード辞書（token, done, error）
         """
         reset_cancel()
-        prompt = self._context.build_plan_prompt(
+        prompt, tokens = self._context.build_plan_prompt(
             user_prompt=user_prompt,
             folder_name=folder_name,
             file_tree_text=file_tree_text,
             context_md=context_md,
             git_log=git_log,
             file_summaries=file_summaries,
+            model_name=model,
         )
 
         start_time = time.time()
@@ -126,6 +127,7 @@ class GenerationService:
             mode="generate",
             model=model,
             operation="plan",
+            prompt_tokens_estimated=tokens,
             response_time_ms=elapsed,
         )
         log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
@@ -235,7 +237,8 @@ class GenerationService:
                     "done": idx,
                     "total": total,
                     "current_file": planned_file.path,
-                }
+                },
+                "status": f"⏳ {planned_file.path} を生成中...",
             }
 
             # 依存ファイルのコンテンツを収集
@@ -285,7 +288,7 @@ class GenerationService:
                             f"チャンク {chunk_idx + 1}/{total_chunks} を分析中..."
                         )}
 
-                    prompt = self._context.build_file_diff_prompt(
+                    prompt, tokens = self._context.build_file_diff_prompt(
                         target_file=planned_file.path,
                         modification_notes=modification_notes,
                         chunk_content=chunk_content,
@@ -293,6 +296,7 @@ class GenerationService:
                         chunk_idx=chunk_idx,
                         total_chunks=total_chunks,
                     )
+                    log_entry.prompt_tokens_estimated += tokens
 
                     chunk_parts: List[str] = []
                     try:
@@ -322,6 +326,32 @@ class GenerationService:
                     existing_content, combined_diff
                 )
 
+                # 失敗した場合のリトライ（1回のみ）
+                if failed and not _cancel_flag:
+                    yield {"status": f"🔄 {planned_file.path}: ブロック不一致のためリトライ中..."}
+                    retry_diff_parts = []
+                    for chunk_idx, chunk_content in enumerate(chunks):
+                        prompt = self._context.build_file_diff_prompt(
+                            target_file=planned_file.path,
+                            modification_notes=f"【リトライ】以前の生成で以下のコードブロックが一致しませんでした。より正確なSEARCHブロックを使用して再試行してください：\n" + "\n".join(failed),
+                            chunk_content=chunk_content,
+                            context_md=context_md,
+                            chunk_idx=chunk_idx,
+                            total_chunks=total_chunks,
+                        )
+                        chunk_parts = []
+                        for token in self._llm.stream_completion(model, prompt):
+                            if _cancel_flag: break
+                            chunk_parts.append(token)
+                        retry_diff_parts.append("".join(chunk_parts))
+                        if _cancel_flag: break
+
+                    if not _cancel_flag:
+                        combined_diff = "\n".join(retry_diff_parts)
+                        modified_content, applied, failed = self._apply_search_replace_blocks(
+                            existing_content, combined_diff
+                        )
+
                 elapsed = (time.time() - start_time) * 1000
                 self._update_log_status(log_path, planned_file.path, elapsed)
 
@@ -334,10 +364,11 @@ class GenerationService:
 
                 if failed:
                     yield {"status": (
-                        f"⚠ {planned_file.path}: {len(failed)}件のブロックが一致しませんでした"
+                        f"⚠ {planned_file.path}: {len(failed)}件のブロックが最終的に一致しませんでした"
                     )}
 
                 try:
+                    yield {"status": f"💾 {planned_file.path} に変更を保存中..."}
                     self._fs.write_text(file_path, modified_content)
                 except Exception as exc:
                     logger.error("ファイル書き込みエラー [%s]: %s", planned_file.path, exc)
@@ -355,19 +386,19 @@ class GenerationService:
             else:
                 # ── CREATE路: ファイル全体をゼロから生成（従来通り） ──
                 operation = "generate_file"
-                log_entry = GenerationLogEntry(
-                    mode="generate", model=model, operation=operation,
-                    file_path=planned_file.path, status="pending",
-                )
-                self._index_adapter.append_log_entry(log_path, log_entry)
-
-                prompt = self._context.build_file_generation_prompt(
+                prompt, tokens = self._context.build_file_generation_prompt(
                     target_file=planned_file.path,
                     target_description=planned_file.description,
                     context_md=context_md,
                     plan_json=plan_json,
                     dependency_contents=dependency_contents,
                 )
+                log_entry = GenerationLogEntry(
+                    mode="generate", model=model, operation=operation,
+                    file_path=planned_file.path, status="pending",
+                    prompt_tokens_estimated=tokens,
+                )
+                self._index_adapter.append_log_entry(log_path, log_entry)
 
                 file_content_parts: List[str] = []
                 try:
@@ -387,6 +418,7 @@ class GenerationService:
                 self._update_log_status(log_path, planned_file.path, elapsed)
 
                 try:
+                    yield {"status": f"💾 {planned_file.path} を新規作成中..."}
                     self._fs.write_text(file_path, file_content)
                 except Exception as exc:
                     logger.error("ファイル書き込みエラー [%s]: %s", planned_file.path, exc)

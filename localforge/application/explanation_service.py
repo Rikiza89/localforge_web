@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Generator, List, Optional
 
 from localforge.application.analysis_service import AnalysisService
 from localforge.application.context_service import ContextService
-from localforge.domain.models import FileChunk, Message, ProjectIndex
+from localforge.domain.models import FileChunk, GenerationLogEntry, Message, ProjectIndex
 from localforge.infrastructure.ollama_client import OllamaClient
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ REPORT_SECTIONS = [
     "Test Coverage",
     "Notable Patterns & Design Decisions",
     "Potential Issues & Technical Debt",
+    "Project Health & Code Quality Analysis",
     "How to Extend This Project",
 ]
 
@@ -109,12 +111,13 @@ class ExplanationService:
             ]
 
             # プロンプトを構築してストリーミング生成
-            prompt = self._context.build_report_section_prompt(
+            prompt, tokens = self._context.build_report_section_prompt(
                 section_name=section_name,
                 project_index_json=index_json,
                 relevant_summaries=relevant_summaries,
             )
 
+            start_time = time.time()
             section_tokens: List[str] = []
             try:
                 for token in self._llm.stream_completion(model, prompt):
@@ -123,6 +126,18 @@ class ExplanationService:
             except Exception as exc:
                 logger.error("セクション生成エラー [%s]: %s", section_name, exc)
                 yield {"token": f"\n[エラー: {exc}]\n"}
+
+            elapsed = (time.time() - start_time) * 1000
+            log_entry = GenerationLogEntry(
+                mode="explain",
+                model=model,
+                operation=f"report:{section_name}",
+                prompt_tokens_estimated=tokens,
+                response_time_ms=elapsed,
+                status="completed",
+            )
+            log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
+            self._analysis._index_adapter.append_log_entry(log_path, log_entry)
 
             completed_sections.append((section_name, "".join(section_tokens)))
 
@@ -210,7 +225,7 @@ class ExplanationService:
 
         top_summaries = [(c.path, c.summary or "") for c in top_chunks]
 
-        prompt = self._context.build_qa_prompt(
+        prompt, tokens = self._context.build_qa_prompt(
             question=question,
             project_index_json=index_json,
             top_summaries=top_summaries,
@@ -218,13 +233,28 @@ class ExplanationService:
             conversation_history=history[-10:],
         )
 
+        start_time = time.time()
+        answer_tokens: List[str] = []
         try:
             for token in self._llm.stream_completion(model, prompt):
+                answer_tokens.append(token)
                 yield {"token": token}
         except Exception as exc:
             logger.error("Q&A回答生成エラー: %s", exc)
             yield {"error": str(exc)}
             return
+
+        elapsed = (time.time() - start_time) * 1000
+        log_entry = GenerationLogEntry(
+            mode="explain",
+            model=model,
+            operation="qa",
+            prompt_tokens_estimated=tokens,
+            response_time_ms=elapsed,
+            status="completed",
+        )
+        log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
+        self._analysis._index_adapter.append_log_entry(log_path, log_entry)
 
         yield {"done": True}
 
