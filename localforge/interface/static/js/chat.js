@@ -93,7 +93,7 @@ async function sendChatMessage(question) {
         }
         answerBuffer += token;
         aEl.innerHTML = _renderMd(answerBuffer);
-        historyEl.scrollTop = historyEl.scrollHeight;
+        _autoScroll(historyEl);
       },
       onDone: () => {
         // 会話履歴にアシスタントの回答を追加
