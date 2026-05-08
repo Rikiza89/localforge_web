@@ -14,7 +14,6 @@ from localforge.domain.models import FileChunk, GenerationLogEntry, ProjectIndex
 
 logger = logging.getLogger(__name__)
 
-
 class IndexAdapter:
     """
     ProjectIndexおよびFileChunkのJSONL永続化を担当するアダプタークラス。

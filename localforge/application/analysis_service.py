@@ -35,11 +35,11 @@ from localforge.infrastructure.vector_adapter import VectorAdapter
 logger = logging.getLogger(__name__)
 
 # ハイブリッド戦略のしきい値（行数）
-_HYBRID_THRESHOLD = 200
+_HYBRID_THRESHOLD = 350
 # ハイブリッド戦略: 先頭の行数
-_HYBRID_HEAD = 80
+_HYBRID_HEAD = 150
 # ハイブリッド戦略: 末尾の行数
-_HYBRID_TAIL = 40
+_HYBRID_TAIL = 150
 # 設定・データファイルの拡張子（LLMサマリー不要）
 _HEURISTIC_EXTENSIONS = frozenset({
     ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
@@ -825,7 +825,7 @@ class AnalysisService:
         self,
         chunks: List[FileChunk],
         query: str,
-        top_n: int = 5,
+        top_n: int = 15,
     ) -> List[FileChunk]:
         """
         セマンティック検索でFileChunkをランキングして上位N件を返す。
