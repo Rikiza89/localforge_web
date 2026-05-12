@@ -211,17 +211,12 @@ class ExplanationService:
         # セマンティック検索で上位5件を選択（ChromaDB未使用時はキーワードフォールバック）
         top_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=5)
 
-        # ハイブリッドファイルのフルコンテンツ（top_5のうちhybridのもの）
+        # 関連ファイルのコンテンツ（smallファイルは全文、largeファイルはハイブリッドインデックスの内容）
         full_contents: List[tuple[str, str]] = []
         for chunk in top_chunks:
-            if chunk.strategy.value == "hybrid":
-                file_path = root / chunk.path
-                if file_path.exists():
-                    try:
-                        content = file_path.read_text(encoding="utf-8", errors="replace")
-                        full_contents.append((chunk.path, content[:3000]))
-                    except OSError:
-                        pass
+            # chunk.content には indexing 時に作成された最適な内容（full または hybrid）が既に入っている
+            # これをそのまま使うことで、大規模ファイルでも landmarks 等が含まれた最適なコンテキストを渡せる
+            full_contents.append((chunk.path, chunk.content))
 
         top_summaries = [(c.path, c.summary or "") for c in top_chunks]
 
