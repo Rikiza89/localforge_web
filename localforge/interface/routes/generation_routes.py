@@ -155,18 +155,28 @@ def stream_plan():
         f"- {e['hash']} {e['message']}" for e in git_log_entries
     )
 
-    # E: RAGで既存ファイルの関連サマリーを取得してプランプロンプトに注入する
+    # ProjectIndex（プロジェクト全体概要）を取得してプランプロンプトに注入する
+    project_index_json = None
     file_summaries = []
     try:
-        index_path = root / ".localforge" / "index.jsonl"
-        chunks = _get_index_adapter().load_chunks(index_path)
-        if chunks:
-            top_chunks = _get_analysis_svc().get_top_chunks_semantic(
-                chunks, user_prompt, top_n=15
+        analysis_svc = _get_analysis_svc()
+        pi_path = root / ".localforge" / "project_index.json"
+        index_adapter = _get_index_adapter()
+        project_index = index_adapter.load_index(pi_path)
+        if project_index:
+            import json as _json
+            index_dict = project_index.model_dump(
+                include={"project_name", "summary", "total_files", "indexed_files"}
+            )
+            index_dict["files"] = [c.path for c in project_index.file_chunks]
+            project_index_json = _json.dumps(index_dict, ensure_ascii=False)
+            # RAG: クエリに関連するファイルサマリーを追加
+            top_chunks = analysis_svc.get_top_chunks_semantic(
+                project_index.file_chunks, user_prompt, top_n=15
             )
             file_summaries = [(c.path, c.summary) for c in top_chunks if c.summary]
     except Exception as exc:
-        logger.warning("RAGファイルサマリー取得エラー: %s", exc)
+        logger.warning("ProjectIndex/RAGファイルサマリー取得エラー: %s", exc)
 
     gen = generation_svc.stream_plan(
         root=root,
@@ -177,6 +187,7 @@ def stream_plan():
         context_md=context_md,
         git_log=git_log,
         file_summaries=file_summaries,
+        project_index_json=project_index_json,
     )
     return _sse_response(gen)
 

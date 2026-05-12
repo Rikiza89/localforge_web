@@ -81,6 +81,7 @@ class GenerationService:
         context_md: str,
         git_log: str,
         file_summaries: Optional[List[tuple[str, str]]] = None,
+        project_index_json: Optional[str] = None,
     ) -> Generator[dict, None, None]:
         """
         ユーザープロンプトからプロジェクト生成プランをストリーミング生成する。
@@ -95,6 +96,7 @@ class GenerationService:
             context_md: context.mdの内容
             git_log: gitログテキスト
             file_summaries: RAGで選出した既存ファイルサマリーのリスト（任意）
+            project_index_json: ProjectIndex JSON（プロジェクト全体概要、任意）
 
         Yields:
             SSEペイロード辞書（token, done, error）
@@ -108,6 +110,7 @@ class GenerationService:
             git_log=git_log,
             file_summaries=file_summaries,
             model_name=model,
+            project_index_json=project_index_json,
         )
 
         start_time = time.time()

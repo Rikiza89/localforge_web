@@ -84,10 +84,12 @@ class ExplanationService:
             yield {"error": "ProjectIndexが見つかりません。先にインデックスを構築してください。"}
             return
 
-        index_json = project_index.model_dump_json(
+        chunks = project_index.file_chunks
+        index_dict = project_index.model_dump(
             include={"project_name", "summary", "total_files", "indexed_files"}
         )
-        chunks = project_index.file_chunks
+        index_dict["files"] = [c.path for c in chunks]
+        index_json = json.dumps(index_dict, ensure_ascii=False)
 
         total_sections = len(REPORT_SECTIONS)
         completed_sections: List[tuple[str, str]] = []  # (name, content)
@@ -234,15 +236,16 @@ class ExplanationService:
         if not selected_paths:
             top_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
         else:
-            # 選択されたパス + セマンティック top-5 をマージして重複排除
-            semantic_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=5)
-            seen: set[str] = set(selected_paths)
-            merged = [chunk_map[p] for p in selected_paths if p in chunk_map]
-            for c in semantic_chunks:
-                if c.path not in seen:
-                    merged.append(c)
-                    seen.add(c.path)
-            top_chunks = merged[:10]
+            # フェーズ 1 の選択を優先する。不足分(10件未満)のみセマンティック検索で補完する
+            top_chunks = [chunk_map[p] for p in selected_paths if p in chunk_map]
+            if len(top_chunks) < 10:
+                seen: set[str] = {c.path for c in top_chunks}
+                for c in self._analysis.get_top_chunks_semantic(chunks, question, top_n=10):
+                    if c.path not in seen:
+                        top_chunks.append(c)
+                        seen.add(c.path)
+                        if len(top_chunks) >= 10:
+                            break
 
         # A1 + B8: フルコンテンツ注入
         # - FULL 戦略チャンク（≤200 行）: chunk.content をそのまま使う（ディスク再読み不要）

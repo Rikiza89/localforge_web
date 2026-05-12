@@ -85,6 +85,7 @@ class ContextService:
         git_log: str,
         file_summaries: Optional[List[tuple[str, str]]] = None,
         model_name: str = "",
+        project_index_json: Optional[str] = None,
     ) -> str:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
@@ -97,6 +98,7 @@ class ContextService:
             context_md: context.mdの内容
             git_log: gitログ（直近5コミット）
             file_summaries: RAG検索で選出した既存ファイルサマリーのリスト（任意）
+            project_index_json: ProjectIndexのJSON文字列（プロジェクト全体の概要、任意）
 
         Returns:
             組み立てたプロンプト文字列
@@ -104,6 +106,11 @@ class ContextService:
         parts = [
             f"プロジェクト名: {folder_name}",
         ]
+
+        # プロジェクト全体の概要を最優先で注入（Resume/Generateの精度向上）
+        if project_index_json:
+            parts.append(f"プロジェクト全体の概要:\n{project_index_json}")
+
         if file_tree_text.strip():
             parts.append(f"現在のファイル構成:\n{file_tree_text}")
 

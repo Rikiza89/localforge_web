@@ -339,14 +339,16 @@ def standalone_func():
         assert index_path.exists()
 
     def test_build_index_no_status_events_without_vector(self, analysis_service, python_fixture_project):
-        """VectorAdapterなしの場合、statusイベントが生成されないことをテスト。"""
+        """VectorAdapterなしの場合、埋め込みフェーズのstatusイベントは生成されないことをテスト。"""
         events = list(analysis_service.build_index(
             root=python_fixture_project,
             model="llama3.2",
         ))
         status_events = [e for e in events if "status" in e]
-        # vector=None なので埋め込みフェーズは実行されずstatusイベントは0件
-        assert len(status_events) == 0
+        # vector=None なので埋め込みフェーズは実行されない
+        # ProjectIndexサマリー生成のstatusイベントは1件のみ許容する
+        embed_status = [e for e in status_events if "ベクトル" in e.get("status", "")]
+        assert len(embed_status) == 0
 
     def test_build_index_emits_status_events_with_vector(
         self, analysis_service_with_vector, mock_vector, python_fixture_project
