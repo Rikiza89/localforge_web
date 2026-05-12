@@ -881,7 +881,9 @@ class AnalysisService:
         """
         if self._vector is not None and self._vector.is_initialized():
             return self._vector.get_top_chunks_semantic(chunks, query, top_n)
-        return self.get_top_chunks_by_keywords(chunks, query, top_n)
+        # ChromaDB 未使用時は BM25 にフォールバック（旧キーワードカウントより高精度）
+        from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25
+        return get_top_chunks_bm25(chunks, query, top_n)
 
     def get_top_chunks_by_keywords(
         self,
@@ -890,21 +892,16 @@ class AnalysisService:
         top_n: int = 5,
     ) -> List[FileChunk]:
         """
-        キーワードオーバーラップでファイルチャンクをランキングして上位N件を返す。
+        BM25 でファイルチャンクをランキングして上位 N 件を返す。
+        旧キーワードカウント実装を BM25 に置き換え。
 
         Args:
-            chunks: 全FileChunkのリスト
+            chunks: 全 FileChunk のリスト
             query: 検索クエリ文字列
             top_n: 返す件数
 
         Returns:
-            上位N件のFileChunkリスト
+            上位 N 件の FileChunk リスト
         """
-        query_words = set(query.lower().split())
-
-        def score(chunk: FileChunk) -> int:
-            text = f"{chunk.path} {chunk.summary or ''} {chunk.content[:200]}".lower()
-            return sum(1 for w in query_words if w in text)
-
-        sorted_chunks = sorted(chunks, key=score, reverse=True)
-        return sorted_chunks[:top_n]
+        from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25
+        return get_top_chunks_bm25(chunks, query, top_n)
