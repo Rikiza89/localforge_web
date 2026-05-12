@@ -58,8 +58,6 @@ _LOCK_FILE_NAMES = frozenset({
 })
 # この実質行数以下のファイルはLLMを使わない
 _HEURISTIC_LINE_THRESHOLD = 20
-# 1バッチあたりのトークン予算（適応的バッチサイズ計算に使用）
-_TOKEN_BUDGET_PER_BATCH = 3500
 # ヒューリスティック処理中にN件ごとにディスクへ中間保存する
 _INCREMENTAL_SAVE_INTERVAL = 50
 # .localforgeディレクトリ名
@@ -243,51 +241,6 @@ def _try_path_summary(path: Path, size: int) -> Optional[str]:
         return f"{lang} のテストスイート（{stem} のテスト）"
 
     return None
-
-
-def _make_batches(
-    needs_llm: List[Tuple["Path", "FileChunk"]],
-) -> List[List["FileChunk"]]:
-    """
-    トークン予算に基づいてファイルを適応的にバッチ分割する。
-    小さなファイルは1バッチにまとめて詰め込み、大きなファイルは単独バッチにする。
-    推定トークン数 = len(content) // 4（文字ベースの高速ヒューリスティック）
-    """
-    batches: List[List["FileChunk"]] = []
-    current_batch: List["FileChunk"] = []
-    current_tokens = 0
-
-    for _, chunk in needs_llm:
-        estimated = len(chunk.content) // 4
-        if current_batch and current_tokens + estimated > _TOKEN_BUDGET_PER_BATCH:
-            batches.append(current_batch)
-            current_batch = [chunk]
-            current_tokens = estimated
-        else:
-            current_batch.append(chunk)
-            current_tokens += estimated
-
-    if current_batch:
-        batches.append(current_batch)
-
-    return batches
-
-
-def _parse_batch_summaries(response: str) -> Dict[str, str]:
-    """
-    バッチLLM応答から FILE: / SUMMARY: ペアを解析してパス→サマリーの辞書を返す。
-    認識できない行は無視するため、LLMが余計なテキストを出力しても壊れない。
-    """
-    result: Dict[str, str] = {}
-    current_path: Optional[str] = None
-    for raw_line in response.splitlines():
-        line = raw_line.strip()
-        if line.startswith("FILE:"):
-            current_path = line[len("FILE:"):].strip()
-        elif line.startswith("SUMMARY:") and current_path is not None:
-            result[current_path] = line[len("SUMMARY:"):].strip()
-            current_path = None
-    return result
 
 
 class AnalysisService:
@@ -555,43 +508,37 @@ class AnalysisService:
                 except Exception as exc:
                     logger.warning("中間インデックス保存失敗: %s", exc)
 
-            # Tier-2: LLMバッチ処理（適応的バッチサイズ + 2ワーカー並列）
-            batches = _make_batches(needs_llm)
-
-            def _run_batch(
-                batch_chunks: List[FileChunk],
-            ) -> Tuple[List[FileChunk], Dict[str, str]]:
+            # Tier-2: tree-sitter シンボル抽出（LLM呼び出しなし）
+            from localforge.infrastructure.symbol_extractor import extract_symbols, symbols_to_summary
+            t2_since_flush = 0
+            for _f, chunk in needs_llm:
                 try:
-                    prompt = self._context.build_batch_file_summary_prompt(batch_chunks)
-                    response = self._llm.generate_sync(model, prompt)
-                    return batch_chunks, _parse_batch_summaries(response)
+                    syms = extract_symbols(chunk.path, chunk.content, chunk.language)
+                    chunk.symbols = syms
+                    summary = symbols_to_summary(chunk.path, chunk.language, syms)
+                    chunk.summary = summary if summary else f"{chunk.path} ({chunk.language or 'unknown'})"
                 except Exception as exc:
-                    logger.warning("バッチサマリー生成エラー: %s", exc)
-                    return batch_chunks, {}
-
-            # CPU推論では並列LLMバッチはコンテキストスイッチのオーバーヘッドが勝るため直列化する
-            _llm_workers = 2 if self._llm.cuda_available else 1
-            with ThreadPoolExecutor(max_workers=_llm_workers) as llm_executor:
-                future_to_batch = {
-                    llm_executor.submit(_run_batch, batch): batch
-                    for batch in batches
-                }
-                for future in as_completed(future_to_batch):
-                    batch_chunks, summaries = future.result()
-                    for chunk in batch_chunks:
-                        summary = summaries.get(chunk.path, "").strip()
-                        chunk.summary = summary if summary else "サマリー生成に失敗しました"
-                        chunk.indexed_at = datetime.utcnow()
-                        all_chunks.append(chunk)
-                        done_count += 1
-                        if self._vector is not None:
-                            embed_queue.append(chunk)
-                        yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
-                    # LLMバッチ完了ごとにディスクへフラッシュ（再起動時の復元ポイント）
+                    logger.warning("シンボル抽出エラー: %s — %s", chunk.path, exc)
+                    chunk.summary = f"{chunk.path} ({chunk.language or 'unknown'})"
+                chunk.indexed_at = datetime.utcnow()
+                all_chunks.append(chunk)
+                done_count += 1
+                t2_since_flush += 1
+                if self._vector is not None:
+                    embed_queue.append(chunk)
+                yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
+                if t2_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
                     try:
                         self._index_adapter.save_chunks(index_path, all_chunks)
                     except Exception as exc:
                         logger.warning("中間インデックス保存失敗: %s", exc)
+                    t2_since_flush = 0
+
+            if t2_since_flush > 0:
+                try:
+                    self._index_adapter.save_chunks(index_path, all_chunks)
+                except Exception as exc:
+                    logger.warning("中間インデックス保存失敗: %s", exc)
 
         # インデックスを保存
         try:

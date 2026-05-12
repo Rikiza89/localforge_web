@@ -65,9 +65,13 @@ def get_top_chunks_bm25(
         logger.debug("rank-bm25 未インストール: キーワードカウントフォールバックを使用")
         return _keyword_fallback(chunks, query_tokens, top_n)
 
-    # コーパス: パス + サマリー + コンテンツ先頭 300 文字をトークナイズ
+    # コーパス: パス + サマリー + シンボル名 + コンテンツ先頭 300 文字をトークナイズ
     corpus = [
-        _tokenize(f"{c.path} {c.summary or ''} {c.content[:300]}")
+        _tokenize(
+            f"{c.path} {c.summary or ''} "
+            f"{' '.join(s.name for s in c.symbols) if c.symbols else ''} "
+            f"{c.content[:300]}"
+        )
         for c in chunks
     ]
 
