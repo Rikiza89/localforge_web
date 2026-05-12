@@ -23,7 +23,6 @@ _CHROMA_DIR = "chroma"
 _CONNECT_TIMEOUT = 30
 _EMBED_TIMEOUT = 300
 
-
 class VectorAdapter:
     """
     ChromaDBを使ったベクトルインデックスの永続化・検索を担うアダプター。

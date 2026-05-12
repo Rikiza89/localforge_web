@@ -130,6 +130,7 @@ class OllamaClient:
         prompt: str,
         system: Optional[str] = None,
         read_timeout: int = _READ_TIMEOUT,
+        num_ctx: Optional[int] = None,  # Add num_ctx here
     ) -> Generator[str, None, None]:
         """
         Ollama generate APIを使用してテキストをストリーミング生成する。
@@ -154,13 +155,28 @@ class OllamaClient:
         if system:
             payload["system"] = system
 
+        # options: dict = {}
+        # if self.cuda_available:
+        #     options["num_gpu"] = -1          # 全レイヤーをGPUにオフロード
+        # if self.num_thread is not None:
+        #     options["num_thread"] = self.num_thread
+        # if options:
+        #     payload["options"] = options
+
         options: dict = {}
         if self.cuda_available:
             options["num_gpu"] = -1          # 全レイヤーをGPUにオフロード
         if self.num_thread is not None:
             options["num_thread"] = self.num_thread
+            
+        # --- NEW CODE START ---
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx     # トークンコンテキスト上限を適用
+        # --- NEW CODE END ---
+            
         if options:
             payload["options"] = options
+
 
         logger.debug("Ollamaストリーミング開始: model=%s", model)
 
@@ -273,6 +289,7 @@ class OllamaClient:
         model: str,
         prompt: str,
         system: Optional[str] = None,
+        num_ctx: Optional[int] = None,  # Add num_ctx here
     ) -> str:
         """
         ストリーミングなしで完全なテキスト応答を生成する（テスト・内部用）。
@@ -290,4 +307,11 @@ class OllamaClient:
             OllamaConnectionError: サーバーへの接続に失敗した場合
             OllamaModelNotFoundError: 指定モデルが見つからない場合
         """
-        return "".join(self.stream_completion(model, prompt, system, read_timeout=_GENERATE_READ_TIMEOUT))
+        return "".join(self.stream_completion(
+            model=model, 
+            prompt=prompt, 
+            system=system, 
+            read_timeout=_GENERATE_READ_TIMEOUT,
+            num_ctx=num_ctx  # Pass it down to the stream_completion method
+        ))
+        # return "".join(self.stream_completion(model, prompt, system, read_timeout=_GENERATE_READ_TIMEOUT))
