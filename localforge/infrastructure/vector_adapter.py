@@ -197,7 +197,7 @@ class VectorAdapter:
         if model is None:
             return None
         try:
-            embedding = model.encode(text, normalize_embeddings=True)
+            embedding = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
             return embedding.tolist()
         except Exception as exc:
             logger.warning("埋め込み生成エラー: %s", exc)
