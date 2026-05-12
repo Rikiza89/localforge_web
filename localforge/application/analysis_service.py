@@ -552,7 +552,7 @@ class AnalysisService:
                 except Exception as exc:
                     logger.warning("中間インデックス保存失敗: %s", exc)
 
-            # Tier-2: LLMバッチ処理（適応的バッチサイズ + 2ワーカー並列）
+            # Tier-2: LLMバッチ処理（適応的バッチサイズ + 2ワーカー並列、CPU時は1）
             batches = _make_batches(needs_llm)
 
             def _run_batch(
@@ -566,7 +566,8 @@ class AnalysisService:
                     logger.warning("バッチサマリー生成エラー: %s", exc)
                     return batch_chunks, {}
 
-            with ThreadPoolExecutor(max_workers=2) as llm_executor:
+            max_llm_workers = 2 if self._llm.cuda_available else 1
+            with ThreadPoolExecutor(max_workers=max_llm_workers) as llm_executor:
                 future_to_batch = {
                     llm_executor.submit(_run_batch, batch): batch
                     for batch in batches
@@ -617,7 +618,8 @@ class AnalysisService:
                     except Exception as exc:
                         logger.warning("埋め込みエラー (%s): %s", chunk.path, exc)
 
-                with ThreadPoolExecutor(max_workers=4) as embed_ex:
+                max_embed_workers = 4 if self._llm.cuda_available else 1
+                with ThreadPoolExecutor(max_workers=max_embed_workers) as embed_ex:
                     futures = {embed_ex.submit(_do_embed, c): c for c in embed_queue}
                     for future in as_completed(futures):
                         future.result()

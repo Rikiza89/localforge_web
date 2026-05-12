@@ -334,7 +334,7 @@ class ContextService:
     def build_batch_file_summary_prompt(
         self,
         file_chunks: List["FileChunk"],
-        content_limit: int = 400,
+        content_limit: int = 1000,
     ) -> str:
         """
         複数ファイルを一括でサマリー生成するプロンプトを組み立てる。
