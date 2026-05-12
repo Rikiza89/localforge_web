@@ -40,6 +40,21 @@ class ChunkStrategy(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
+# シンボル（tree-sitter AST 抽出）
+# ---------------------------------------------------------------------------
+
+class Symbol(BaseModel):
+    """ファイルから抽出されたコードシンボル（関数・クラス・インポートなど）。"""
+    kind: Literal["function", "method", "class", "import"]
+    name: str
+    signature: str = ""
+    docstring: str = ""
+    line_start: int = 0
+    line_end: int = 0
+    parent: Optional[str] = None  # メソッドの場合はクラス名
+
+
+# ---------------------------------------------------------------------------
 # ファイルノード（ファイルツリー表示用）
 # ---------------------------------------------------------------------------
 
@@ -92,6 +107,7 @@ class FileChunk(BaseModel):
     summary: Optional[str] = None
     language: Optional[str] = None
     indexed_at: Optional[datetime] = None
+    symbols: List["Symbol"] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
