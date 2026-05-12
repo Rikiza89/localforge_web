@@ -599,6 +599,7 @@ class AnalysisService:
         )
 
         if should_regenerate:
+            yield {"status": f"プロジェクトサマリーを生成中... ({len(all_chunks)} ファイル)"}
             project_index = self._build_project_index(root, model, all_chunks)
         else:
             logger.info(
@@ -640,10 +641,11 @@ class AnalysisService:
         # ルート設定ファイルの内容
         root_config_content = self._read_root_configs(root)
 
-        # サマリーリスト
-        file_summaries = [
-            (c.path, c.summary or "") for c in chunks if c.summary
-        ]
+        # サマリーリスト（大規模プロジェクトでもLLMが処理できるよう最大300件に制限）
+        _all_summaries = [(c.path, c.summary or "") for c in chunks if c.summary]
+        file_summaries = _all_summaries[:300]
+        if len(_all_summaries) > 300:
+            logger.info("ProjectIndex: サマリーを %d/%d 件に絞って送信します", len(file_summaries), len(_all_summaries))
 
         # ProjectIndex概要をLLMで生成
         prompt = self._context.build_project_index_prompt(
