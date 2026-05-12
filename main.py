@@ -14,6 +14,14 @@ import subprocess
 import threading
 import time
 
+# sentence-transformers モデルをプロジェクト内の models/ フォルダから自動検出する。
+# 環境変数が未設定の場合のみ適用する。
+if not os.environ.get("LOCALFORGE_ST_MODEL_PATH"):
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _model_dir = os.path.join(_here, "models", "all-MiniLM-L6-v2")
+    if os.path.isdir(_model_dir):
+        os.environ["LOCALFORGE_ST_MODEL_PATH"] = _model_dir
+
 logger = logging.getLogger(__name__)
 
 
