@@ -319,6 +319,9 @@ class AnalysisService:
         self._llm = llm
         self._context = context
         self._vector = vector
+        # ProjectIndex のインメモリキャッシュ: {path_str: (mtime, ProjectIndex)}
+        # リクエストごとのディスク読み込み・JSONパースを回避する
+        self._index_cache: dict[str, tuple[float, "ProjectIndex"]] = {}
 
     def read_file_chunk(self, path: Path, root: Path) -> FileChunk:
         """
@@ -512,8 +515,8 @@ class AnalysisService:
         # Tier-1 & Tier-2: 読み込みが必要なファイルを処理
         # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
         if files_needing_read:
-            # 並列ファイル読み込み（全ファイルのI/Oをオーバーラップ）
-            max_io_workers = min(32, (os.cpu_count() or 1) * 4)
+            # 並列ファイル読み込み（GPU有無に関係なくI/Oは8並列上限で抑制）
+            max_io_workers = min(8, (os.cpu_count() or 1) * 2)
             with ThreadPoolExecutor(max_workers=max_io_workers) as io_executor:
                 chunks_iter = io_executor.map(
                     lambda f: self.read_file_chunk(f, root), files_needing_read
@@ -566,7 +569,9 @@ class AnalysisService:
                     logger.warning("バッチサマリー生成エラー: %s", exc)
                     return batch_chunks, {}
 
-            with ThreadPoolExecutor(max_workers=2) as llm_executor:
+            # CPU推論では並列LLMバッチはコンテキストスイッチのオーバーヘッドが勝るため直列化する
+            _llm_workers = 2 if self._llm.cuda_available else 1
+            with ThreadPoolExecutor(max_workers=_llm_workers) as llm_executor:
                 future_to_batch = {
                     llm_executor.submit(_run_batch, batch): batch
                     for batch in batches
@@ -597,8 +602,18 @@ class AnalysisService:
         # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
         # ベクトル埋め込みフェーズ: 並列処理でChromaDBに登録
         # キャッシュ済みチャンクのうちChromaDBから欠落しているものも追加
+        # enable_rag=False の場合はスキップ（CPU 専用機向け高速化オプション）
         # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
-        if self._vector is not None:
+        _enable_rag = True
+        try:
+            import json as _json
+            _cfg_path = lf_dir / "config.json"
+            if _cfg_path.exists():
+                _enable_rag = _json.loads(_cfg_path.read_text(encoding="utf-8")).get("enable_rag", True)
+        except Exception:
+            pass
+
+        if self._vector is not None and _enable_rag:
             for cached in cached_chunks:
                 if cached.summary and self._vector.needs_reembedding(cached):
                     embed_queue.append(cached)
@@ -617,7 +632,9 @@ class AnalysisService:
                     except Exception as exc:
                         logger.warning("埋め込みエラー (%s): %s", chunk.path, exc)
 
-                with ThreadPoolExecutor(max_workers=4) as embed_ex:
+                # CPU推論では埋め込みも直列化してCPUコア競合を避ける
+                _embed_workers = 4 if self._llm.cuda_available else 1
+                with ThreadPoolExecutor(max_workers=_embed_workers) as embed_ex:
                     futures = {embed_ex.submit(_do_embed, c): c for c in embed_queue}
                     for future in as_completed(futures):
                         future.result()
@@ -648,6 +665,7 @@ class AnalysisService:
             project_index = existing_index
 
         self._index_adapter.save_index(pi_path, project_index)
+        self.invalidate_index_cache(root)
 
         yield {"progress": {"done": total, "total": total, "current_file": "完了"}}
         yield {"done": True}
@@ -767,6 +785,7 @@ class AnalysisService:
     def load_project_index(self, root: Path) -> Optional[ProjectIndex]:
         """
         保存済みのProjectIndexを読み込む。
+        mtime が変化していない場合はインメモリキャッシュを返してディスクI/Oを省略する。
 
         Args:
             root: プロジェクトルート
@@ -775,7 +794,27 @@ class AnalysisService:
             ProjectIndex（存在しない場合はNone）
         """
         pi_path = root / _LOCALFORGE_DIR / "project_index.json"
-        return self._index_adapter.load_index(pi_path)
+        key = str(pi_path)
+        try:
+            current_mtime = pi_path.stat().st_mtime if pi_path.exists() else 0.0
+        except OSError:
+            current_mtime = 0.0
+
+        cached = self._index_cache.get(key)
+        if cached is not None:
+            cached_mtime, cached_index = cached
+            if abs(cached_mtime - current_mtime) < 0.001:
+                return cached_index
+
+        index = self._index_adapter.load_index(pi_path)
+        if index is not None:
+            self._index_cache[key] = (current_mtime, index)
+        return index
+
+    def invalidate_index_cache(self, root: Path) -> None:
+        """ProjectIndex キャッシュを無効化する（インデックス再構築後に呼び出す）。"""
+        key = str(root / _LOCALFORGE_DIR / "project_index.json")
+        self._index_cache.pop(key, None)
 
     def migrate_vector_index(self, root: Path) -> Generator[dict, None, None]:
         """

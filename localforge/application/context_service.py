@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 # トークン推定係数（単語数 × この係数でトークン数を推定）
 _WORDS_TO_TOKENS = 1.3
-# デフォルトトークン上限
-_DEFAULT_TOKEN_LIMIT = 35000
+# デフォルトトークン上限（現代的なローカルモデルの文脈長に合わせて引き上げ）
+_DEFAULT_TOKEN_LIMIT = 12000
 
 
 def _estimate_tokens(text: str) -> int:
@@ -221,6 +221,14 @@ class ContextService:
         overhead_tokens = 600  # 指示文・メタデータ用に予約
         return max(3000, (self._token_limit - overhead_tokens) * 4)
 
+    def max_qa_file_chars(self) -> int:
+        """
+        Q&A プロンプト内でファイル1件に割り当て可能な最大文字数を返す。
+        トークン上限の半分をファイル内容に充て、4文字≒1トークンで換算する。
+        最小値は 3000 文字（6000 トークン上限時の従来値と等価）。
+        """
+        return max(3000, (self._token_limit // 2) * 4)
+
     def build_file_diff_prompt(
         self,
         target_file: str,
@@ -334,7 +342,7 @@ class ContextService:
     def build_batch_file_summary_prompt(
         self,
         file_chunks: List["FileChunk"],
-        content_limit: int = 400,
+        content_limit: int = 800,
     ) -> str:
         """
         複数ファイルを一括でサマリー生成するプロンプトを組み立てる。
@@ -467,6 +475,35 @@ class ContextService:
             f"このセクションの内容のみを出力してください。マークダウン形式で記述してください。"
         )
         return self._guard_budget(prompt, f"report_section:{section_name}"), _estimate_tokens(prompt)
+
+    def build_qa_file_selection_prompt(
+        self,
+        question: str,
+        all_summaries: List[tuple[str, str]],
+    ) -> str:
+        """
+        Q&A フェーズ 1: 質問に答えるために必要なファイルを LLM に選ばせるプロンプト。
+        LLM はファイルパスの JSON 配列のみを返す。
+
+        Args:
+            question: ユーザーの質問
+            all_summaries: 全ファイルの (パス, サマリー) リスト
+
+        Returns:
+            プロンプト文字列
+        """
+        # 長すぎる場合は先頭 200 件に絞る（プロンプト爆発防止）
+        shown = all_summaries[:200]
+        file_list = "\n".join(f"- {p}: {s}" for p, s in shown)
+        prompt = (
+            "以下のファイル一覧から、この質問に答えるために読む必要があるファイルを選んでください。\n"
+            "JSONの配列形式でファイルパスのみを出力してください。例: [\"src/foo.py\", \"lib/bar.py\"]\n"
+            "最大10件まで選択できます。不要なファイルは含めないでください。\n\n"
+            f"質問: {question}\n\n"
+            f"ファイル一覧:\n{file_list}\n\n"
+            "選択したファイルのパスをJSONの配列として出力してください:"
+        )
+        return self._guard_budget(prompt, "qa_file_selection")
 
     def build_qa_prompt(
         self,

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
@@ -104,7 +105,7 @@ class ExplanationService:
 
             # セクションに関連するチャンクを選択（セマンティック検索 → キーワードフォールバック）
             relevant_chunks = self._analysis.get_top_chunks_semantic(
-                chunks, section_name, top_n=5
+                chunks, section_name, top_n=10
             )
             relevant_summaries = [
                 (c.path, c.summary or "") for c in relevant_chunks if c.summary
@@ -203,23 +204,61 @@ class ExplanationService:
             yield {"error": "ProjectIndexが見つかりません。先にインデックスを構築してください。"}
             return
 
-        index_json = project_index.model_dump_json(
-            include={"project_name", "summary", "total_files"}
-        )
         chunks = project_index.file_chunks
+        chunk_map = {c.path: c for c in chunks}
+        all_summaries = [(c.path, c.summary or "") for c in chunks if c.summary]
 
-        # セマンティック検索で上位5件を選択（ChromaDB未使用時はキーワードフォールバック）
-        top_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=5)
+        # A5: ファイル一覧を含む index_json を組み立てる（LLM がプロジェクト全体を把握できるように）
+        index_dict = project_index.model_dump(include={"project_name", "summary", "total_files", "indexed_files"})
+        index_dict["files"] = [c.path for c in chunks]
+        index_json = json.dumps(index_dict, ensure_ascii=False)
 
-        # ハイブリッドファイルのフルコンテンツ（top_5のうちhybridのもの）
+        # A6 フェーズ 1: LLM にどのファイルが必要か選ばせる
+        yield {"status": "関連ファイルを分析中..."}
+        selected_paths: List[str] = []
+        try:
+            sel_prompt = self._context.build_qa_file_selection_prompt(question, all_summaries)
+            sel_response = self._llm.generate_sync(model, sel_prompt)
+            # JSON 配列を抽出（余計なテキストが混入しても壊れないようにする）
+            _start = sel_response.find("[")
+            _end = sel_response.rfind("]")
+            if _start != -1 and _end != -1:
+                selected_paths = json.loads(sel_response[_start:_end + 1])
+                if not isinstance(selected_paths, list):
+                    selected_paths = []
+                selected_paths = [p for p in selected_paths if isinstance(p, str) and p in chunk_map]
+        except Exception as exc:
+            logger.warning("ファイル選択フェーズエラー（フォールバック）: %s", exc)
+
+        # フォールバック: フェーズ 1 が失敗または空の場合はセマンティック検索 top-10 を使用
+        if not selected_paths:
+            top_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
+        else:
+            # 選択されたパス + セマンティック top-5 をマージして重複排除
+            semantic_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=5)
+            seen: set[str] = set(selected_paths)
+            merged = [chunk_map[p] for p in selected_paths if p in chunk_map]
+            for c in semantic_chunks:
+                if c.path not in seen:
+                    merged.append(c)
+                    seen.add(c.path)
+            top_chunks = merged[:10]
+
+        # A1 + B8: フルコンテンツ注入
+        # - FULL 戦略チャンク（≤200 行）: chunk.content をそのまま使う（ディスク再読み不要）
+        # - HYBRID 戦略チャンク（>200 行）: ファイルを再読みして上限文字数まで注入
+        _max_chars = self._context.max_qa_file_chars()
         full_contents: List[tuple[str, str]] = []
         for chunk in top_chunks:
-            if chunk.strategy.value == "hybrid":
+            if chunk.strategy.value == "full":
+                if chunk.content:
+                    full_contents.append((chunk.path, chunk.content[:_max_chars]))
+            else:  # hybrid
                 file_path = root / chunk.path
                 if file_path.exists():
                     try:
                         content = file_path.read_text(encoding="utf-8", errors="replace")
-                        full_contents.append((chunk.path, content[:3000]))
+                        full_contents.append((chunk.path, content[:_max_chars]))
                     except OSError:
                         pass
 

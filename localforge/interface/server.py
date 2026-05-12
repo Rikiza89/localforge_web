@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import os
 from pathlib import Path
 
 from flask import Flask
@@ -89,6 +90,14 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     index_adapter = IndexAdapter()
     llm = OllamaClient()
     vector = VectorAdapter()
+
+    # LOCALFORGE_NUM_THREAD 環境変数が設定されている場合は CPU スレッド数を適用する
+    _env_num_thread = os.environ.get("LOCALFORGE_NUM_THREAD")
+    if _env_num_thread:
+        try:
+            llm.set_num_thread(int(_env_num_thread))
+        except ValueError:
+            logger.warning("LOCALFORGE_NUM_THREAD の値が不正です: %s", _env_num_thread)
 
     # ---------------------------------------------------------------------------
     # アプリケーション層のサービスを構築
