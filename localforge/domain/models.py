@@ -163,7 +163,11 @@ class ProjectConfig(BaseModel):
     project_name: str = ""
     mode: ProjectMode = ProjectMode.GENERATE
     model: str = ""
-    token_limit: int = 6000
+    token_limit: int = 12000
+    # Ollama が使用する CPU スレッド数（None = Ollama デフォルト）
+    num_thread: Optional[int] = None
+    # False にするとインデックス時の RAG 埋め込みフェーズをスキップする（CPU 専用機向け）
+    enable_rag: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)

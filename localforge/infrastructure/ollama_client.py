@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 # OllamaサーバーのデフォルトURL（OLLAMA_HOST環境変数で上書き可能）
 _DEFAULT_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 # HTTPリクエストのタイムアウト秒数（ストリーミング時は別途設定）
-_CONNECT_TIMEOUT = 5
+# CPU推論はモデルロードが遅いため長めに設定する
+_CONNECT_TIMEOUT = 30
 # ストリーミング読み込みタイムアウト: 2時間（大規模プロジェクトの長時間生成に対応）
 _READ_TIMEOUT = 7200
 # generate_sync 用タイムアウト（バッチサマリー生成など同期呼び出し用）

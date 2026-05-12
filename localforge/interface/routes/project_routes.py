@@ -86,6 +86,10 @@ def open_project():
     except LocalForgeError as exc:
         return _error_response(exc)
 
+    # プロジェクト設定の num_thread を LLM クライアントに適用する
+    if project.config.num_thread is not None:
+        _get_llm().set_num_thread(project.config.num_thread)
+
     mode = project.mode.value
     banner_messages = {
         "generate": "新しいプロジェクトを作成します。プロンプトを入力してください。",
@@ -303,6 +307,17 @@ def set_num_thread():
         num_thread = min(num_thread, cpu_count)
 
     llm.set_num_thread(num_thread)
+
+    # プロジェクトが開かれている場合は config.json にも永続化する
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if project:
+        try:
+            project.config.num_thread = num_thread
+            project_svc.save_config(project.root, project.config)
+        except Exception as exc:
+            logger.warning("num_thread の config.json への保存に失敗しました: %s", exc)
+
     return jsonify({
         "num_thread": llm.num_thread,
         "cpu_count": os.cpu_count(),

@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 _EMBED_MODEL = "nomic-embed-text:latest"
 _COLLECTION_NAME = "localforge_index"
 _CHROMA_DIR = "chroma"
-_CONNECT_TIMEOUT = 5
-_EMBED_TIMEOUT = 60
+# CPU推論では埋め込み生成に数分かかる場合があるため長めに設定する
+_CONNECT_TIMEOUT = 30
+_EMBED_TIMEOUT = 300
 
 
 class VectorAdapter:

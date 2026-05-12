@@ -139,7 +139,7 @@ class TestProjectConfig:
     def test_defaults(self):
         config = ProjectConfig()
         assert config.model == ""
-        assert config.token_limit == 6000
+        assert config.token_limit == 12000
         assert config.mode == ProjectMode.GENERATE
 
     def test_serialization_roundtrip(self):
