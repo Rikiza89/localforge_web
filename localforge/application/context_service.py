@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # トークン推定係数（単語数 × この係数でトークン数を推定）
 _WORDS_TO_TOKENS = 1.3
 # デフォルトトークン上限（現代的なローカルモデルの文脈長に合わせて引き上げ）
-_DEFAULT_TOKEN_LIMIT = 12000
+_DEFAULT_TOKEN_LIMIT = 131072
 
 
 def _estimate_tokens(text: str) -> int:
@@ -67,11 +67,9 @@ class ContextService:
         """
         estimated = _estimate_tokens(prompt)
         if estimated > self._token_limit:
-            msg = (
-                f"トークン予算超過 [{label}]: 推定={estimated}, 上限={self._token_limit}"
+            logger.debug(
+                "トークン予算超過 [%s]: 推定=%d, 上限=%d", label, estimated, self._token_limit
             )
-            logger.warning(msg)
-            # 警告例外はログのみ（処理継続）
         return prompt
 
     # ------------------------------------------------------------------
@@ -422,14 +420,6 @@ class ContextService:
         summaries_text = "\n".join(
             f"- {path}: {summary}" for path, summary in file_summaries
         )
-
-        # トークン予算管理：サマリーが多すぎる場合は切り詰め
-        if _estimate_tokens(summaries_text) > self._token_limit * 0.6:
-            truncated_summaries = file_summaries[: int(len(file_summaries) * 0.6)]
-            summaries_text = "\n".join(
-                f"- {path}: {summary}" for path, summary in truncated_summaries
-            )
-            logger.warning("ProjectIndexプロンプト: サマリー数を削減しました")
 
         parts = [
             f"ディレクトリ構成:\n{folder_tree}",
