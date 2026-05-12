@@ -8,18 +8,24 @@ VectorAdapter — ChromaDB + sentence-transformers を使ったセマンティ�
 
 all-MiniLM-L6-v2 は初回起動時に HuggingFace Hub から自動ダウンロードされ、
 ~/.cache/huggingface/hub/ にキャッシュされる。
+
+SSL 証明書エラー（自己署名 CA / 企業プロキシ環境）への対処:
+  方法 1: ローカルにダウンロード済みのモデルを指定する
+      LOCALFORGE_ST_MODEL_PATH=/path/to/all-MiniLM-L6-v2 python main.py
+  方法 2: SSL 検証をスキップしてダウンロードする（初回のみ）
+      LOCALFORGE_DISABLE_SSL=1 python main.py
+  方法 3: ダウンロード後はキャッシュが使われるため以降は再設定不要
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import ssl
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import List, Optional
 
 from localforge.domain.models import FileChunk
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -33,31 +39,95 @@ _st_model_instance = None
 _st_model_load_attempted = False
 
 
+def _is_ssl_error(exc: Exception) -> bool:
+    """例外メッセージから SSL 証明書エラーか判定する。"""
+    msg = str(exc).lower()
+    return any(k in msg for k in ("ssl", "certificate", "cert", "client has been closed"))
+
+
 def _load_st_model():
     """
     sentence-transformers モデルをロードしてキャッシュする。
     インストールされていない場合は None を返す（警告のみ、クラッシュしない）。
+
+    優先順位:
+      1. LOCALFORGE_ST_MODEL_PATH 環境変数が指すローカルパス
+      2. 通常ダウンロード（HuggingFace Hub キャッシュ利用）
+      3. SSL エラー時: LOCALFORGE_DISABLE_SSL=1 でリトライ
     """
     global _st_model_instance, _st_model_load_attempted
     if _st_model_load_attempted:
         return _st_model_instance
     _st_model_load_attempted = True
+
     try:
         from sentence_transformers import SentenceTransformer
-        logger.info("sentence-transformers モデルをロード中: %s", _ST_MODEL_NAME)
-        _st_model_instance = SentenceTransformer(_ST_MODEL_NAME)
-        logger.info("sentence-transformers モデルのロード完了: %s", _ST_MODEL_NAME)
     except ImportError:
         logger.warning(
             "sentence-transformers がインストールされていません。"
             " ベクトル埋め込みは無効になり、BM25 検索のみ使用されます。"
             " 有効にするには: pip install sentence-transformers"
         )
-        _st_model_instance = None
+        return None
+
+    # LOCALFORGE_ST_MODEL_PATH が設定されていればローカルパスを使用
+    model_path: str = os.environ.get("LOCALFORGE_ST_MODEL_PATH", "") or _ST_MODEL_NAME
+    logger.info("sentence-transformers モデルをロード中: %s", model_path)
+
+    # 1回目: 通常ロード
+    try:
+        _st_model_instance = SentenceTransformer(model_path)
+        logger.info("sentence-transformers モデルのロード完了: %s", model_path)
+        return _st_model_instance
     except Exception as exc:
-        logger.warning("sentence-transformers モデルのロードに失敗しました: %s", exc)
+        if not _is_ssl_error(exc):
+            # SSL 以外のエラーはリトライしない
+            logger.warning("sentence-transformers モデルのロードに失敗しました: %s", exc)
+            _log_st_help()
+            return None
+        logger.warning("SSL エラーでモデルのダウンロードに失敗しました: %s", exc)
+
+    # 2回目: SSL 検証を無効化してリトライ
+    # LOCALFORGE_DISABLE_SSL=1 が設定されているか、自動リトライを有効にする
+    disable_ssl = os.environ.get("LOCALFORGE_DISABLE_SSL", "").lower() in ("1", "true", "yes")
+    if not disable_ssl:
+        logger.warning(
+            "SSL 証明書エラーが発生しました。自己署名 CA 環境では"
+            " LOCALFORGE_DISABLE_SSL=1 を設定するか、モデルをローカルに配置してください。"
+            " 詳細: vector_adapter.py のモジュール docstring を参照。"
+        )
+        _log_st_help()
+        return None
+
+    logger.info("LOCALFORGE_DISABLE_SSL=1: SSL 検証を無効化してリトライします")
+    _orig_ctx = ssl._create_default_https_context
+    ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[attr-defined]
+    try:
+        _st_model_instance = SentenceTransformer(model_path)
+        logger.info("sentence-transformers モデルのロード完了 (SSL バイパス): %s", model_path)
+    except Exception as exc2:
+        logger.warning("SSL バイパス後もモデルのロードに失敗しました: %s", exc2)
+        _log_st_help()
         _st_model_instance = None
+    finally:
+        ssl._create_default_https_context = _orig_ctx  # type: ignore[attr-defined]
+
     return _st_model_instance
+
+
+def _log_st_help() -> None:
+    """SSL / ダウンロード失敗時の対処手順をログに出力する。"""
+    logger.warning(
+        "sentence-transformers が利用不可のため BM25 検索にフォールバックします。\n"
+        "解決方法:\n"
+        "  [A] SSL をスキップしてダウンロード（初回のみ）:\n"
+        "        LOCALFORGE_DISABLE_SSL=1 python main.py\n"
+        "  [B] ネットワークのある環境でモデルを事前保存してからローカルパスを指定:\n"
+        "        python -c \"from sentence_transformers import SentenceTransformer;"
+        " SentenceTransformer('all-MiniLM-L6-v2').save('/path/to/model')\"\n"
+        "        LOCALFORGE_ST_MODEL_PATH=/path/to/model python main.py\n"
+        "  [C] BM25 のみを使用する（設定不要 — 現在このモードで動作中）"
+    )
 
 class VectorAdapter:
     """
