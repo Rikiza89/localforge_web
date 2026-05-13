@@ -258,6 +258,13 @@
             <code id="hf-models-dir">~/.localforge/models/</code> 以下の GGUF ファイル一覧。
             <button class="btn btn-secondary btn-sm" id="hf-rescan-btn" style="margin-left:8px;">↻ 再スキャン</button>
           </div>
+          <!-- 任意パスからロード -->
+          <div class="hf-browse-search-bar" style="margin-bottom:8px;">
+            <input type="text" id="hf-custom-path-input" class="hf-search-input"
+                   placeholder="GGUF ファイルの絶対パスを直接入力（例: C:\Users\...\model.gguf）"
+                   autocomplete="off">
+            <button class="btn btn-primary btn-sm" id="hf-load-path-btn">パスからロード</button>
+          </div>
           <div id="hf-local-list" class="hf-catalog-list">
             <div class="empty-state">読み込み中...</div>
           </div>

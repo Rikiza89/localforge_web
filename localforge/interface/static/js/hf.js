@@ -748,6 +748,26 @@ function initHFUI() {
     });
   }
 
+  // 任意パスからロード
+  const loadPathBtn = document.getElementById("hf-load-path-btn");
+  if (loadPathBtn) {
+    loadPathBtn.addEventListener("click", () => {
+      const input = document.getElementById("hf-custom-path-input");
+      const p = input ? input.value.trim() : "";
+      if (!p) { showAlert("ファイルパスを入力してください", "warning"); return; }
+      loadHFModel(p);
+    });
+  }
+  const customPathInput = document.getElementById("hf-custom-path-input");
+  if (customPathInput) {
+    customPathInput.addEventListener("keydown", e => {
+      if (e.key === "Enter") {
+        const p = e.target.value.trim();
+        if (p) loadHFModel(p);
+      }
+    });
+  }
+
   // 手動ダウンロード手順取得
   const instrBtn = document.getElementById("hf-get-instructions-btn");
   if (instrBtn) instrBtn.addEventListener("click", getManualInstructions);

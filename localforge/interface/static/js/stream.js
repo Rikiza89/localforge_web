@@ -428,7 +428,7 @@ async function apiRequest(url, method = "GET", body = null) {
   const json = await response.json();
 
   if (!response.ok) {
-    throw new Error(json.message || `HTTP ${response.status}`);
+    throw new Error(json.error || json.message || `HTTP ${response.status}`);
   }
 
   return json;
