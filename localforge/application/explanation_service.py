@@ -250,23 +250,18 @@ class ExplanationService:
                         if len(top_chunks) >= 10:
                             break
 
-        # A1 + B8: フルコンテンツ注入
-        # - FULL 戦略チャンク（≤200 行）: chunk.content をそのまま使う（ディスク再読み不要）
-        # - HYBRID 戦略チャンク（>200 行）: ファイルを再読みして上限文字数まで注入
+        # フルコンテンツ注入: project_index.json は content="" で保存されるため
+        # 常にディスクから再読みする（FULL/HYBRID 問わず）。
         _max_chars = self._context.max_qa_file_chars()
         full_contents: List[tuple[str, str]] = []
         for chunk in top_chunks:
-            if chunk.strategy.value == "full":
-                if chunk.content:
-                    full_contents.append((chunk.path, chunk.content[:_max_chars]))
-            else:  # hybrid
-                file_path = root / chunk.path
-                if file_path.exists():
-                    try:
-                        content = file_path.read_text(encoding="utf-8", errors="replace")
-                        full_contents.append((chunk.path, content[:_max_chars]))
-                    except OSError:
-                        pass
+            file_path = root / chunk.path
+            if file_path.exists():
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="replace")
+                    full_contents.append((chunk.path, content[:_max_chars]))
+                except OSError:
+                    pass
 
         top_summaries = [(c.path, c.summary or "") for c in top_chunks]
 

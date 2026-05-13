@@ -741,13 +741,30 @@ class AnalysisService:
             ProjectIndex
         """
         summary = _auto_project_summary(root.name, chunks)
+        # content と symbols は project_index.json に保存しない。
+        # content は index.jsonl またはディスクから取得でき、
+        # symbols はすでに summary に反映済み。
+        # これにより project_index.json が数MB以下に収まり高速ロードが実現する。
+        slim_chunks = [
+            FileChunk(
+                path=c.path,
+                content="",
+                strategy=c.strategy,
+                size=c.size,
+                mtime=c.mtime,
+                summary=c.summary,
+                language=c.language,
+                indexed_at=c.indexed_at,
+            )
+            for c in chunks
+        ]
         return ProjectIndex(
             project_root=str(root),
             project_name=root.name,
             summary=summary,
-            file_chunks=chunks,
-            total_files=len(chunks),
-            indexed_files=len(chunks),
+            file_chunks=slim_chunks,
+            total_files=len(slim_chunks),
+            indexed_files=len(slim_chunks),
             updated_at=datetime.utcnow(),
         )
 
