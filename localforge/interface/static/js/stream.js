@@ -201,7 +201,7 @@ function startStream(url, outputEl, handlers) {
     }
 
     if (data.section !== undefined) {
-      if (handlers.onSection) handlers.onSection(data.section);
+      if (handlers.onSection) handlers.onSection(data.section, data.section_idx, data.section_total);
       return;
     }
 
@@ -336,7 +336,7 @@ async function startPostStream(url, body, outputEl, handlers) {
           if (handlers.onToken) handlers.onToken(data.token);
         }
         if (data.section !== undefined && handlers.onSection) {
-          handlers.onSection(data.section);
+          handlers.onSection(data.section, data.section_idx, data.section_total);
         }
         if (data.file_written !== undefined && handlers.onFileWritten) {
           handlers.onFileWritten(data.file_written);

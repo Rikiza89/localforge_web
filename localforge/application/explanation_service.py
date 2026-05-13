@@ -96,8 +96,12 @@ class ExplanationService:
         completed_sections: List[tuple[str, str]] = []  # (name, content)
 
         for sec_idx, section_name in enumerate(REPORT_SECTIONS):
-            # セクションヘッダーを送信（進捗はセクション完了後に送る）
-            yield {"section": section_name}
+            # セクションヘッダーを送信（インデックスと合計数も含める）
+            yield {
+                "section": section_name,
+                "section_idx": sec_idx + 1,
+                "section_total": total_sections,
+            }
 
             # セクションに関連するチャンクを選択（top_n=6 でプロンプトを抑制）
             relevant_chunks = self._analysis.get_top_chunks_semantic(

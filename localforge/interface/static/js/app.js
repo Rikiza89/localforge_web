@@ -676,6 +676,9 @@ async function buildIndex() {
           ? `${done} / ${total}: ${currentFile}`
           : "インデックス構築中...";
       }
+      if (total > 0 && currentFile) {
+        updateStatusBar(`インデックス構築中: ${currentFile} (${done}/${total})`);
+      }
     },
     onDone: async () => {
       _unlockUI();
@@ -734,6 +737,9 @@ async function migrateVectorIndex() {
           ? `RAG移行: ${done} / ${total}: ${currentFile}`
           : "RAGベクトルインデックス移行中...";
       }
+      if (total > 0 && currentFile) {
+        updateStatusBar(`RAG移行中: ${currentFile} (${done}/${total})`);
+      }
     },
     onDone: () => {
       _unlockUI();
@@ -789,11 +795,12 @@ function generateReport() {
   updateStatusBar("レポートを生成中...");
 
   const _es = startStream("/api/explain/report", null, {
-    onSection: (name) => {
+    onSection: (name, idx, total) => {
       if (!reportOutput) return;
 
       // ステータスバーをセクション開始と同時に更新（バナーとh3の不一致を防ぐ）
-      updateStatusBar(`レポート生成中: ${name}`);
+      const countStr = (idx && total) ? ` (${idx}/${total})` : "";
+      updateStatusBar(`レポート生成中: ${name}${countStr}`);
 
       // 同じセクションが再度来た場合（SSE再接続によるリスタート）はスキップ
       if (_renderedSections.has(name)) {
@@ -832,7 +839,7 @@ function generateReport() {
     },
     onProgress: (done, total, currentFile) => {
       // セクション完了時に呼ばれる（done = 完了済みセクション数）
-      updateStatusBar(`レポート生成中: ${done}/${total} セクション完了`);
+      updateStatusBar(`レポート生成中: ${currentFile} ✓ (${done}/${total})`);
     },
     onDone: () => {
       _unlockUI();
@@ -939,6 +946,7 @@ async function continueGeneration() {
       if (progressLabel) {
         progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
       }
+      updateStatusBar(`再開中: ${currentFile} (${done}/${total})`);
     },
     onFileWritten: () => refreshFileTree(),
     onDone: () => {
