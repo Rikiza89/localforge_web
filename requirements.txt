@@ -17,8 +17,9 @@ openpyxl>=3.1.0
 python-pptx>=0.6.23
 huggingface-hub>=0.23.0
 psutil>=5.9.0
-# Pre-built CPU wheels avoid the Windows MAX_PATH build error.
-# If this index has no wheel for your Python/OS, fall back to:
-#   pip install llama-cpp-python --prefer-binary
---extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# cpu_noavx wheels work on any x86-64 CPU regardless of AVX/AVX2 support.
+# If you get WinError 0xc000001d (illegal instruction) with the cpu wheel,
+# reinstall with: pip install llama-cpp-python --prefer-binary
+#   --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu_noavx
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu_noavx
 llama-cpp-python>=0.2.90

@@ -181,14 +181,28 @@ class HuggingFaceClient:
         )
 
         with self._lock:
-            self._llama = _llama_cpp.Llama(
-                model_path=str(path),
-                n_ctx=n_ctx,
-                n_threads=n_threads if n_threads > 0 else (os.cpu_count() or 4),
-                n_gpu_layers=0,     # CPU 専用 — GPU オフロードなし
-                use_mlock=True,     # RAM ページをスワップアウトさせない
-                verbose=False,
-            )
+            try:
+                self._llama = _llama_cpp.Llama(
+                    model_path=str(path),
+                    n_ctx=n_ctx,
+                    n_threads=n_threads if n_threads > 0 else (os.cpu_count() or 4),
+                    n_gpu_layers=0,     # CPU 専用 — GPU オフロードなし
+                    use_mlock=True,     # RAM ページをスワップアウトさせない
+                    verbose=False,
+                )
+            except OSError as exc:
+                # 0xC000001D = STATUS_ILLEGAL_INSTRUCTION — CPU が AVX2 非対応
+                if "0xc000001d" in str(exc).lower() or "illegal instruction" in str(exc).lower():
+                    raise RuntimeError(
+                        "CPU が llama-cpp-python のビルドに必要な命令セット（AVX2）を"
+                        "サポートしていません。\n"
+                        "以下のコマンドで互換性の高いバージョンを再インストールしてください:\n\n"
+                        "pip uninstall llama-cpp-python -y\n"
+                        "pip install llama-cpp-python --prefer-binary"
+                        " --extra-index-url"
+                        " https://abetlen.github.io/llama-cpp-python/whl/cpu_noavx"
+                    ) from exc
+                raise
             self._loaded_model_path = str(path)
             self._n_ctx = n_ctx
             self._n_threads = n_threads
