@@ -1,5 +1,5 @@
 """
-HuggingFace GGUF モデルクライアント — llama-cpp-python を使用したローカル推論。
+HuggingFace Transformers クライアント — safetensors 形式のモデルを CPU で実行する。
 LLMPort インターフェースを実装する。GPU 不要、CPU のみで動作する。
 """
 
@@ -14,69 +14,47 @@ from typing import Generator, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# llama-cpp-python の遅延インポート — インストールされていない場合はエラーを先送り
-_llama_cpp = None
-_llama_import_error: Optional[str] = None
+_DEFAULT_MAX_NEW_TOKENS = 2048
+_DEFAULT_TEMPERATURE = 0.7
 
 
-def _ensure_llama_cpp() -> None:
-    global _llama_cpp, _llama_import_error
-    if _llama_cpp is not None:
-        return
+def _ensure_transformers() -> None:
     try:
-        import llama_cpp
-        _llama_cpp = llama_cpp
+        import transformers  # noqa: F401
+        import torch          # noqa: F401
     except ImportError as exc:
-        _llama_import_error = (
-            "llama-cpp-python がインストールされていません。"
-            f" `pip install llama-cpp-python` を実行してください。詳細: {exc}"
-        )
-        raise RuntimeError(_llama_import_error) from exc
-
-
-# デフォルトコンテキスト長（トークン数）— 32GB RAM 環境での推奨値
-_DEFAULT_N_CTX = 8192
-# デフォルト最大生成トークン数
-_DEFAULT_MAX_TOKENS = 4096
-# デフォルト CPU スレッド数（0 = llama.cpp が自動検出）
-_DEFAULT_N_THREADS = 0
+        raise RuntimeError(
+            "transformers または torch がインストールされていません。\n"
+            f"pip install transformers torch accelerate を実行してください。詳細: {exc}"
+        ) from exc
 
 
 class HuggingFaceClient:
     """
-    llama-cpp-python 経由で GGUF モデルをローカル実行する LLM クライアント。
+    HuggingFace Transformers 経由で safetensors モデルをローカル実行する LLM クライアント。
     モデルは明示的に load_model() を呼んで初期化する必要がある。
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._llama = None          # llama_cpp.Llama インスタンス
+        self._model = None
+        self._tokenizer = None
         self._loaded_model_path: str = ""
-        self._n_ctx: int = _DEFAULT_N_CTX
-        self._n_threads: int = _DEFAULT_N_THREADS
-        self._max_tokens: int = _DEFAULT_MAX_TOKENS
+        self._num_threads: int = 0  # 0 = auto
 
     # ------------------------------------------------------------------
     # LLMPort 実装
     # ------------------------------------------------------------------
 
     def is_available(self) -> bool:
-        """llama-cpp-python がインポート可能かどうかを返す。"""
         try:
-            _ensure_llama_cpp()
+            _ensure_transformers()
             return True
         except RuntimeError:
             return False
 
     def list_models(self) -> List[str]:
-        """~/.localforge/models/ 以下の GGUF ファイル名リストを返す。"""
-        models_dir = Path.home() / ".localforge" / "models"
-        if not models_dir.exists():
-            return []
-        result = []
-        for gguf in sorted(models_dir.rglob("*.gguf")):
-            result.append(str(gguf))
-        return result
+        return []  # hf_model_manager.scan_local_models() が担当
 
     def stream_completion(
         self,
@@ -87,63 +65,81 @@ class HuggingFaceClient:
         """
         ロード済みモデルでテキストをストリーミング生成する。
         model パラメータは無視される（ロード済みモデルを使用する）。
-
-        Yields:
-            テキストチャンク（文字列）
         """
-        with self._lock:
-            if self._llama is None:
-                raise RuntimeError(
-                    "HuggingFace モデルがロードされていません。"
-                    " 先に load_model() を呼び出してください。"
-                )
-            llama = self._llama
+        if self._model is None or self._tokenizer is None:
+            raise RuntimeError(
+                "HuggingFace モデルがロードされていません。先にモデルをロードしてください。"
+            )
+
+        import torch
+        from transformers import TextIteratorStreamer
 
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        logger.debug("HuggingFace ストリーミング開始: model=%s", self._loaded_model_path)
+        try:
+            input_text = self._tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+        except Exception:
+            input_text = (
+                f"System: {system}\n\nUser: {prompt}\n\nAssistant:"
+                if system else
+                f"User: {prompt}\n\nAssistant:"
+            )
+
+        inputs = self._tokenizer(
+            input_text, return_tensors="pt", truncation=True, max_length=4096,
+        )
+
+        streamer = TextIteratorStreamer(
+            self._tokenizer, skip_prompt=True, skip_special_tokens=True,
+        )
+
+        n_threads = self._num_threads or os.cpu_count() or 4
+        torch.set_num_threads(n_threads)
+
+        gen_kwargs = {
+            **inputs,
+            "streamer": streamer,
+            "max_new_tokens": _DEFAULT_MAX_NEW_TOKENS,
+            "temperature": _DEFAULT_TEMPERATURE,
+            "do_sample": True,
+            "repetition_penalty": 1.1,
+            "pad_token_id": self._tokenizer.eos_token_id,
+        }
+
+        thread = threading.Thread(
+            target=self._model.generate, kwargs=gen_kwargs, daemon=True,
+        )
+        thread.start()
 
         try:
-            for chunk in llama.create_chat_completion(
-                messages=messages,
-                stream=True,
-                max_tokens=self._max_tokens,
-                temperature=0.7,
-            ):
-                delta = chunk["choices"][0]["delta"].get("content", "")
-                if delta:
-                    yield delta
-            logger.debug("HuggingFace ストリーミング完了")
+            for token_text in streamer:
+                yield token_text
         except Exception as exc:
             logger.error("HuggingFace 推論エラー: %s", exc)
             raise RuntimeError(f"HuggingFace 推論に失敗しました: {exc}") from exc
 
     def unload_model(self, model: str = "") -> None:
-        """
-        ロード済みモデルをメモリから解放する。
-        model パラメータは無視される（常にロード済みモデルをアンロードする）。
-        """
         with self._lock:
-            if self._llama is None:
+            if self._model is None:
                 return
             logger.info("HuggingFace モデルをアンロード: %s", self._loaded_model_path)
-            try:
-                del self._llama
-            except Exception as exc:
-                logger.warning("モデル削除中にエラー: %s", exc)
-            self._llama = None
+            del self._model
+            self._model = None
+            if self._tokenizer is not None:
+                del self._tokenizer
+                self._tokenizer = None
             self._loaded_model_path = ""
 
         gc.collect()
-        # CUDA 環境では torch キャッシュも解放（インストール済みの場合のみ）
         try:
             import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
+            torch.cuda.empty_cache()
+        except Exception:
             pass
 
     # ------------------------------------------------------------------
@@ -152,75 +148,69 @@ class HuggingFaceClient:
 
     def load_model(
         self,
-        model_path: str,
-        n_ctx: int = _DEFAULT_N_CTX,
-        n_threads: int = _DEFAULT_N_THREADS,
+        model_dir: str,
+        n_ctx: int = 4096,
+        n_threads: int = 0,
     ) -> None:
         """
-        GGUF ファイルをメモリにロードする。
-        既にモデルがロードされている場合は先にアンロードする。
+        safetensors モデルディレクトリをメモリにロードする。
 
         Args:
-            model_path: GGUF ファイルの絶対パス
-            n_ctx:      コンテキスト長（トークン数）
-            n_threads:  使用する CPU スレッド数（0 = 自動）
+            model_dir:  config.json を含むモデルディレクトリのパス
+            n_ctx:      未使用（transformers は tokenizer の max_length で制御）
+            n_threads:  CPU スレッド数（0 = 自動）
         """
-        _ensure_llama_cpp()
+        _ensure_transformers()
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        path = Path(model_path)
-        if not path.is_file():
-            raise FileNotFoundError(f"GGUF ファイルが見つかりません: {model_path}")
+        path = Path(model_dir)
+        if not (path / "config.json").is_file():
+            raise FileNotFoundError(
+                f"config.json が見つかりません。HuggingFace モデルディレクトリを指定してください: {model_dir}"
+            )
 
-        # 既存モデルをアンロード
-        if self._llama is not None:
+        if self._model is not None:
             self.unload_model()
 
-        logger.info(
-            "HuggingFace モデルをロード中: %s (n_ctx=%d, n_threads=%d)",
-            model_path, n_ctx, n_threads or os.cpu_count() or 4,
-        )
+        if n_threads > 0:
+            self._num_threads = n_threads
+
+        logger.info("HuggingFace モデルをロード中: %s", model_dir)
 
         with self._lock:
             try:
-                self._llama = _llama_cpp.Llama(
-                    model_path=str(path),
-                    n_ctx=n_ctx,
-                    n_threads=n_threads if n_threads > 0 else (os.cpu_count() or 4),
-                    n_gpu_layers=0,     # CPU 専用 — GPU オフロードなし
-                    use_mlock=True,     # RAM ページをスワップアウトさせない
-                    verbose=False,
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    str(path), local_files_only=True,
                 )
-            except OSError as exc:
-                # 0xC000001D = STATUS_ILLEGAL_INSTRUCTION — CPU が AVX2 非対応
-                if "0xc000001d" in str(exc).lower() or "illegal instruction" in str(exc).lower():
-                    raise RuntimeError(
-                        "CPU が llama-cpp-python のビルドに必要な命令セット（AVX2）を"
-                        "サポートしていません。\n"
-                        "以下のコマンドで互換性の高いバージョンを再インストールしてください:\n\n"
-                        "pip uninstall llama-cpp-python -y\n"
-                        "pip install llama-cpp-python --prefer-binary"
-                        " --extra-index-url"
-                        " https://abetlen.github.io/llama-cpp-python/whl/cpu_noavx"
-                    ) from exc
-                raise
-            self._loaded_model_path = str(path)
-            self._n_ctx = n_ctx
-            self._n_threads = n_threads
+                if self._tokenizer.pad_token is None:
+                    self._tokenizer.pad_token = self._tokenizer.eos_token
 
-        logger.info("HuggingFace モデルのロード完了: %s", model_path)
+                self._model = AutoModelForCausalLM.from_pretrained(
+                    str(path),
+                    torch_dtype=torch.float16,
+                    device_map="cpu",
+                    local_files_only=True,
+                    low_cpu_mem_usage=True,
+                )
+                self._model.eval()
+                self._loaded_model_path = str(path)
+                logger.info("HuggingFace モデルのロード完了: %s", model_dir)
+
+            except Exception as exc:
+                self._model = None
+                self._tokenizer = None
+                self._loaded_model_path = ""
+                raise RuntimeError(f"モデルのロードに失敗しました: {exc}") from exc
 
     def set_num_thread(self, num_thread: Optional[int]) -> None:
-        """CPU スレッド数を設定する（次回 load_model 時に適用）。"""
-        self._n_threads = num_thread if num_thread is not None else _DEFAULT_N_THREADS
+        self._num_threads = num_thread if num_thread is not None else 0
 
     def get_loaded_model_path(self) -> str:
-        """現在ロード済みのモデルパスを返す。未ロードの場合は空文字列。"""
         return self._loaded_model_path
 
     def is_model_loaded(self) -> bool:
-        """モデルがロード済みかどうかを返す。"""
-        return self._llama is not None
+        return self._model is not None
 
     def get_vram_info(self) -> Optional[dict]:
-        """HuggingFace クライアントは CPU 専用のため常に None を返す。"""
         return None

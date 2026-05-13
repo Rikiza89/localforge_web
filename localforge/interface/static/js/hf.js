@@ -1,6 +1,6 @@
 /**
- * hf.js — HuggingFace モデル管理 UI
- * プロバイダー切替、モデルカタログ、ダウンロード、手動ダウンロード案内を制御する。
+ * hf.js — HuggingFace モデル管理 UI (safetensors 形式)
+ * プロバイダー切替、モデルカタログ、リポジトリダウンロード、手動ダウンロード案内を制御する。
  */
 
 "use strict";
@@ -9,18 +9,14 @@
 // 状態
 // ---------------------------------------------------------------------------
 
-let _activeProvider = "ollama";     // "ollama" | "huggingface"
-let _hfDownloadES = null;           // 進行中のダウンロード EventSource
-let _hfLoadedModelPath = "";        // 現在 HF クライアントにロード済みのモデルパス
+let _activeProvider    = "ollama";
+let _hfDownloadES      = null;
+let _hfLoadedModelPath = "";
 
 // ---------------------------------------------------------------------------
 // プロバイダー切替 UI
 // ---------------------------------------------------------------------------
 
-/**
- * プロバイダーボタンの表示状態を更新する。
- * @param {"ollama"|"huggingface"} provider
- */
 function _updateProviderUI(provider) {
   _activeProvider = provider;
 
@@ -29,8 +25,8 @@ function _updateProviderUI(provider) {
   });
 
   const modelSelect = document.getElementById("model-selector");
-  const hfBtn = document.getElementById("hf-model-select-btn");
-  const hfLabel = document.getElementById("hf-loaded-model-label");
+  const hfBtn       = document.getElementById("hf-model-select-btn");
+  const hfLabel     = document.getElementById("hf-loaded-model-label");
 
   if (provider === "ollama") {
     if (modelSelect) modelSelect.style.display = "";
@@ -39,11 +35,10 @@ function _updateProviderUI(provider) {
   } else {
     if (modelSelect) modelSelect.style.display = "none";
     if (hfBtn)       hfBtn.style.display = "";
-    // ロード済みモデルラベル
     if (hfLabel) {
       if (_hfLoadedModelPath) {
-        const fname = _hfLoadedModelPath.split("/").pop().split("\\").pop();
-        hfLabel.textContent = `🤗 ${fname}`;
+        const parts = _hfLoadedModelPath.replace(/\\/g, "/").split("/");
+        hfLabel.textContent = `🤗 ${parts[parts.length - 1]}`;
         hfLabel.title = _hfLoadedModelPath;
         hfLabel.style.display = "";
       } else {
@@ -54,10 +49,6 @@ function _updateProviderUI(provider) {
   }
 }
 
-/**
- * プロバイダーをサーバーに送信して切り替える。
- * @param {"ollama"|"huggingface"} provider
- */
 async function switchProvider(provider) {
   if (provider === _activeProvider) return;
   try {
@@ -65,9 +56,7 @@ async function switchProvider(provider) {
     await apiRequest("/api/hf/provider", "POST", { provider });
     _updateProviderUI(provider);
     updateStatusBar(`プロバイダー: ${provider}`);
-    if (provider === "ollama") {
-      await loadModels();
-    }
+    if (provider === "ollama") await loadModels();
   } catch (err) {
     showAlert(`プロバイダー切替エラー: ${err.message}`, "error");
   }
@@ -82,7 +71,6 @@ function openHFModal() {
   if (modal) {
     modal.style.display = "flex";
     loadHFModels();
-    populateManualSelector();
   }
 }
 
@@ -91,10 +79,6 @@ function closeHFModal() {
   if (modal) modal.style.display = "none";
 }
 
-/**
- * HF タブを切り替える。
- * @param {string} tabName  "catalog" | "local" | "manual"
- */
 function switchHFTab(tabName) {
   document.querySelectorAll(".hf-tab-btn").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.hfTab === tabName);
@@ -114,10 +98,8 @@ async function loadHFModels() {
     _hfLoadedModelPath = data.loaded_model || "";
     renderCatalog(data.catalog || []);
     renderLocalModels(data.local || []);
-    // モデルディレクトリラベルを実パスで更新
     const dirEl = document.getElementById("hf-models-dir");
     if (dirEl && data.models_dir) dirEl.textContent = data.models_dir;
-    // プロバイダー状態を同期
     if (data.active_provider !== _activeProvider) {
       _updateProviderUI(data.active_provider);
     }
@@ -137,12 +119,11 @@ function renderCatalog(catalog) {
   }
 
   el.innerHTML = catalog.map(m => {
-    const isLoaded    = m.local_path && m.local_path === _hfLoadedModelPath;
+    const isLoaded     = m.local_path && m.local_path === _hfLoadedModelPath;
     const isDownloaded = m.downloaded;
-    const cardClass   = isLoaded ? "loaded" : isDownloaded ? "downloaded" : "";
-    const badgeClass  = isLoaded ? "loaded" : isDownloaded ? "downloaded" : "not-downloaded";
-    const badgeText   = isLoaded ? "✓ ロード済み" : isDownloaded ? "✓ ダウンロード済み" : "未ダウンロード";
-
+    const cardClass    = isLoaded ? "loaded" : isDownloaded ? "downloaded" : "";
+    const badgeClass   = isLoaded ? "loaded" : isDownloaded ? "downloaded" : "not-downloaded";
+    const badgeText    = isLoaded ? "✓ ロード済み" : isDownloaded ? "✓ ダウンロード済み" : "未ダウンロード";
     const tags = (m.tags || []).map(t =>
       `<span class="hf-tag tag-${escapeHtml(t)}">${escapeHtml(t)}</span>`
     ).join("");
@@ -153,7 +134,7 @@ function renderCatalog(catalog) {
         ? `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.local_path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>
            <button class="btn btn-secondary btn-sm" data-id="${escapeHtml(m.id)}" onclick="startHFDownload(this.dataset.id)">再DL</button>`
         : `<button class="btn btn-primary btn-sm" data-id="${escapeHtml(m.id)}" onclick="startHFDownload(this.dataset.id)">ダウンロード</button>
-           <button class="btn btn-secondary btn-sm" data-id="${escapeHtml(m.id)}" onclick="showManualDownload(this.dataset.id)">手動DL</button>`;
+           <button class="btn btn-secondary btn-sm" data-repo="${escapeHtml(m.repo_id)}" data-name="${escapeHtml(m.name)}" onclick="showManualDownload(this.dataset.repo, this.dataset.name)">手動DL</button>`;
 
     return `
       <div class="hf-model-card ${cardClass}" id="hf-card-${escapeHtml(m.id)}">
@@ -162,7 +143,6 @@ function renderCatalog(catalog) {
           <div class="hf-model-desc">${escapeHtml(m.description)}</div>
           <div class="hf-model-meta">
             <span>💾 ${m.size_gb} GB</span>
-            <span>📁 ${escapeHtml(m.filename)}</span>
             <span>✦ ${escapeHtml(m.recommended_for || "")}</span>
           </div>
         </div>
@@ -186,15 +166,13 @@ function renderLocalModels(local) {
   el.innerHTML = local.map(m => {
     const isLoaded = m.path === _hfLoadedModelPath;
     const cardClass = isLoaded ? "loaded" : "";
-    const fname = m.filename || m.path.split("/").pop();
     return `
       <div class="hf-model-card ${cardClass}">
         <div class="hf-model-info">
-          <div class="hf-model-name">${escapeHtml(m.name || fname)}</div>
+          <div class="hf-model-name">${escapeHtml(m.name)}</div>
           <div class="hf-model-desc">${escapeHtml(m.description || "ローカルモデル")}</div>
           <div class="hf-model-meta">
             <span>💾 ${m.size_gb} GB</span>
-            <span class="hf-url-link" title="${escapeHtml(m.path)}">${escapeHtml(m.path)}</span>
           </div>
         </div>
         <div class="hf-model-actions">
@@ -209,29 +187,24 @@ function renderLocalModels(local) {
 }
 
 // ---------------------------------------------------------------------------
-// ダウンロード
+// ダウンロード（カタログ: model_id / ライブ検索: repo_id）
 // ---------------------------------------------------------------------------
 
-function startHFDownload(modelId) {
-  // 既に進行中のダウンロードを閉じる
-  if (_hfDownloadES) {
-    _hfDownloadES.close();
-    _hfDownloadES = null;
-  }
+function _startDownloadSSE(url, displayName) {
+  if (_hfDownloadES) { _hfDownloadES.close(); _hfDownloadES = null; }
 
-  const panel = document.getElementById("hf-download-panel");
-  const nameEl = document.getElementById("hf-download-model-name");
-  const statusEl = document.getElementById("hf-download-status");
+  const panel     = document.getElementById("hf-download-panel");
+  const nameEl    = document.getElementById("hf-download-model-name");
+  const statusEl  = document.getElementById("hf-download-status");
   const progressBar = document.getElementById("hf-progress-bar");
 
-  if (panel) panel.style.display = "";
-  if (nameEl) nameEl.textContent = `${modelId} をダウンロード中...`;
-  if (statusEl) statusEl.textContent = "接続中...";
+  if (panel)       panel.style.display = "";
+  if (nameEl)      nameEl.textContent   = displayName;
+  if (statusEl)    statusEl.textContent = "接続中...";
   if (progressBar) progressBar.style.width = "0%";
+  updateStatusBar(`ダウンロード中: ${displayName}`);
 
-  updateStatusBar(`${modelId} をダウンロード中...`);
-
-  _hfDownloadES = new EventSource(`/api/hf/download?model_id=${encodeURIComponent(modelId)}`);
+  _hfDownloadES = new EventSource(url);
 
   _hfDownloadES.addEventListener("status", e => {
     const d = JSON.parse(e.data);
@@ -242,64 +215,59 @@ function startHFDownload(modelId) {
   _hfDownloadES.addEventListener("progress", e => {
     const d = JSON.parse(e.data);
     if (progressBar && d.total > 0) {
-      const pct = Math.round((d.done / d.total) * 100);
-      progressBar.style.width = `${pct}%`;
+      progressBar.style.width = `${Math.round((d.done / d.total) * 100)}%`;
     }
-    if (statusEl) {
-      const speed = d.speed_mbps ? ` — ${d.speed_mbps.toFixed(1)} MB/s` : "";
-      const pct = d.total > 0 ? ` (${Math.round((d.done / d.total) * 100)}%)` : "";
-      statusEl.textContent = `${_fmtBytes(d.done)} / ${_fmtBytes(d.total)}${pct}${speed}`;
+    if (statusEl && d.total > 0) {
+      statusEl.textContent = `${_fmtBytes(d.done)} / ${_fmtBytes(d.total)} (${Math.round((d.done / d.total) * 100)}%)`;
     }
   });
 
   _hfDownloadES.addEventListener("done", e => {
-    _hfDownloadES.close();
-    _hfDownloadES = null;
+    _hfDownloadES.close(); _hfDownloadES = null;
     const d = JSON.parse(e.data);
     if (progressBar) progressBar.style.width = "100%";
-    if (statusEl) statusEl.textContent = "ダウンロード完了！";
+    if (statusEl)    statusEl.textContent = "ダウンロード完了！";
     updateStatusBar("ダウンロード完了");
-    showAlert(`ダウンロード完了: ${modelId}`, "success");
-
-    // 自動でモデルをロード
-    if (d.path) {
-      setTimeout(() => loadHFModel(d.path), 500);
-    }
-    // カードを再レンダリング
+    showAlert(`ダウンロード完了: ${displayName}`, "success");
+    if (d.path) setTimeout(() => loadHFModel(d.path), 500);
     setTimeout(() => loadHFModels(), 800);
   });
 
   _hfDownloadES.addEventListener("error", e => {
-    _hfDownloadES.close();
-    _hfDownloadES = null;
+    _hfDownloadES.close(); _hfDownloadES = null;
     try {
       const d = JSON.parse(e.data);
       if (statusEl) statusEl.textContent = `エラー: ${d.error}`;
       updateStatusBar("ダウンロードエラー");
-
       if (d.proxy_error) {
-        // プロキシエラー → 手動ダウンロードタブを表示
         showAlert("プロキシによりブロックされました。手動ダウンロード手順を表示します。", "warning");
-        if (d.instructions) {
-          _showInstructions(d.instructions);
-          switchHFTab("manual");
-        } else {
-          showManualDownload(modelId);
-        }
+        if (d.instructions) { _showInstructions(d.instructions); switchHFTab("manual"); }
       } else {
         showAlert(`ダウンロードエラー: ${d.error}`, "error");
       }
     } catch (_) {
-      if (statusEl) statusEl.textContent = "ダウンロードエラー";
+      if (statusEl) statusEl.textContent = "エラー";
     }
   });
 }
 
+function startHFDownload(modelId) {
+  const model = /* catalog lookup via DOM */ null;
+  _startDownloadSSE(
+    `/api/hf/download?model_id=${encodeURIComponent(modelId)}`,
+    modelId,
+  );
+}
+
+function startHFDownloadRepo(repoId) {
+  _startDownloadSSE(
+    `/api/hf/download?repo_id=${encodeURIComponent(repoId)}`,
+    repoId.split("/").pop(),
+  );
+}
+
 function cancelHFDownload() {
-  if (_hfDownloadES) {
-    _hfDownloadES.close();
-    _hfDownloadES = null;
-  }
+  if (_hfDownloadES) { _hfDownloadES.close(); _hfDownloadES = null; }
   const panel = document.getElementById("hf-download-panel");
   if (panel) panel.style.display = "none";
   updateStatusBar("ダウンロードをキャンセルしました");
@@ -311,11 +279,11 @@ function cancelHFDownload() {
 
 async function loadHFModel(path) {
   try {
-    updateStatusBar(`モデルをロード中: ${path.split("/").pop()}...`);
+    updateStatusBar(`モデルをロード中...`);
     const data = await apiRequest("/api/hf/load", "POST", { path });
     _hfLoadedModelPath = data.path || path;
     _updateProviderUI("huggingface");
-    updateStatusBar(`モデルをロードしました: ${path.split("/").pop()}`);
+    updateStatusBar(`モデルをロードしました`);
     showAlert(`🤗 モデルをロードしました`, "success");
     closeHFModal();
   } catch (err) {
@@ -341,38 +309,23 @@ async function unloadHFModel() {
 // 手動ダウンロード案内
 // ---------------------------------------------------------------------------
 
-function populateManualSelector() {
-  const sel = document.getElementById("hf-manual-model-selector");
-  if (!sel) return;
-  // カタログからオプションを生成（既にレンダリング済みの場合はスキップ）
-  if (sel.options.length > 1) return;
-
-  apiRequest("/api/hf/models").then(data => {
-    const catalog = data.catalog || [];
-    catalog.forEach(m => {
-      const opt = document.createElement("option");
-      opt.value = m.id;
-      opt.textContent = `${m.name} (${m.size_gb} GB)`;
-      sel.appendChild(opt);
+async function showManualDownload(repoId, modelName) {
+  switchHFTab("manual");
+  try {
+    const data = await apiRequest("/api/hf/instructions", "POST", {
+      repo_id: repoId, model_name: modelName || "",
     });
-  }).catch(() => {});
+    _showInstructions(data.instructions);
+  } catch (err) {
+    showAlert(`手順取得エラー: ${err.message}`, "error");
+  }
 }
 
 async function getManualInstructions() {
   const sel = document.getElementById("hf-manual-model-selector");
   const modelId = sel ? sel.value : "";
-  if (!modelId) {
-    showAlert("モデルを選択してください", "warning");
-    return;
-  }
-  await showManualDownload(modelId);
-}
-
-async function showManualDownload(modelId) {
-  switchHFTab("manual");
-  const sel = document.getElementById("hf-manual-model-selector");
-  if (sel) sel.value = modelId;
-
+  if (!modelId) { showAlert("モデルを選択してください", "warning"); return; }
+  const model = /* look up name */ sel.options[sel.selectedIndex]?.text || modelId;
   try {
     const data = await apiRequest("/api/hf/instructions", "POST", { model_id: modelId });
     _showInstructions(data.instructions);
@@ -382,64 +335,95 @@ async function showManualDownload(modelId) {
 }
 
 function _showInstructions(inst) {
-  const panel = document.getElementById("hf-instructions-panel");
+  const panel   = document.getElementById("hf-instructions-panel");
   const content = document.getElementById("hf-instructions-content");
   if (!panel || !content) return;
-
   panel.style.display = "";
+  panel.dataset.repoId = inst.repo_id || "";
 
-  // Store dest_path for later check
-  panel.dataset.destPath = inst.dest_path || "";
+  const destDisplay = escapeHtml(inst.dest_display || inst.dest_dir || "");
+  const cliCmd      = escapeHtml(inst.cli_cmd || "");
+  const pyCmd       = escapeHtml(inst.python_cmd || "");
 
   content.innerHTML = `
-<b>${escapeHtml(inst.model_name)}</b> — ${inst.size_gb} GB
+<b>${escapeHtml(inst.model_name)}</b>
 
-<b>1. ブラウザでダウンロード:</b>
-   <a href="${escapeHtml(inst.download_url)}" target="_blank" class="hf-url-link">${escapeHtml(inst.download_url)}</a>
-   <button class="hf-copy-btn" onclick="_copyText('${escapeHtml(inst.download_url)}')">コピー</button>
+<b>1. huggingface-cli でダウンロード（推奨）:</b>
+   <code>${cliCmd}</code>
+   <button class="hf-copy-btn" data-text="${cliCmd}" onclick="_copyText(this.dataset.text)">コピー</button>
 
-<b>2. wget でダウンロード:</b>
-   <code>${escapeHtml(inst.wget_cmd)}</code>
-   <button class="hf-copy-btn" onclick="_copyText('${escapeHtml(inst.wget_cmd)}')">コピー</button>
+<b>2. Python スクリプトで:</b>
+   <code>${pyCmd}</code>
+   <button class="hf-copy-btn" data-text="${pyCmd}" onclick="_copyText(this.dataset.text)">コピー</button>
 
-<b>3. curl でダウンロード:</b>
-   <code>${escapeHtml(inst.curl_cmd)}</code>
-   <button class="hf-copy-btn" onclick="_copyText('${escapeHtml(inst.curl_cmd)}')">コピー</button>
+<b>3. ダウンロード先（自動作成済み）:</b>
+   <code>${destDisplay}</code>
+   <button class="hf-copy-btn" data-text="${destDisplay}" onclick="_copyText(this.dataset.text)">コピー</button>
 
-<b>4. ダウンロード先フォルダ（自動作成済み）:</b>
-   <code>${escapeHtml(inst.dest_dir)}</code>
-   <button class="hf-copy-btn" onclick="_copyText('${escapeHtml(inst.dest_dir)}')">コピー</button>
-
-<b>5. 配置後のファイルパス:</b>
-   <code>${escapeHtml(inst.dest_path)}</code>
-
-<b>6.</b> ファイルを上記フォルダに配置したら下の「確認してロード」ボタンをクリックしてください。`;
-
-  content.scrollTop = 0;
+<b>4.</b> ダウンロード完了後、「ローカルモデル」タブで「↻ 再スキャン」をクリックしてロードしてください。`;
 }
 
-async function checkAndLoadManualModel() {
-  const panel = document.getElementById("hf-instructions-panel");
-  const destPath = panel ? panel.dataset.destPath : "";
-  if (!destPath) {
-    showAlert("先にモデルの手順を表示してください", "warning");
-    return;
-  }
+// ---------------------------------------------------------------------------
+// ライブ HuggingFace 検索
+// ---------------------------------------------------------------------------
 
-  // スキャンして確認
+async function hfSearch(query) {
+  const statusEl  = document.getElementById("hf-browse-status");
+  const resultsEl = document.getElementById("hf-browse-results");
+  if (!resultsEl) return;
+
+  resultsEl.innerHTML = '<div class="empty-state">検索中...</div>';
+  if (statusEl) { statusEl.style.display = ""; statusEl.textContent = "HuggingFace API に接続中..."; }
+
   try {
-    const data = await apiRequest("/api/hf/scan");
-    const found = (data.local || []).find(m => m.path === destPath);
-    if (found) {
-      await loadHFModel(destPath);
-    } else {
-      showAlert(
-        `ファイルが見つかりません:\n${destPath}\n\nファイルを正しいフォルダに配置してください。`,
-        "warning",
-      );
+    const url = `/api/hf/search?q=${encodeURIComponent(query)}&limit=20`;
+    const data = await apiRequest(url);
+
+    if (!data.online) {
+      if (statusEl) statusEl.textContent = `オフライン: ${data.error || "HuggingFace API に接続できません"}`;
+      resultsEl.innerHTML = '<div class="empty-state">HuggingFace API に接続できません。ネットワークを確認してください。</div>';
+      return;
     }
+
+    const models = data.models || [];
+    if (statusEl) statusEl.textContent = `${models.length} 件のモデルが見つかりました`;
+
+    if (models.length === 0) {
+      resultsEl.innerHTML = '<div class="empty-state">該当するモデルが見つかりません。</div>';
+      return;
+    }
+
+    resultsEl.innerHTML = models.map(m => {
+      const isDownloaded = m.downloaded;
+      const isLoaded     = m.local_path && m.local_path === _hfLoadedModelPath;
+      const cardClass    = isLoaded ? "loaded" : isDownloaded ? "downloaded" : "";
+      return `
+        <div class="hf-model-card hf-browse-card ${cardClass}">
+          <div class="hf-model-info">
+            <div class="hf-model-name">${escapeHtml(m.name)}</div>
+            <div class="hf-model-desc" style="font-size:11px;color:var(--text-muted);">${escapeHtml(m.repo_id)}</div>
+            <div class="hf-model-meta">
+              <span>⬇ ${_fmtNum(m.downloads)}</span>
+              <span>♥ ${_fmtNum(m.likes)}</span>
+            </div>
+          </div>
+          <div class="hf-model-actions">
+            ${isLoaded
+              ? `<span class="hf-status-badge loaded">✓ ロード済み</span>
+                 <button class="btn btn-secondary btn-sm" onclick="unloadHFModel()">アンロード</button>`
+              : isDownloaded
+                ? `<span class="hf-status-badge downloaded">✓ DL済み</span>
+                   <button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.local_path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>`
+                : `<button class="btn btn-primary btn-sm" data-repo="${escapeHtml(m.repo_id)}" onclick="startHFDownloadRepo(this.dataset.repo)">ダウンロード</button>
+                   <button class="btn btn-secondary btn-sm" data-repo="${escapeHtml(m.repo_id)}" data-name="${escapeHtml(m.name)}" onclick="showManualDownload(this.dataset.repo, this.dataset.name)">手動DL</button>`
+            }
+          </div>
+        </div>`;
+    }).join("");
+
   } catch (err) {
-    showAlert(`スキャンエラー: ${err.message}`, "error");
+    if (statusEl) statusEl.textContent = `エラー: ${err.message}`;
+    resultsEl.innerHTML = `<div class="empty-state">エラー: ${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -456,231 +440,6 @@ function _fmtBytes(bytes) {
   return `${Math.round(bytes / 1024)} KB`;
 }
 
-function _copyText(text) {
-  navigator.clipboard.writeText(text).then(() => {
-    updateStatusBar("クリップボードにコピーしました");
-  }).catch(() => {
-    // フォールバック
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-    updateStatusBar("コピーしました");
-  });
-}
-
-// ---------------------------------------------------------------------------
-// ライブ HuggingFace 検索
-// ---------------------------------------------------------------------------
-
-let _browseExpandedRepo = null;   // 現在ファイルリストを展開中の repo_id
-
-async function hfSearch(query) {
-  const statusEl  = document.getElementById("hf-browse-status");
-  const resultsEl = document.getElementById("hf-browse-results");
-  if (!resultsEl) return;
-
-  resultsEl.innerHTML = '<div class="empty-state">検索中...</div>';
-  if (statusEl) { statusEl.style.display = ""; statusEl.textContent = "HuggingFace API に接続中..."; }
-
-  try {
-    const url = query
-      ? `/api/hf/search?q=${encodeURIComponent(query)}&limit=20`
-      : `/api/hf/search?limit=20`;
-    const data = await apiRequest(url);
-
-    if (!data.online) {
-      if (statusEl) statusEl.textContent = `オフライン: ${data.error || "HuggingFace API に接続できません"}`;
-      resultsEl.innerHTML = '<div class="empty-state">HuggingFace API に接続できません。ネットワークを確認してください。</div>';
-      return;
-    }
-
-    const models = data.models || [];
-    if (statusEl) statusEl.textContent = `${models.length} 件のモデルが見つかりました`;
-
-    if (models.length === 0) {
-      resultsEl.innerHTML = '<div class="empty-state">該当するモデルが見つかりません。別のキーワードを試してください。</div>';
-      return;
-    }
-
-    resultsEl.innerHTML = models.map(m => `
-      <div class="hf-model-card hf-browse-card" id="hf-browse-card-${CSS.escape(m.repo_id)}">
-        <div class="hf-model-info">
-          <div class="hf-model-name">${escapeHtml(m.name)}</div>
-          <div class="hf-model-desc" style="font-size:11px;color:var(--text-muted);">${escapeHtml(m.repo_id)}</div>
-          <div class="hf-model-meta">
-            <span>⬇ ${_fmtNum(m.downloads)}</span>
-            <span>♥ ${_fmtNum(m.likes)}</span>
-          </div>
-        </div>
-        <div class="hf-model-actions">
-          <button class="btn btn-secondary btn-sm" onclick="toggleBrowseFiles('${escapeHtml(m.repo_id)}')">
-            ファイル一覧
-          </button>
-        </div>
-      </div>
-      <div class="hf-file-list" id="hf-files-${CSS.escape(m.repo_id)}" style="display:none;"></div>
-    `).join("");
-
-  } catch (err) {
-    if (statusEl) statusEl.textContent = `エラー: ${err.message}`;
-    resultsEl.innerHTML = `<div class="empty-state">エラー: ${escapeHtml(err.message)}</div>`;
-  }
-}
-
-async function toggleBrowseFiles(repoId) {
-  const filesEl = document.getElementById(`hf-files-${CSS.escape(repoId)}`);
-  if (!filesEl) return;
-
-  // 既に展開中なら閉じる
-  if (filesEl.style.display !== "none") {
-    filesEl.style.display = "none";
-    _browseExpandedRepo = null;
-    return;
-  }
-
-  // 他を閉じる
-  if (_browseExpandedRepo) {
-    const prev = document.getElementById(`hf-files-${CSS.escape(_browseExpandedRepo)}`);
-    if (prev) prev.style.display = "none";
-  }
-  _browseExpandedRepo = repoId;
-
-  filesEl.style.display = "";
-  filesEl.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:12px;">ファイル一覧を取得中...</div>';
-
-  try {
-    const data = await apiRequest(`/api/hf/model-files?repo_id=${encodeURIComponent(repoId)}`);
-    const files = data.files || [];
-
-    if (files.length === 0) {
-      filesEl.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:12px;">GGUF ファイルが見つかりません（ファイルサイズが 19 GB を超えているか、ファイルが存在しません）。</div>';
-      return;
-    }
-
-    filesEl.innerHTML = `
-      <div class="hf-file-list-inner">
-        ${files.map(f => {
-          const sizeStr  = f.size_gb != null ? `${f.size_gb} GB` : "サイズ不明";
-          const quantBadge = f.quant
-            ? `<span class="hf-tag tag-${f.quant.startsWith('Q4') || f.quant.startsWith('Q5') ? 'recommended' : 'balanced'}">${escapeHtml(f.quant)}</span>`
-            : "";
-          return `
-            <div class="hf-file-row ${f.downloaded ? 'downloaded' : ''}">
-              <div class="hf-file-info">
-                <span class="hf-file-name">${escapeHtml(f.filename)}</span>
-                ${quantBadge}
-                <span class="hf-file-size">${sizeStr}</span>
-                ${f.downloaded ? '<span class="hf-status-badge downloaded" style="font-size:10px;">✓ ダウンロード済み</span>' : ""}
-              </div>
-              <div class="hf-file-actions">
-                ${f.downloaded
-                  ? `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(f.local_path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>`
-                  : `<button class="btn btn-primary btn-sm"
-                       data-repo="${escapeHtml(repoId)}" data-file="${escapeHtml(f.filename)}"
-                       onclick="startHFDownloadDirect(this.dataset.repo, this.dataset.file)">
-                       ダウンロード
-                     </button>
-                     <button class="btn btn-secondary btn-sm"
-                       data-repo="${escapeHtml(repoId)}" data-file="${escapeHtml(f.filename)}" data-size="${escapeHtml(String(f.size_gb || ''))}"
-                       onclick="showFileManualDownload(this.dataset.repo, this.dataset.file, this.dataset.size)">
-                       手動DL
-                     </button>`
-                }
-              </div>
-            </div>`;
-        }).join("")}
-      </div>`;
-  } catch (err) {
-    filesEl.innerHTML = `<div style="padding:8px;color:var(--danger);font-size:12px;">エラー: ${escapeHtml(err.message)}</div>`;
-  }
-}
-
-function startHFDownloadDirect(repoId, filename) {
-  // reuse existing SSE download — pass repo_id+filename instead of model_id
-  if (_hfDownloadES) {
-    _hfDownloadES.close();
-    _hfDownloadES = null;
-  }
-
-  const panel     = document.getElementById("hf-download-panel");
-  const nameEl    = document.getElementById("hf-download-model-name");
-  const statusEl  = document.getElementById("hf-download-status");
-  const progressBar = document.getElementById("hf-progress-bar");
-
-  if (panel)       panel.style.display = "";
-  if (nameEl)      nameEl.textContent  = filename;
-  if (statusEl)    statusEl.textContent = "接続中...";
-  if (progressBar) progressBar.style.width = "0%";
-
-  updateStatusBar(`ダウンロード中: ${filename}`);
-
-  const url = `/api/hf/download?repo_id=${encodeURIComponent(repoId)}&filename=${encodeURIComponent(filename)}`;
-  _hfDownloadES = new EventSource(url);
-
-  _hfDownloadES.addEventListener("status", e => {
-    const d = JSON.parse(e.data);
-    if (statusEl) statusEl.textContent = d.status || "";
-  });
-
-  _hfDownloadES.addEventListener("done", e => {
-    _hfDownloadES.close();
-    _hfDownloadES = null;
-    const d = JSON.parse(e.data);
-    if (progressBar) progressBar.style.width = "100%";
-    if (statusEl)    statusEl.textContent = "完了！";
-    showAlert(`ダウンロード完了: ${filename}`, "success");
-    updateStatusBar("ダウンロード完了");
-    if (d.path) setTimeout(() => loadHFModel(d.path), 500);
-    // ファイルリストを再読み込み
-    if (_browseExpandedRepo === repoId) {
-      _browseExpandedRepo = null;
-      setTimeout(() => toggleBrowseFiles(repoId), 800);
-    }
-  });
-
-  _hfDownloadES.addEventListener("error", e => {
-    _hfDownloadES.close();
-    _hfDownloadES = null;
-    try {
-      const d = JSON.parse(e.data);
-      if (statusEl) statusEl.textContent = `エラー: ${d.error}`;
-      if (d.proxy_error) {
-        showAlert("プロキシによりブロックされました。手動ダウンロード手順を表示します。", "warning");
-        if (d.instructions) {
-          _showInstructions(d.instructions);
-          switchHFTab("manual");
-        } else {
-          showFileManualDownload(repoId, filename, null);
-        }
-      } else {
-        showAlert(`ダウンロードエラー: ${d.error}`, "error");
-      }
-    } catch (_) {
-      if (statusEl) statusEl.textContent = "エラー";
-    }
-  });
-}
-
-async function showFileManualDownload(repoId, filename, sizeGb) {
-  switchHFTab("manual");
-  try {
-    const data = await apiRequest("/api/hf/file-instructions", "POST", {
-      repo_id: repoId, filename, size_gb: sizeGb ? parseFloat(sizeGb) : null,
-    });
-    _showInstructions(data.instructions);
-    // Update the check button dest path
-    const panel = document.getElementById("hf-instructions-panel");
-    if (panel) panel.dataset.destPath = data.instructions.dest_path || "";
-  } catch (err) {
-    showAlert(`手順取得エラー: ${err.message}`, "error");
-  }
-}
-
 function _fmtNum(n) {
   if (!n) return "0";
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -688,42 +447,41 @@ function _fmtNum(n) {
   return String(n);
 }
 
+function _copyText(text) {
+  navigator.clipboard.writeText(text).catch(() => {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select(); document.execCommand("copy");
+    document.body.removeChild(ta);
+  });
+  updateStatusBar("コピーしました");
+}
+
 // ---------------------------------------------------------------------------
 // 初期化（DOMContentLoaded から呼ばれる）
 // ---------------------------------------------------------------------------
 
 function initHFUI() {
-  // プロバイダーボタン
   document.querySelectorAll(".provider-btn").forEach(btn => {
     btn.addEventListener("click", () => switchProvider(btn.dataset.provider));
   });
 
-  // HF モデル選択ボタン
   const hfSelectBtn = document.getElementById("hf-model-select-btn");
   if (hfSelectBtn) hfSelectBtn.addEventListener("click", openHFModal);
 
-  // モーダル閉じる
   const closeBtn = document.getElementById("hf-modal-close");
   if (closeBtn) closeBtn.addEventListener("click", closeHFModal);
 
-  // モーダル外クリックで閉じる
   const hfModal = document.getElementById("hf-modal");
-  if (hfModal) {
-    hfModal.addEventListener("click", e => {
-      if (e.target === hfModal) closeHFModal();
-    });
-  }
+  if (hfModal) hfModal.addEventListener("click", e => { if (e.target === hfModal) closeHFModal(); });
 
-  // HF タブ切替
   document.querySelectorAll(".hf-tab-btn").forEach(btn => {
     btn.addEventListener("click", () => switchHFTab(btn.dataset.hfTab));
   });
 
-  // ダウンロードキャンセル
   const cancelBtn = document.getElementById("hf-cancel-download-btn");
   if (cancelBtn) cancelBtn.addEventListener("click", cancelHFDownload);
 
-  // 再スキャンボタン
   const rescanBtn = document.getElementById("hf-rescan-btn");
   if (rescanBtn) {
     rescanBtn.addEventListener("click", async () => {
@@ -735,35 +493,39 @@ function initHFUI() {
 
   // ライブ検索
   const searchBtn = document.getElementById("hf-search-btn");
-  if (searchBtn) {
-    searchBtn.addEventListener("click", () => {
-      const q = document.getElementById("hf-search-input")?.value?.trim() || "";
-      hfSearch(q);
-    });
-  }
+  if (searchBtn) searchBtn.addEventListener("click", () => {
+    hfSearch(document.getElementById("hf-search-input")?.value?.trim() || "");
+  });
   const topBtn = document.getElementById("hf-search-top-btn");
   if (topBtn) topBtn.addEventListener("click", () => hfSearch(""));
-
   const searchInput = document.getElementById("hf-search-input");
-  if (searchInput) {
-    searchInput.addEventListener("keydown", e => {
-      if (e.key === "Enter") {
-        hfSearch(e.target.value.trim());
-      }
-    });
-  }
+  if (searchInput) searchInput.addEventListener("keydown", e => {
+    if (e.key === "Enter") hfSearch(e.target.value.trim());
+  });
 
-  // 手動ダウンロード手順取得
+  // 手動ダウンロード — カタログセレクタ
   const instrBtn = document.getElementById("hf-get-instructions-btn");
   if (instrBtn) instrBtn.addEventListener("click", getManualInstructions);
 
-  // 手動ダウンロード確認ボタン
-  const checkBtn = document.getElementById("hf-check-file-btn");
-  if (checkBtn) checkBtn.addEventListener("click", checkAndLoadManualModel);
+  // 手動ダウンロードタブ用カタログセレクタを初期化
+  _populateManualSelector();
 
   // 起動時 HF 状態を確認
   apiRequest("/api/hf/status").then(data => {
     _hfLoadedModelPath = data.loaded_model || "";
     _updateProviderUI(data.active_provider || "ollama");
+  }).catch(() => {});
+}
+
+function _populateManualSelector() {
+  const sel = document.getElementById("hf-manual-model-selector");
+  if (!sel || sel.options.length > 1) return;
+  apiRequest("/api/hf/models").then(data => {
+    (data.catalog || []).forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = `${m.name} (${m.size_gb} GB)`;
+      sel.appendChild(opt);
+    });
   }).catch(() => {});
 }

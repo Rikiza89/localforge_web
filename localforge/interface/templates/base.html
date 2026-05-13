@@ -268,7 +268,8 @@
         <div class="hf-tab-content" id="hf-tab-manual">
           <div class="hf-catalog-info">
             プロキシや企業ネットワークによりダウンロードがブロックされた場合、
-            以下の手順に従って手動でモデルをダウンロードしてください。
+            <code>huggingface-cli</code> またはブラウザで手動ダウンロードしてください。
+            ダウンロード後は「ローカルモデル」タブで「↻ 再スキャン」してロードできます。
           </div>
           <div id="hf-manual-model-select" style="margin-bottom:12px;">
             <label class="field-label">モデルを選択:</label>
@@ -281,9 +282,6 @@
           </div>
           <div id="hf-instructions-panel" style="display:none;">
             <div class="hf-instructions-box" id="hf-instructions-content"></div>
-            <button class="btn btn-success btn-sm" id="hf-check-file-btn" style="margin-top:12px;">
-              ✓ ファイルを確認してロード
-            </button>
           </div>
         </div>
 
