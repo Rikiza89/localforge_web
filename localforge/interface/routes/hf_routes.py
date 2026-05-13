@@ -155,12 +155,14 @@ def search_models():
         results = mgr.search_hf_live(query=query, limit=limit)
         return jsonify({"models": results, "query": query, "online": True})
     except RuntimeError as exc:
+        logger.warning("HuggingFace API 検索失敗: %s", exc)
+        # 200 を返す — フロントエンドは online:false を見てエラー表示する
         return jsonify({
             "models": [],
             "query": query,
             "online": False,
             "error": str(exc),
-        }), 502
+        })
 
 
 @bp.route("/model-files", methods=["GET"])
@@ -186,7 +188,8 @@ def get_model_files():
         files = mgr.get_hf_model_files(repo_id, max_size_gb=max_size_gb)
         return jsonify({"files": files, "repo_id": repo_id})
     except RuntimeError as exc:
-        return jsonify({"error": str(exc), "files": []}), 502
+        logger.warning("HuggingFace model-files 取得失敗 (%s): %s", repo_id, exc)
+        return jsonify({"error": str(exc), "files": [], "repo_id": repo_id})
 
 
 @bp.route("/file-instructions", methods=["POST"])
