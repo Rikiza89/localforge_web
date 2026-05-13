@@ -14,6 +14,47 @@ logger = logging.getLogger(__name__)
 # ローカルモデル保存ディレクトリ
 MODELS_DIR = Path.home() / ".localforge" / "models"
 
+# SSL 検証無効化フラグ（自己署名証明書プロキシ環境向け自動フォールバック）
+_ssl_verify_disabled = False
+
+
+def _disable_ssl_verify() -> None:
+    """
+    自己署名証明書を使う企業プロキシ環境でのフォールバック。
+    huggingface_hub の HTTP バックエンドと requests の両方で SSL 検証を無効化する。
+    一度だけ適用され、以降のすべての HF 通信に適用される。
+    """
+    global _ssl_verify_disabled
+    if _ssl_verify_disabled:
+        return
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        import requests as _req
+        from huggingface_hub import configure_http_backend
+
+        def _insecure_session() -> _req.Session:
+            s = _req.Session()
+            s.verify = False
+            return s
+
+        configure_http_backend(backend_factory=_insecure_session)
+        _ssl_verify_disabled = True
+        logger.warning(
+            "SSL 証明書の検証を無効化しました（自己署名証明書プロキシを検出）。"
+            " 本番環境では適切な CA 証明書の設定を推奨します。"
+        )
+    except Exception as e:
+        logger.warning("SSL 無効化の設定に失敗しました: %s", e)
+
+
+def _is_ssl_error(exc: Exception) -> bool:
+    """例外が SSL 証明書エラーかどうかを判定する。"""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in [
+        "certificate verify failed", "ssl", "cert", "certificate_verify_failed",
+    ])
+
 # HuggingFace ダイレクトダウンロード URL テンプレート
 _HF_DOWNLOAD_URL = "https://huggingface.co/{repo_id}/resolve/main/{filename}"
 
@@ -390,19 +431,29 @@ def download_model(
         model["repo_id"], model["filename"], dest_dir,
     )
 
-    try:
-        downloaded_path = hf_hub_download(
+    def _do_download():
+        return hf_hub_download(
             repo_id=model["repo_id"],
             filename=model["filename"],
             local_dir=str(dest_dir),
-            local_dir_use_symlinks=False,
         )
+
+    try:
+        downloaded_path = _do_download()
         logger.info("ダウンロード完了: %s", downloaded_path)
         return str(downloaded_path)
 
     except (HfHubHTTPError, RepositoryNotFoundError, Exception) as exc:
+        if _is_ssl_error(exc):
+            logger.warning("SSL エラーを検出。SSL 検証を無効化して再試行します。")
+            _disable_ssl_verify()
+            try:
+                downloaded_path = _do_download()
+                logger.info("ダウンロード完了 (SSL 検証無効): %s", downloaded_path)
+                return str(downloaded_path)
+            except Exception as exc2:
+                exc = exc2
         exc_str = str(exc)
-        # プロキシ/ネットワークエラーの判定
         proxy_keywords = ["ProxyError", "ConnectionError", "SSLError", "Timeout",
                           "proxy", "403", "407", "firewall"]
         is_proxy = any(kw.lower() in exc_str.lower() for kw in proxy_keywords)
@@ -450,15 +501,28 @@ def search_hf_live(
     if query:
         params["search"] = query
 
-    try:
-        resp = requests.get(
+    def _do_get(verify=True):
+        return requests.get(
             f"{_HF_API_BASE}/models",
             params=params,
             timeout=_HF_API_TIMEOUT,
+            verify=verify,
         )
+
+    try:
+        resp = _do_get()
         resp.raise_for_status()
     except Exception as exc:
-        raise RuntimeError(f"HuggingFace API に接続できません: {exc}") from exc
+        if _is_ssl_error(exc):
+            logger.warning("SSL エラーを検出。SSL 検証を無効化して再試行します。")
+            _disable_ssl_verify()
+            try:
+                resp = _do_get(verify=False)
+                resp.raise_for_status()
+            except Exception as exc2:
+                raise RuntimeError(f"HuggingFace API に接続できません: {exc2}") from exc2
+        else:
+            raise RuntimeError(f"HuggingFace API に接続できません: {exc}") from exc
 
     result = []
     for m in resp.json():
@@ -484,15 +548,29 @@ def get_hf_model_files(repo_id: str, max_size_gb: float = 19.0) -> List[Dict]:
     """
     import requests
 
-    try:
-        resp = requests.get(
+    def _do_get(verify=True):
+        return requests.get(
             f"{_HF_API_BASE}/models/{repo_id}",
             timeout=_HF_API_TIMEOUT,
+            verify=verify,
         )
+
+    try:
+        resp = _do_get()
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        raise RuntimeError(f"モデル情報の取得に失敗しました ({repo_id}): {exc}") from exc
+        if _is_ssl_error(exc):
+            logger.warning("SSL エラーを検出。SSL 検証を無効化して再試行します (%s)。", repo_id)
+            _disable_ssl_verify()
+            try:
+                resp = _do_get(verify=False)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc2:
+                raise RuntimeError(f"モデル情報の取得に失敗しました ({repo_id}): {exc2}") from exc2
+        else:
+            raise RuntimeError(f"モデル情報の取得に失敗しました ({repo_id}): {exc}") from exc
 
     max_bytes = int(max_size_gb * 1024 ** 3)
     dest_dir = repo_dest_dir(repo_id)
@@ -562,16 +640,27 @@ def download_file(repo_id: str, filename: str) -> str:
 
     logger.info("ダウンロード中: %s / %s → %s", repo_id, filename, dest_dir)
 
-    try:
-        path = hf_hub_download(
+    def _do_download():
+        return hf_hub_download(
             repo_id=repo_id,
             filename=filename,
             local_dir=str(dest_dir),
-            local_dir_use_symlinks=False,
         )
+
+    try:
+        path = _do_download()
         logger.info("ダウンロード完了: %s", path)
         return str(path)
     except (HfHubHTTPError, RepositoryNotFoundError, Exception) as exc:
+        if _is_ssl_error(exc):
+            logger.warning("SSL エラーを検出。SSL 検証を無効化して再試行します。")
+            _disable_ssl_verify()
+            try:
+                path = _do_download()
+                logger.info("ダウンロード完了 (SSL 検証無効): %s", path)
+                return str(path)
+            except Exception as exc2:
+                exc = exc2
         exc_str = str(exc)
         proxy_keywords = ["ProxyError", "ConnectionError", "SSLError", "Timeout",
                           "proxy", "403", "407", "firewall"]
