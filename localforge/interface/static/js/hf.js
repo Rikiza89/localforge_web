@@ -150,10 +150,10 @@ function renderCatalog(catalog) {
     const actionBtns = isLoaded
       ? `<button class="btn btn-secondary btn-sm" onclick="unloadHFModel()">アンロード</button>`
       : isDownloaded
-        ? `<button class="btn btn-primary btn-sm" onclick="loadHFModel('${escapeHtml(m.local_path)}')">ロード</button>
-           <button class="btn btn-secondary btn-sm" onclick="startHFDownload('${escapeHtml(m.id)}')">再DL</button>`
-        : `<button class="btn btn-primary btn-sm" onclick="startHFDownload('${escapeHtml(m.id)}')">ダウンロード</button>
-           <button class="btn btn-secondary btn-sm" onclick="showManualDownload('${escapeHtml(m.id)}')">手動DL</button>`;
+        ? `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.local_path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>
+           <button class="btn btn-secondary btn-sm" data-id="${escapeHtml(m.id)}" onclick="startHFDownload(this.dataset.id)">再DL</button>`
+        : `<button class="btn btn-primary btn-sm" data-id="${escapeHtml(m.id)}" onclick="startHFDownload(this.dataset.id)">ダウンロード</button>
+           <button class="btn btn-secondary btn-sm" data-id="${escapeHtml(m.id)}" onclick="showManualDownload(this.dataset.id)">手動DL</button>`;
 
     return `
       <div class="hf-model-card ${cardClass}" id="hf-card-${escapeHtml(m.id)}">
@@ -201,7 +201,7 @@ function renderLocalModels(local) {
           ${isLoaded
             ? `<span class="hf-status-badge loaded">✓ ロード済み</span>
                <button class="btn btn-secondary btn-sm" onclick="unloadHFModel()">アンロード</button>`
-            : `<button class="btn btn-primary btn-sm" onclick="loadHFModel('${escapeHtml(m.path)}')">ロード</button>`
+            : `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>`
           }
         </div>
       </div>`;
@@ -579,13 +579,15 @@ async function toggleBrowseFiles(repoId) {
               </div>
               <div class="hf-file-actions">
                 ${f.downloaded
-                  ? `<button class="btn btn-primary btn-sm" onclick="loadHFModel('${escapeHtml(f.local_path)}')">ロード</button>`
+                  ? `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(f.local_path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>`
                   : `<button class="btn btn-primary btn-sm"
-                       onclick="startHFDownloadDirect('${escapeHtml(repoId)}','${escapeHtml(f.filename)}')">
+                       data-repo="${escapeHtml(repoId)}" data-file="${escapeHtml(f.filename)}"
+                       onclick="startHFDownloadDirect(this.dataset.repo, this.dataset.file)">
                        ダウンロード
                      </button>
                      <button class="btn btn-secondary btn-sm"
-                       onclick="showFileManualDownload('${escapeHtml(repoId)}','${escapeHtml(f.filename)}','${escapeHtml(f.size_gb || '')}')">
+                       data-repo="${escapeHtml(repoId)}" data-file="${escapeHtml(f.filename)}" data-size="${escapeHtml(String(f.size_gb || ''))}"
+                       onclick="showFileManualDownload(this.dataset.repo, this.dataset.file, this.dataset.size)">
                        手動DL
                      </button>`
                 }
