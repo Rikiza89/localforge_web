@@ -13,6 +13,7 @@ from pathlib import Path
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from localforge.infrastructure import hf_model_manager as mgr
+from localforge.infrastructure.hf_model_manager import MODELS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ def list_models():
         "local": local,
         "active_provider": router.active_provider,
         "loaded_model": loaded,
+        "models_dir": str(MODELS_DIR),
     })
 
 
@@ -274,9 +276,20 @@ def load_model():
     if not model_path:
         return jsonify({"error": "path が指定されていません"}), 400
 
-    path = Path(model_path)
+    path = Path(model_path).resolve()
+
+    # モデルは .localforge/models/ 内のファイルのみ許可
+    try:
+        path.relative_to(MODELS_DIR.resolve())
+    except ValueError:
+        return jsonify({
+            "error": f"モデルは {MODELS_DIR} 内に配置してください: {model_path}"
+        }), 400
+
     if not path.is_file():
-        return jsonify({"error": f"ファイルが見つかりません: {model_path}"}), 404
+        return jsonify({
+            "error": f"ファイルが見つかりません。{MODELS_DIR} にファイルを配置してください: {path}"
+        }), 404
 
     router = _get_router()
 

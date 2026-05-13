@@ -11,8 +11,10 @@ from typing import Callable, Dict, Generator, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# ローカルモデル保存ディレクトリ
-MODELS_DIR = Path.home() / ".localforge" / "models"
+# app.log と同じ .localforge/ フォルダ内にモデルを保存する
+# hf_model_manager.py → infrastructure/ → localforge/ → app root
+_APP_ROOT = Path(__file__).parent.parent.parent
+MODELS_DIR = _APP_ROOT / ".localforge" / "models"
 
 # SSL 検証無効化フラグ（自己署名証明書プロキシ環境向け自動フォールバック）
 _ssl_verify_disabled = False

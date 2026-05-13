@@ -114,6 +114,9 @@ async function loadHFModels() {
     _hfLoadedModelPath = data.loaded_model || "";
     renderCatalog(data.catalog || []);
     renderLocalModels(data.local || []);
+    // モデルディレクトリラベルを実パスで更新
+    const dirEl = document.getElementById("hf-models-dir");
+    if (dirEl && data.models_dir) dirEl.textContent = data.models_dir;
     // プロバイダー状態を同期
     if (data.active_provider !== _activeProvider) {
       _updateProviderUI(data.active_provider);
@@ -744,26 +747,6 @@ function initHFUI() {
     searchInput.addEventListener("keydown", e => {
       if (e.key === "Enter") {
         hfSearch(e.target.value.trim());
-      }
-    });
-  }
-
-  // 任意パスからロード
-  const loadPathBtn = document.getElementById("hf-load-path-btn");
-  if (loadPathBtn) {
-    loadPathBtn.addEventListener("click", () => {
-      const input = document.getElementById("hf-custom-path-input");
-      const p = input ? input.value.trim() : "";
-      if (!p) { showAlert("ファイルパスを入力してください", "warning"); return; }
-      loadHFModel(p);
-    });
-  }
-  const customPathInput = document.getElementById("hf-custom-path-input");
-  if (customPathInput) {
-    customPathInput.addEventListener("keydown", e => {
-      if (e.key === "Enter") {
-        const p = e.target.value.trim();
-        if (p) loadHFModel(p);
       }
     });
   }
