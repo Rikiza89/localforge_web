@@ -791,14 +791,20 @@ function generateReport() {
   const _es = startStream("/api/explain/report", null, {
     onSection: (name) => {
       if (!reportOutput) return;
+
+      // ステータスバーをセクション開始と同時に更新（バナーとh3の不一致を防ぐ）
+      updateStatusBar(`レポート生成中: ${name}`);
+
       // 同じセクションが再度来た場合（SSE再接続によるリスタート）はスキップ
       if (_renderedSections.has(name)) {
         // 既存のセクション要素を currentSectionEl として再利用してトークンを追記する
         const existing = reportOutput.querySelector(`h3[data-section="${CSS.escape(name)}"]`);
         if (existing) {
-          currentSectionEl = existing.nextElementSibling
-            ? existing.nextElementSibling.nextElementSibling
-            : null;
+          // DOM構造: h3 → hr → div.md-body
+          const hr = existing.nextElementSibling;
+          currentSectionEl = hr ? hr.nextElementSibling : null;
+          // 既存バッファをリセットして重複を防ぐ
+          if (currentSectionEl) currentSectionEl._mdBuf = "";
         }
         return;
       }
@@ -825,7 +831,8 @@ function generateReport() {
       }
     },
     onProgress: (done, total, currentFile) => {
-      updateStatusBar(`レポート生成中: ${currentFile} (${done}/${total}セクション)`);
+      // セクション完了時に呼ばれる（done = 完了済みセクション数）
+      updateStatusBar(`レポート生成中: ${done}/${total} セクション完了`);
     },
     onDone: () => {
       _unlockUI();

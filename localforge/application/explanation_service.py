@@ -96,15 +96,8 @@ class ExplanationService:
         completed_sections: List[tuple[str, str]] = []  # (name, content)
 
         for sec_idx, section_name in enumerate(REPORT_SECTIONS):
-            # セクションヘッダーを送信
+            # セクションヘッダーを送信（進捗はセクション完了後に送る）
             yield {"section": section_name}
-            yield {
-                "progress": {
-                    "done": sec_idx,
-                    "total": total_sections,
-                    "current_file": section_name,
-                }
-            }
 
             # セクションに関連するチャンクを選択（top_n=6 でプロンプトを抑制）
             relevant_chunks = self._analysis.get_top_chunks_semantic(
@@ -146,6 +139,15 @@ class ExplanationService:
             self._analysis._index_adapter.append_log_entry(log_path, log_entry)
 
             completed_sections.append((section_name, "".join(section_tokens)))
+
+            # セクション完了後に進捗を送信（done = 完了済みセクション数）
+            yield {
+                "progress": {
+                    "done": sec_idx + 1,
+                    "total": total_sections,
+                    "current_file": section_name,
+                }
+            }
 
         # レポートをディスクに保存
         self._save_report(root, completed_sections, project_index.project_name)
