@@ -963,13 +963,15 @@ class AnalysisService:
         chunks: List[FileChunk],
         selected_paths: List[str],
         max_total: int = 20,
+        max_depth: int = 5,
     ) -> tuple[List[FileChunk], Dict[str, List[str]]]:
         """
-        Expand a set of selected file chunks with their direct import dependencies.
+        Expand a set of selected file chunks with their transitive import dependencies
+        up to max_depth levels deep (BFS).
 
-        For each selected file, adds:
-          - Files it directly imports (forward deps)
-          - Files that directly import it (reverse deps)
+        For each file at each level, adds:
+          - Files it imports (forward deps)
+          - Files that import it (reverse deps)
 
         Results are capped at max_total to stay within token budget.
 
@@ -977,6 +979,7 @@ class AnalysisService:
             chunks: all FileChunks from the project index
             selected_paths: initially selected file paths
             max_total: maximum number of chunks to return
+            max_depth: how many import hops to follow (default 5)
 
         Returns:
             (expanded_chunks, dep_map) where dep_map maps each path to the list
@@ -990,20 +993,30 @@ class AnalysisService:
         seen: Set[str] = set(selected_paths)
         ordered: List[str] = [p for p in selected_paths if p in chunk_map]
 
-        for path in list(ordered):
-            if len(ordered) >= max_total:
+        # BFS frontier: paths added at the previous depth level
+        frontier: List[str] = list(ordered)
+
+        for _depth in range(max_depth):
+            if not frontier or len(ordered) >= max_total:
                 break
-            chunk = chunk_map.get(path)
-            if chunk is None:
-                continue
-            for dep in chunk.imports_resolved:
-                if dep not in seen and dep in chunk_map and len(ordered) < max_total:
-                    seen.add(dep)
-                    ordered.append(dep)
-            for rev in imported_by.get(path, []):
-                if rev not in seen and rev in chunk_map and len(ordered) < max_total:
-                    seen.add(rev)
-                    ordered.append(rev)
+            next_frontier: List[str] = []
+            for path in frontier:
+                if len(ordered) >= max_total:
+                    break
+                chunk = chunk_map.get(path)
+                if chunk is None:
+                    continue
+                for dep in chunk.imports_resolved:
+                    if dep not in seen and dep in chunk_map and len(ordered) < max_total:
+                        seen.add(dep)
+                        ordered.append(dep)
+                        next_frontier.append(dep)
+                for rev in imported_by.get(path, []):
+                    if rev not in seen and rev in chunk_map and len(ordered) < max_total:
+                        seen.add(rev)
+                        ordered.append(rev)
+                        next_frontier.append(rev)
+            frontier = next_frontier
 
         result_chunks = [chunk_map[p] for p in ordered if p in chunk_map]
 
