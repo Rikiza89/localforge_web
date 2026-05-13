@@ -37,6 +37,27 @@ REPORT_SECTIONS = [
 
 _LOCALFORGE_DIR = ".localforge"
 
+import re as _re
+_HEADING_RE = _re.compile(r"^#{1,3}\s+", _re.MULTILINE)
+
+
+def _strip_leading_heading(content: str, section_name: str) -> str:
+    """
+    LLM がセクションタイトルを先頭に出力した場合に除去する。
+    section_name に一致する最初の見出し行、または単なる先頭見出しを削除する。
+    """
+    text = content.strip()
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return text
+    first = lines[0].strip()
+    # 先頭行が # 見出しであり、かつセクション名を含む場合に除去
+    if _HEADING_RE.match(first):
+        stripped_title = _HEADING_RE.sub("", first).strip()
+        if stripped_title.lower() in section_name.lower() or section_name.lower() in stripped_title.lower():
+            return "".join(lines[1:]).strip()
+    return text
+
 
 class ExplanationService:
     """
@@ -185,7 +206,7 @@ class ExplanationService:
         lines: List[str] = [f"# {project_name} — Codebase Report\n\n"]
         for name, content in sections:
             lines.append(f"## {name}\n\n")
-            lines.append(content.strip())
+            lines.append(_strip_leading_heading(content, name))
             lines.append("\n\n---\n\n")
 
         report_path.write_text("".join(lines), encoding="utf-8")

@@ -445,7 +445,10 @@ class ContextService:
             f"関連ファイルサマリー:\n{summaries_text}\n\n"
             f"上記の情報を基に、以下のセクションについて詳細な分析を日本語で記述してください。\n"
             f"セクション: {section_name}\n\n"
-            f"このセクションの内容のみを出力してください。マークダウン形式で記述してください。"
+            f"出力ルール:\n"
+            f"- セクションタイトル（見出し行）は出力しないでください。内容のみを出力してください。\n"
+            f"- マークダウン形式で記述してください（本文中の小見出しは ## / ### を使用可）。\n"
+            f"- このセクションの内容のみを出力してください。"
         )
         return self._guard_budget(prompt, f"report_section:{section_name}"), _estimate_tokens(prompt)
 

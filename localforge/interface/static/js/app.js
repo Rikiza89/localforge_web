@@ -19,6 +19,25 @@ let _indexBuilt = false;
 let _lastCheckpointHash = null;
 
 /**
+ * LLM がセクション先頭に出力したマークダウン見出し行を除去する。
+ * h3 要素で既に表示されているタイトルと重複するため。
+ * @param {string} buf - 累積トークンバッファ
+ * @param {string} sectionName - 現在のセクション名
+ * @returns {string} 見出し除去後のバッファ
+ */
+function _stripLeadingMdHeading(buf, sectionName) {
+  const firstNewline = buf.indexOf("\n");
+  const firstLine = firstNewline === -1 ? buf : buf.slice(0, firstNewline);
+  if (!/^#{1,3}\s/.test(firstLine)) return buf;
+  const title = firstLine.replace(/^#{1,3}\s+/, "").trim().toLowerCase();
+  const sec = sectionName.toLowerCase();
+  if (title.includes(sec) || sec.includes(title)) {
+    return firstNewline === -1 ? "" : buf.slice(firstNewline + 1);
+  }
+  return buf;
+}
+
+/**
  * RAGインデックスの有無に応じてExplainタブのボタン状態を切り替える。
  * ragReady=true: ビルドボタンを「RAG再インデックス」に変更し、移行ボタンを隠す
  * ragReady=false: 通常ラベルに戻し、移行ボタンを表示する
@@ -826,12 +845,15 @@ function generateReport() {
 
       currentSectionEl = document.createElement("div");
       currentSectionEl.className = "md-body";
+      currentSectionEl._sectionName = name;
       reportOutput.appendChild(currentSectionEl);
     },
     onToken: (token) => {
       if (currentSectionEl) {
         currentSectionEl._mdBuf = (currentSectionEl._mdBuf || "") + token;
-        currentSectionEl.innerHTML = _renderMd(currentSectionEl._mdBuf);
+        // LLM がセクション見出しを先頭に出力した場合に除去（h3 と重複するため）
+        const buf = _stripLeadingMdHeading(currentSectionEl._mdBuf, currentSectionEl._sectionName || "");
+        currentSectionEl.innerHTML = _renderMd(buf);
         if (reportOutput) {
           _autoScroll(reportOutput);
         }
