@@ -18,51 +18,63 @@ MODELS_DIR = Path.home() / ".localforge" / "models"
 _HF_DOWNLOAD_URL = "https://huggingface.co/{repo_id}/resolve/main/{filename}"
 
 # ---------------------------------------------------------------------------
-# キュレート済みモデルカタログ
-# 32GB RAM 専用環境向けに最適化 — すべて Q4_K_M 量子化 GGUF 形式
+# キュレート済みモデルカタログ — 最大 19 GB、CPU 専用 32 GB RAM 環境向け
+# すべて GGUF 形式。サイズに応じて Q4_K_M / Q3_K_M / Q2_K を使用。
 # ---------------------------------------------------------------------------
 
 HF_MODEL_CATALOG: List[Dict] = [
+
+    # -----------------------------------------------------------------------
+    # Ultra-light — ~0.7–1.6 GB
+    # -----------------------------------------------------------------------
     {
-        "id": "phi-3.5-mini",
-        "name": "Phi-3.5 Mini Instruct",
-        "repo_id": "bartowski/Phi-3.5-mini-instruct-GGUF",
-        "filename": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
-        "size_gb": 2.2,
-        "description": "Microsoft の Phi-3.5 Mini。小型ながら高性能、高速応答。",
-        "recommended_for": "低メモリ・高速応答",
+        "id": "llama-3.2-1b",
+        "name": "Llama 3.2 1B Instruct",
+        "repo_id": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+        "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "size_gb": 0.7,
+        "description": "Meta の最小 Llama モデル。超高速、最小メモリ。",
+        "recommended_for": "超高速応答・最小メモリ",
         "tags": ["fast", "small"],
     },
+    {
+        "id": "gemma-2-2b",
+        "name": "Gemma 2 2B Instruct",
+        "repo_id": "bartowski/gemma-2-2b-it-GGUF",
+        "filename": "gemma-2-2b-it-Q4_K_M.gguf",
+        "size_gb": 1.6,
+        "description": "Google の Gemma 2 2B。小型ながら洗練された応答品質。",
+        "recommended_for": "軽量・高品質小型モデル",
+        "tags": ["fast", "small"],
+    },
+
+    # -----------------------------------------------------------------------
+    # Light — ~2–3 GB
+    # -----------------------------------------------------------------------
     {
         "id": "llama-3.2-3b",
         "name": "Llama 3.2 3B Instruct",
         "repo_id": "bartowski/Llama-3.2-3B-Instruct-GGUF",
         "filename": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
         "size_gb": 2.0,
-        "description": "Meta の Llama 3.2 3B。軽量で高速。",
+        "description": "Meta の Llama 3.2 3B。高速かつ実用的な品質。",
         "recommended_for": "軽いタスク・低メモリ使用",
         "tags": ["fast", "small"],
     },
     {
-        "id": "llama-3.1-8b",
-        "name": "Llama 3.1 8B Instruct",
-        "repo_id": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
-        "filename": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
-        "size_gb": 4.9,
-        "description": "Meta の Llama 3.1 8B。汎用性が高く高品質。",
-        "recommended_for": "汎用コードタスク・バランス重視",
-        "tags": ["balanced", "recommended"],
+        "id": "phi-3.5-mini",
+        "name": "Phi-3.5 Mini Instruct",
+        "repo_id": "bartowski/Phi-3.5-mini-instruct-GGUF",
+        "filename": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
+        "size_gb": 2.2,
+        "description": "Microsoft の Phi-3.5 Mini。サイズに対して驚異的な性能。",
+        "recommended_for": "低メモリ・高速応答",
+        "tags": ["fast", "small"],
     },
-    {
-        "id": "qwen2.5-coder-7b",
-        "name": "Qwen2.5 Coder 7B Instruct",
-        "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-        "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-        "size_gb": 4.4,
-        "description": "Alibaba のコード特化モデル。プログラミングタスクに最適。",
-        "recommended_for": "コード生成・プログラミング特化",
-        "tags": ["code", "recommended"],
-    },
+
+    # -----------------------------------------------------------------------
+    # Medium-small — ~4–5 GB
+    # -----------------------------------------------------------------------
     {
         "id": "mistral-7b",
         "name": "Mistral 7B Instruct v0.3",
@@ -74,14 +86,102 @@ HF_MODEL_CATALOG: List[Dict] = [
         "tags": ["balanced"],
     },
     {
+        "id": "qwen2.5-coder-7b",
+        "name": "Qwen2.5 Coder 7B Instruct",
+        "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+        "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        "size_gb": 4.4,
+        "description": "Alibaba のコード特化 7B モデル。プログラミングに強い。",
+        "recommended_for": "コード生成・プログラミング特化",
+        "tags": ["code", "recommended"],
+    },
+    {
+        "id": "llama-3.1-8b",
+        "name": "Llama 3.1 8B Instruct",
+        "repo_id": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        "filename": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        "size_gb": 4.9,
+        "description": "Meta の Llama 3.1 8B。汎用性が高く高品質。最も安定した選択肢。",
+        "recommended_for": "汎用コードタスク・バランス重視",
+        "tags": ["balanced", "recommended"],
+    },
+    {
+        "id": "deepseek-r1-distill-llama-8b",
+        "name": "DeepSeek-R1 Distill Llama 8B",
+        "repo_id": "bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF",
+        "filename": "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf",
+        "size_gb": 4.9,
+        "description": "DeepSeek-R1 の推論能力を 8B モデルに蒸留。論理・コード推論に優秀。",
+        "recommended_for": "推論・論理タスク・コードデバッグ",
+        "tags": ["reasoning", "code"],
+    },
+
+    # -----------------------------------------------------------------------
+    # Medium — ~5–8 GB
+    # -----------------------------------------------------------------------
+    {
         "id": "gemma-2-9b",
         "name": "Gemma 2 9B Instruct",
         "repo_id": "bartowski/gemma-2-9b-it-GGUF",
         "filename": "gemma-2-9b-it-Q4_K_M.gguf",
         "size_gb": 5.4,
-        "description": "Google の Gemma 2 9B 命令チューニングモデル。",
-        "recommended_for": "大きなコンテキスト理解",
+        "description": "Google の Gemma 2 9B。文書理解・要約タスクに優秀。",
+        "recommended_for": "文書理解・要約・汎用",
         "tags": ["balanced"],
+    },
+    {
+        "id": "mistral-nemo-12b",
+        "name": "Mistral Nemo 12B Instruct",
+        "repo_id": "bartowski/Mistral-Nemo-Instruct-2407-GGUF",
+        "filename": "Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+        "size_gb": 7.2,
+        "description": "Mistral と NVIDIA 共同開発の 12B モデル。長いコンテキストに強い。",
+        "recommended_for": "長文コンテキスト・汎用高精度",
+        "tags": ["balanced"],
+    },
+
+    # -----------------------------------------------------------------------
+    # Medium-large — ~8–10 GB
+    # -----------------------------------------------------------------------
+    {
+        "id": "phi-4-14b",
+        "name": "Phi-4 14B Instruct",
+        "repo_id": "bartowski/phi-4-GGUF",
+        "filename": "phi-4-Q4_K_M.gguf",
+        "size_gb": 8.5,
+        "description": "Microsoft の最新 Phi-4 14B。数学・推論・コードで最高クラスの性能。",
+        "recommended_for": "数学・推論・複雑なコード",
+        "tags": ["reasoning", "code", "recommended"],
+    },
+    {
+        "id": "qwen2.5-14b",
+        "name": "Qwen2.5 14B Instruct",
+        "repo_id": "bartowski/Qwen2.5-14B-Instruct-GGUF",
+        "filename": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+        "size_gb": 8.8,
+        "description": "Alibaba の Qwen2.5 14B。多言語対応で汎用性が非常に高い。",
+        "recommended_for": "多言語・汎用高精度",
+        "tags": ["balanced", "recommended"],
+    },
+    {
+        "id": "qwen2.5-coder-14b",
+        "name": "Qwen2.5 Coder 14B Instruct",
+        "repo_id": "bartowski/Qwen2.5-Coder-14B-Instruct-GGUF",
+        "filename": "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+        "size_gb": 8.8,
+        "description": "Qwen2.5 のコード特化 14B 版。大規模コードベースの理解・生成に最適。",
+        "recommended_for": "大規模コード生成・コードレビュー",
+        "tags": ["code", "recommended"],
+    },
+    {
+        "id": "deepseek-r1-distill-qwen-14b",
+        "name": "DeepSeek-R1 Distill Qwen 14B",
+        "repo_id": "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF",
+        "filename": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+        "size_gb": 8.8,
+        "description": "DeepSeek-R1 の推論能力を 14B モデルに蒸留。Chain-of-Thought 思考。",
+        "recommended_for": "高度な推論・複雑なアルゴリズム",
+        "tags": ["reasoning", "code"],
     },
     {
         "id": "deepseek-coder-v2-lite",
@@ -89,9 +189,77 @@ HF_MODEL_CATALOG: List[Dict] = [
         "repo_id": "bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF",
         "filename": "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf",
         "size_gb": 9.0,
-        "description": "DeepSeek のコード特化モデル。複雑なプログラミングに最適。",
-        "recommended_for": "複雑なコード生成・最高のコード品質",
-        "tags": ["code", "large"],
+        "description": "DeepSeek のコード特化 MoE モデル（16B 実効 2.4B）。コード品質最高クラス。",
+        "recommended_for": "複雑なコード生成・バグ修正",
+        "tags": ["code"],
+    },
+
+    # -----------------------------------------------------------------------
+    # Large — ~11–15 GB
+    # -----------------------------------------------------------------------
+    {
+        "id": "gemma-2-27b",
+        "name": "Gemma 2 27B Instruct",
+        "repo_id": "bartowski/gemma-2-27b-it-GGUF",
+        "filename": "gemma-2-27b-it-Q3_K_M.gguf",
+        "size_gb": 11.8,
+        "description": "Google の Gemma 2 最大版（Q3_K_M）。高品質な自然言語理解。",
+        "recommended_for": "高品質な文書生成・複雑な指示理解",
+        "tags": ["balanced"],
+    },
+    {
+        "id": "mistral-small-22b",
+        "name": "Mistral Small 22B Instruct",
+        "repo_id": "bartowski/Mistral-Small-Instruct-2409-GGUF",
+        "filename": "Mistral-Small-Instruct-2409-Q4_K_M.gguf",
+        "size_gb": 13.0,
+        "description": "Mistral の 22B モデル。Mistral 7B より大幅に賢く、コスト効率も高い。",
+        "recommended_for": "高精度汎用・コード・分析",
+        "tags": ["balanced", "recommended"],
+    },
+    {
+        "id": "qwen2.5-32b",
+        "name": "Qwen2.5 32B Instruct",
+        "repo_id": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+        "filename": "Qwen2.5-32B-Instruct-Q3_K_M.gguf",
+        "size_gb": 14.4,
+        "description": "Alibaba の Qwen2.5 32B（Q3_K_M）。多言語・複雑な推論に非常に強い。",
+        "recommended_for": "最高精度の汎用タスク・多言語",
+        "tags": ["balanced"],
+    },
+    {
+        "id": "qwen2.5-coder-32b",
+        "name": "Qwen2.5 Coder 32B Instruct",
+        "repo_id": "bartowski/Qwen2.5-Coder-32B-Instruct-GGUF",
+        "filename": "Qwen2.5-Coder-32B-Instruct-Q3_K_M.gguf",
+        "size_gb": 14.4,
+        "description": "Qwen2.5 のコード特化 32B 版（Q3_K_M）。OSS 最高クラスのコード生成能力。",
+        "recommended_for": "OSS 最高水準のコード生成",
+        "tags": ["code", "recommended"],
+    },
+
+    # -----------------------------------------------------------------------
+    # Very large — ~15–19 GB
+    # -----------------------------------------------------------------------
+    {
+        "id": "mixtral-8x7b",
+        "name": "Mixtral 8x7B Instruct v0.1",
+        "repo_id": "bartowski/Mixtral-8x7B-Instruct-v0.1-GGUF",
+        "filename": "Mixtral-8x7B-Instruct-v0.1-Q2_K.gguf",
+        "size_gb": 15.6,
+        "description": "Mistral の Mixture-of-Experts 47B モデル（Q2_K）。実行時 13B 相当のメモリ使用。",
+        "recommended_for": "MoE 高速推論・多様な専門タスク",
+        "tags": ["balanced"],
+    },
+    {
+        "id": "llama-3.3-70b",
+        "name": "Llama 3.3 70B Instruct",
+        "repo_id": "bartowski/Llama-3.3-70B-Instruct-GGUF",
+        "filename": "Llama-3.3-70B-Instruct-Q2_K.gguf",
+        "size_gb": 18.5,
+        "description": "Meta の最新 Llama 3.3 70B（Q2_K）。OSS 最高峰の汎用性能。32GB RAM で動作可能。",
+        "recommended_for": "最高品質の汎用タスク・32GB RAM 必須",
+        "tags": ["balanced", "large"],
     },
 ]
 
