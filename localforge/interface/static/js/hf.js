@@ -342,25 +342,27 @@ function _showInstructions(inst) {
   panel.dataset.repoId = inst.repo_id || "";
 
   const destDisplay  = inst.dest_display || inst.dest_dir || "";
-  const oneliner     = inst.python_oneliner || "";
-  const cliCmd       = inst.cli_cmd || "";
+  const scriptDir    = destDisplay;
+  const runCmd       = `venv\\Scripts\\python "${destDisplay.replace(/\//g, "\\")}\\download.py"`;
 
   content.innerHTML = `
 <b>${escapeHtml(inst.model_name)}</b>
 
-<b>1. コマンドプロンプトで実行（venv フォルダから）:</b>
-   <code>${escapeHtml(oneliner)}</code>
-   <button class="hf-copy-btn" data-text="${escapeHtml(oneliner)}" onclick="_copyText(this.dataset.text)">コピー</button>
+アプリがダウンロードフォルダに <code>download.py</code> スクリプトを生成しました。
+以下のコマンドをアプリのルートフォルダ（localforge_web）のコマンドプロンプトで実行してください:
 
-<b>2. または huggingface-cli（venv を activate 済みの場合）:</b>
-   <code>${escapeHtml(cliCmd)}</code>
-   <button class="hf-copy-btn" data-text="${escapeHtml(cliCmd)}" onclick="_copyText(this.dataset.text)">コピー</button>
+<b>▶ 実行コマンド:</b>
+   <code>${escapeHtml(runCmd)}</code>
+   <button class="hf-copy-btn" data-text="${escapeHtml(runCmd)}" onclick="_copyText(this.dataset.text)">コピー</button>
 
-<b>3. ダウンロード先（自動作成済み）:</b>
-   <code>${escapeHtml(destDisplay)}</code>
-   <button class="hf-copy-btn" data-text="${escapeHtml(destDisplay)}" onclick="_copyText(this.dataset.text)">コピー</button>
+<b>スクリプトの場所:</b>
+   <code>${escapeHtml(destDisplay)}/download.py</code>
 
-<b>4.</b> ダウンロード完了後、「ローカルモデル」タブで「↻ 再スキャン」をクリックしてロードしてください。`;
+<p style="color:var(--text-muted);font-size:11px;margin-top:8px;">
+  このスクリプトは SSL 検証を自動的に無効化するため、企業プロキシ環境でも動作します。
+</p>
+
+<b>ダウンロード完了後:</b> 「ローカルモデル」タブで「↻ 再スキャン」→「ロード」をクリックしてください。`;
 }
 
 // ---------------------------------------------------------------------------

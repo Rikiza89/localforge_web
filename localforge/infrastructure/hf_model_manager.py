@@ -392,6 +392,27 @@ def get_manual_instructions(repo_id: str, model_name: str = "") -> Dict:
     name = model_name or repo_id.split("/")[-1]
     dest_display = str(dest_dir).replace("\\", "/")
 
+    # 手動ダウンロード用スクリプトをフォルダに書き出す（SSL バイパス込み）
+    script_path = dest_dir / "download.py"
+    script_path.write_text(
+        f'"""手動ダウンロードスクリプト — venv\\Scripts\\python download.py で実行"""\n'
+        f'import requests, urllib3\n'
+        f'urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n'
+        f'from huggingface_hub import configure_http_backend, snapshot_download\n\n'
+        f'def _no_ssl():\n'
+        f'    s = requests.Session()\n'
+        f'    s.verify = False\n'
+        f'    return s\n\n'
+        f'configure_http_backend(backend_factory=_no_ssl)\n'
+        f'snapshot_download(\n'
+        f'    "{repo_id}",\n'
+        f'    local_dir=r"{dest_display}",\n'
+        f'    ignore_patterns=["*.h5", "*.msgpack", "flax_*", "tf_*", "rust_*"],\n'
+        f')\n'
+        f'print("ダウンロード完了:", r"{dest_display}")\n',
+        encoding="utf-8",
+    )
+
     return {
         "model_name":  name,
         "repo_id":     repo_id,
