@@ -24,28 +24,25 @@ _ssl_verify_disabled = False
 
 
 def _disable_ssl_verify() -> None:
+    """
+    requests/urllib3 の SSL 検証を無効化する。
+    ssl モジュールだけでは requests には効かないため Session.request をモンキーパッチする。
+    """
     global _ssl_verify_disabled
     if _ssl_verify_disabled:
         return
     try:
-        import ssl, urllib3
-        ssl._create_default_https_context = ssl._create_unverified_context
+        import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        # configure_http_backend は huggingface_hub >= 0.20 で利用可能
-        try:
-            import requests as _req
-            from huggingface_hub import configure_http_backend
+        import requests.sessions as _rs
+        _orig = _rs.Session.request
 
-            def _insecure_session() -> _req.Session:
-                s = _req.Session()
-                s.verify = False
-                return s
+        def _no_verify(self, method, url, **kwargs):
+            kwargs.setdefault("verify", False)
+            return _orig(self, method, url, **kwargs)
 
-            configure_http_backend(backend_factory=_insecure_session)
-        except ImportError:
-            pass  # ssl._create_default_https_context で代替
-
+        _rs.Session.request = _no_verify
         _ssl_verify_disabled = True
         logger.warning("SSL 証明書の検証を無効化しました（自己署名証明書プロキシを検出）。")
     except Exception as e:
@@ -401,9 +398,14 @@ def get_manual_instructions(repo_id: str, model_name: str = "") -> Dict:
     script_path = dest_dir / "download.py"
     script_path.write_text(
         '# Manual download script — run with: venv/Scripts/python download.py\n'
-        'import ssl, urllib3\n'
-        'ssl._create_default_https_context = ssl._create_unverified_context\n'
-        'urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n\n'
+        'import urllib3\n'
+        'urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n'
+        'import requests.sessions as _rs\n'
+        '_orig = _rs.Session.request\n'
+        'def _no_verify(self, method, url, **kwargs):\n'
+        '    kwargs.setdefault("verify", False)\n'
+        '    return _orig(self, method, url, **kwargs)\n'
+        '_rs.Session.request = _no_verify\n\n'
         'from huggingface_hub import snapshot_download\n\n'
         f'snapshot_download(\n'
         f'    "{repo_id}",\n'
