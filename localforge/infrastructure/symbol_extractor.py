@@ -1,6 +1,7 @@
 """
 symbol_extractor.py — tree-sitter を使ったコードシンボル抽出。
 Python / JS / TS は tree-sitter AST で精確に抽出する。
+SQL は DDL/DML パターンの正規表現で構造を抽出する。
 その他の言語は正規表現フォールバックを使用する。
 
 tree-sitter 系パッケージは optional — インストールされていなければ
@@ -267,6 +268,130 @@ def _extract_js_regex(content: str) -> List[Symbol]:
 
 
 # ---------------------------------------------------------------------------
+# SQL 抽出 (DDL + DML)
+# ---------------------------------------------------------------------------
+
+# DDL パターン: (regex, kind) — 大文字小文字を無視して適用
+# グループ 1 = オブジェクト名、グループ 2 = ON 節のテーブル名（INDEX のみ）
+_SQL_DDL: list[tuple[re.Pattern, str, bool]] = [
+    # CREATE TABLE [IF NOT EXISTS] [schema.]name
+    (re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?(\w+)",
+        re.I), "table", False),
+    # CREATE [MATERIALIZED] VIEW [IF NOT EXISTS] [schema.]name
+    (re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?(\w+)",
+        re.I), "view", False),
+    # CREATE [OR REPLACE] PROCEDURE [schema.]name
+    (re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(?:\w+\.)?(\w+)",
+        re.I), "procedure", False),
+    # CREATE [OR REPLACE] FUNCTION [schema.]name
+    (re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\w+\.)?(\w+)",
+        re.I), "function", False),
+    # CREATE [OR REPLACE] TRIGGER [schema.]name
+    (re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+(?:\w+\.)?(\w+)",
+        re.I), "trigger", False),
+    # CREATE [UNIQUE] INDEX [IF NOT EXISTS] [schema.]index_name ON [schema.]table_name
+    (re.compile(
+        r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?(\w+)\s+ON\s+(?:\w+\.)?(\w+)",
+        re.I), "index", True),   # True = has ON-table in group 2
+    # ALTER TABLE [schema.]name  (track which tables are modified)
+    (re.compile(
+        r"ALTER\s+TABLE\s+(?:\w+\.)?(\w+)",
+        re.I), "alter", False),
+]
+
+# FK reference: REFERENCES [schema.]table (col)
+_SQL_REFERENCES = re.compile(
+    r"REFERENCES\s+(?:\w+\.)?(\w+)\s*\(", re.I
+)
+
+# DML target tables
+_SQL_DML: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"INSERT\s+INTO\s+(?:\w+\.)?(\w+)", re.I), "insert"),
+    (re.compile(r"UPDATE\s+(?:\w+\.)?(\w+)\s+SET", re.I), "update"),
+    (re.compile(r"DELETE\s+FROM\s+(?:\w+\.)?(\w+)", re.I), "delete"),
+    (re.compile(r"MERGE\s+INTO\s+(?:\w+\.)?(\w+)", re.I), "merge"),
+]
+
+
+def _extract_sql(content: str) -> List[Symbol]:
+    """
+    SQL ファイルから DDL オブジェクト・FK 参照・DML ターゲットを抽出する。
+
+    抽出するもの:
+      - CREATE TABLE / VIEW / PROCEDURE / FUNCTION / TRIGGER
+      - CREATE [UNIQUE] INDEX … ON table
+      - ALTER TABLE
+      - REFERENCES table (外部キー参照)
+      - INSERT INTO / UPDATE … SET / DELETE FROM / MERGE INTO
+    """
+    symbols: List[Symbol] = []
+    # コメント除去せずに行単位で処理（複数行DDLも先頭行でマッチする）
+    lines = content.splitlines()
+
+    # DDL: 各行に対してすべての DDL パターンを試みる
+    # 複数行にまたがる CREATE 文のために前後2行を結合してスキャンする
+    for i, line in enumerate(lines):
+        # 前後を結合してマルチライン対応（最大3行）
+        window = " ".join(lines[i : i + 3])
+        stripped = line.strip()
+
+        # コメント行をスキップ
+        if stripped.startswith("--") or stripped.startswith("/*") or stripped.startswith("*"):
+            continue
+
+        for pattern, kind, has_on_table in _SQL_DDL:
+            m = pattern.search(window)
+            if m:
+                name = m.group(1)
+                if not name or name.upper() in ("IF", "NOT", "EXISTS", "OR", "REPLACE"):
+                    continue
+                parent = m.group(2) if has_on_table else None
+                sig = stripped[:100]
+                symbols.append(Symbol(
+                    kind=kind, name=name, signature=sig,
+                    line_start=i + 1, parent=parent,
+                ))
+                break  # 1行に複数の DDL は通常ない
+
+        # FK 参照（同一行内に複数あり得る）
+        for m in _SQL_REFERENCES.finditer(window):
+            ref_table = m.group(1)
+            if ref_table and ref_table.upper() not in ("IF", "NOT", "EXISTS"):
+                symbols.append(Symbol(
+                    kind="reference", name=ref_table,
+                    signature=f"REFERENCES {ref_table}", line_start=i + 1,
+                ))
+
+        # DML ターゲット
+        for dml_pat, dml_kind in _SQL_DML:
+            m = dml_pat.search(window)
+            if m:
+                tbl = m.group(1)
+                if tbl:
+                    symbols.append(Symbol(
+                        kind=dml_kind, name=tbl,
+                        signature=stripped[:80], line_start=i + 1,
+                    ))
+                break
+
+    # 重複排除: 同一 (kind, name) は先頭行のみ残す
+    seen: set[tuple[str, str]] = set()
+    deduped: List[Symbol] = []
+    for sym in symbols:
+        key = (sym.kind, sym.name.lower())
+        if key not in seen:
+            seen.add(key)
+            deduped.append(sym)
+
+    return deduped
+
+
+# ---------------------------------------------------------------------------
 # 正規表現フォールバック（Go, Rust, Java など）
 # ---------------------------------------------------------------------------
 
@@ -334,6 +459,7 @@ _LANGUAGE_MAP: dict[str, str] = {
     "java": "java",
     "ruby": "ruby",
     "php": "php",
+    "sql": "sql",
 }
 
 
@@ -363,6 +489,8 @@ def extract_symbols(path: str, content: str, language: Optional[str]) -> List[Sy
         return _extract_js(content, "typescript")
     elif normalized == "tsx":
         return _extract_js(content, "tsx")
+    elif normalized == "sql":
+        return _extract_sql(content)
     else:
         return _extract_regex_generic(content, normalized)
 
@@ -375,6 +503,7 @@ def _guess_language(path: str) -> str:
         "go": "go", "rs": "rust", "java": "java", "rb": "ruby", "php": "php",
         "c": "c", "cpp": "cpp", "h": "c", "hpp": "cpp",
         "cs": "csharp", "swift": "swift", "kt": "kotlin",
+        "sql": "sql", "ddl": "sql", "dml": "sql",
     }.get(ext, "")
 
 
@@ -393,6 +522,12 @@ def symbols_to_summary(path: str, language: Optional[str], symbols: List[Symbol]
     """
     if not symbols:
         return ""
+
+    lang = (language or "").lower()
+
+    # SQL ファイルはスキーマ特化のサマリーを生成する
+    if lang == "sql" or any(s.kind in ("table", "view", "procedure", "trigger", "index", "alter", "reference", "insert", "update", "delete", "merge") for s in symbols):
+        return _sql_symbols_to_summary(symbols)
 
     classes = [s for s in symbols if s.kind == "class"]
     funcs = [s for s in symbols if s.kind in ("function", "method")]
@@ -420,5 +555,58 @@ def symbols_to_summary(path: str, language: Optional[str], symbols: List[Symbol]
             parts.append(f"  {sig} — {sym.docstring[:60]}")
         else:
             parts.append(f"  {sig}")
+
+    return "\n".join(parts)
+
+
+def _sql_symbols_to_summary(symbols: List[Symbol]) -> str:
+    """SQL シンボルをスキーマ・DML 別に整理したサマリーを生成する。"""
+    tables      = [s for s in symbols if s.kind == "table"]
+    altered     = [s for s in symbols if s.kind == "alter"]
+    views       = [s for s in symbols if s.kind == "view"]
+    procedures  = [s for s in symbols if s.kind == "procedure"]
+    functions   = [s for s in symbols if s.kind == "function"]
+    triggers    = [s for s in symbols if s.kind == "trigger"]
+    indexes     = [s for s in symbols if s.kind == "index"]
+    refs        = [s for s in symbols if s.kind == "reference"]
+    dml_inserts = [s for s in symbols if s.kind == "insert"]
+    dml_updates = [s for s in symbols if s.kind == "update"]
+    dml_deletes = [s for s in symbols if s.kind == "delete"]
+    dml_merges  = [s for s in symbols if s.kind == "merge"]
+
+    parts: List[str] = []
+
+    if tables:
+        parts.append("Tables: " + ", ".join(s.name for s in tables[:20]))
+    if views:
+        parts.append("Views: " + ", ".join(s.name for s in views[:10]))
+    if procedures:
+        parts.append("Procedures: " + ", ".join(s.name for s in procedures[:10]))
+    if functions:
+        parts.append("Functions: " + ", ".join(s.name for s in functions[:10]))
+    if triggers:
+        parts.append("Triggers: " + ", ".join(s.name for s in triggers[:10]))
+    if indexes:
+        idx_strs = [
+            f"{s.name} ON {s.parent}" if s.parent else s.name
+            for s in indexes[:10]
+        ]
+        parts.append("Indexes: " + ", ".join(idx_strs))
+    if refs:
+        parts.append("FK References: " + ", ".join(s.name for s in refs[:15]))
+    if altered:
+        parts.append("Altered tables: " + ", ".join(s.name for s in altered[:10]))
+
+    dml_parts = []
+    if dml_inserts:
+        dml_parts.append("INSERT→" + ", ".join(s.name for s in dml_inserts[:5]))
+    if dml_updates:
+        dml_parts.append("UPDATE→" + ", ".join(s.name for s in dml_updates[:5]))
+    if dml_deletes:
+        dml_parts.append("DELETE→" + ", ".join(s.name for s in dml_deletes[:5]))
+    if dml_merges:
+        dml_parts.append("MERGE→" + ", ".join(s.name for s in dml_merges[:5]))
+    if dml_parts:
+        parts.append("DML: " + "; ".join(dml_parts))
 
     return "\n".join(parts)

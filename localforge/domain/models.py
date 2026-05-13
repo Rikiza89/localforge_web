@@ -45,7 +45,12 @@ class ChunkStrategy(str, enum.Enum):
 
 class Symbol(BaseModel):
     """ファイルから抽出されたコードシンボル（関数・クラス・インポートなど）。"""
-    kind: Literal["function", "method", "class", "import"]
+    kind: Literal[
+        "function", "method", "class", "import",
+        # SQL DDL/DML kinds
+        "table", "view", "procedure", "trigger", "index", "alter",
+        "reference", "insert", "update", "delete", "merge",
+    ]
     name: str
     signature: str = ""
     docstring: str = ""

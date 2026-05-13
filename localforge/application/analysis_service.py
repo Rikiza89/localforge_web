@@ -95,7 +95,7 @@ def _detect_language(path: Path) -> str:
         ".css": "css", ".scss": "css", ".vue": "vue",
         ".rb": "ruby", ".php": "php", ".cs": "csharp",
         ".sh": "bash", ".yaml": "yaml", ".yml": "yaml",
-        ".toml": "toml", ".json": "json", ".sql": "sql",
+        ".toml": "toml", ".json": "json", ".sql": "sql", ".ddl": "sql", ".dml": "sql",
         ".md": "markdown",
         ".pdf": "pdf", ".docx": "docx", ".doc": "docx",
         ".xlsx": "xlsx", ".xls": "xlsx",
