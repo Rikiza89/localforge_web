@@ -13,7 +13,7 @@ from pathlib import Path
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from localforge.infrastructure import hf_model_manager as mgr
-from localforge.infrastructure.hf_model_manager import MODELS_DIR
+from localforge.infrastructure.hf_model_manager import MODELS_DIR  # used in load route 404 message
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def list_models():
         "local": local,
         "active_provider": router.active_provider,
         "loaded_model": loaded,
-        "models_dir": str(MODELS_DIR),
+        "models_dir": str(MODELS_DIR).replace("\\", "/"),
     })
 
 
@@ -278,17 +278,16 @@ def load_model():
 
     path = Path(model_path).resolve()
 
-    # モデルは .localforge/models/ 内のファイルのみ許可
-    try:
-        path.relative_to(MODELS_DIR.resolve())
-    except ValueError:
-        return jsonify({
-            "error": f"モデルは {MODELS_DIR} 内に配置してください: {model_path}"
-        }), 400
+    if path.suffix.lower() != ".gguf":
+        return jsonify({"error": "GGUF ファイルのみサポートしています"}), 400
 
     if not path.is_file():
+        models_dir_display = str(MODELS_DIR).replace("\\", "/")
         return jsonify({
-            "error": f"ファイルが見つかりません。{MODELS_DIR} にファイルを配置してください: {path}"
+            "error": (
+                f"ファイルが見つかりません: {path}\n"
+                f"モデルを {models_dir_display} に配置してください"
+            )
         }), 404
 
     router = _get_router()

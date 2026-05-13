@@ -346,6 +346,7 @@ def scan_local_models() -> List[Dict]:
         return result
 
     for gguf_path in sorted(MODELS_DIR.rglob("*.gguf")):
+        gguf_path = gguf_path.resolve()
         size_bytes = gguf_path.stat().st_size
         size_gb = round(size_bytes / (1024 ** 3), 2)
         model_id = gguf_path.parent.name
