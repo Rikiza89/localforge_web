@@ -1821,3 +1821,81 @@ progress::-moz-progress-bar {
 }
 
 .hf-copy-btn:hover { background: var(--bg-tertiary); }
+
+/* =========================================================================
+   HuggingFace ライブ検索 Browse タブ
+   ========================================================================= */
+
+.hf-browse-search-bar {
+  display: flex;
+  gap: 6px;
+  padding: 10px 0 8px;
+  flex-shrink: 0;
+}
+
+.hf-search-input {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-family: var(--font-ui);
+  outline: none;
+}
+
+.hf-search-input:focus { border-color: var(--accent); }
+
+.hf-browse-card { cursor: default; }
+
+/* ファイルリスト（カード直下に展開） */
+.hf-file-list {
+  margin: 0 0 6px 0;
+}
+
+.hf-file-list-inner {
+  border: 1px solid var(--accent);
+  border-radius: 0 0 6px 6px;
+  background: var(--bg-secondary);
+  padding: 4px 0;
+}
+
+.hf-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.hf-file-row:last-child { border-bottom: none; }
+.hf-file-row.downloaded { background: color-mix(in srgb, var(--success) 5%, transparent); }
+
+.hf-file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.hf-file-name {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.hf-file-size {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.hf-file-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}

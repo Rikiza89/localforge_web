@@ -471,6 +471,219 @@ function _copyText(text) {
 }
 
 // ---------------------------------------------------------------------------
+// ライブ HuggingFace 検索
+// ---------------------------------------------------------------------------
+
+let _browseExpandedRepo = null;   // 現在ファイルリストを展開中の repo_id
+
+async function hfSearch(query) {
+  const statusEl  = document.getElementById("hf-browse-status");
+  const resultsEl = document.getElementById("hf-browse-results");
+  if (!resultsEl) return;
+
+  resultsEl.innerHTML = '<div class="empty-state">検索中...</div>';
+  if (statusEl) { statusEl.style.display = ""; statusEl.textContent = "HuggingFace API に接続中..."; }
+
+  try {
+    const url = query
+      ? `/api/hf/search?q=${encodeURIComponent(query)}&limit=20`
+      : `/api/hf/search?limit=20`;
+    const data = await apiRequest(url);
+
+    if (!data.online) {
+      if (statusEl) statusEl.textContent = `オフライン: ${data.error || "HuggingFace API に接続できません"}`;
+      resultsEl.innerHTML = '<div class="empty-state">HuggingFace API に接続できません。ネットワークを確認してください。</div>';
+      return;
+    }
+
+    const models = data.models || [];
+    if (statusEl) statusEl.textContent = `${models.length} 件のモデルが見つかりました`;
+
+    if (models.length === 0) {
+      resultsEl.innerHTML = '<div class="empty-state">該当するモデルが見つかりません。別のキーワードを試してください。</div>';
+      return;
+    }
+
+    resultsEl.innerHTML = models.map(m => `
+      <div class="hf-model-card hf-browse-card" id="hf-browse-card-${CSS.escape(m.repo_id)}">
+        <div class="hf-model-info">
+          <div class="hf-model-name">${escapeHtml(m.name)}</div>
+          <div class="hf-model-desc" style="font-size:11px;color:var(--text-muted);">${escapeHtml(m.repo_id)}</div>
+          <div class="hf-model-meta">
+            <span>⬇ ${_fmtNum(m.downloads)}</span>
+            <span>♥ ${_fmtNum(m.likes)}</span>
+          </div>
+        </div>
+        <div class="hf-model-actions">
+          <button class="btn btn-secondary btn-sm" onclick="toggleBrowseFiles('${escapeHtml(m.repo_id)}')">
+            ファイル一覧
+          </button>
+        </div>
+      </div>
+      <div class="hf-file-list" id="hf-files-${CSS.escape(m.repo_id)}" style="display:none;"></div>
+    `).join("");
+
+  } catch (err) {
+    if (statusEl) statusEl.textContent = `エラー: ${err.message}`;
+    resultsEl.innerHTML = `<div class="empty-state">エラー: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function toggleBrowseFiles(repoId) {
+  const filesEl = document.getElementById(`hf-files-${CSS.escape(repoId)}`);
+  if (!filesEl) return;
+
+  // 既に展開中なら閉じる
+  if (filesEl.style.display !== "none") {
+    filesEl.style.display = "none";
+    _browseExpandedRepo = null;
+    return;
+  }
+
+  // 他を閉じる
+  if (_browseExpandedRepo) {
+    const prev = document.getElementById(`hf-files-${CSS.escape(_browseExpandedRepo)}`);
+    if (prev) prev.style.display = "none";
+  }
+  _browseExpandedRepo = repoId;
+
+  filesEl.style.display = "";
+  filesEl.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:12px;">ファイル一覧を取得中...</div>';
+
+  try {
+    const data = await apiRequest(`/api/hf/model-files?repo_id=${encodeURIComponent(repoId)}`);
+    const files = data.files || [];
+
+    if (files.length === 0) {
+      filesEl.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:12px;">GGUF ファイルが見つかりません（ファイルサイズが 19 GB を超えているか、ファイルが存在しません）。</div>';
+      return;
+    }
+
+    filesEl.innerHTML = `
+      <div class="hf-file-list-inner">
+        ${files.map(f => {
+          const sizeStr  = f.size_gb != null ? `${f.size_gb} GB` : "サイズ不明";
+          const quantBadge = f.quant
+            ? `<span class="hf-tag tag-${f.quant.startsWith('Q4') || f.quant.startsWith('Q5') ? 'recommended' : 'balanced'}">${escapeHtml(f.quant)}</span>`
+            : "";
+          return `
+            <div class="hf-file-row ${f.downloaded ? 'downloaded' : ''}">
+              <div class="hf-file-info">
+                <span class="hf-file-name">${escapeHtml(f.filename)}</span>
+                ${quantBadge}
+                <span class="hf-file-size">${sizeStr}</span>
+                ${f.downloaded ? '<span class="hf-status-badge downloaded" style="font-size:10px;">✓ ダウンロード済み</span>' : ""}
+              </div>
+              <div class="hf-file-actions">
+                ${f.downloaded
+                  ? `<button class="btn btn-primary btn-sm" onclick="loadHFModel('${escapeHtml(f.local_path)}')">ロード</button>`
+                  : `<button class="btn btn-primary btn-sm"
+                       onclick="startHFDownloadDirect('${escapeHtml(repoId)}','${escapeHtml(f.filename)}')">
+                       ダウンロード
+                     </button>
+                     <button class="btn btn-secondary btn-sm"
+                       onclick="showFileManualDownload('${escapeHtml(repoId)}','${escapeHtml(f.filename)}','${escapeHtml(f.size_gb || '')}')">
+                       手動DL
+                     </button>`
+                }
+              </div>
+            </div>`;
+        }).join("")}
+      </div>`;
+  } catch (err) {
+    filesEl.innerHTML = `<div style="padding:8px;color:var(--danger);font-size:12px;">エラー: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function startHFDownloadDirect(repoId, filename) {
+  // reuse existing SSE download — pass repo_id+filename instead of model_id
+  if (_hfDownloadES) {
+    _hfDownloadES.close();
+    _hfDownloadES = null;
+  }
+
+  const panel     = document.getElementById("hf-download-panel");
+  const nameEl    = document.getElementById("hf-download-model-name");
+  const statusEl  = document.getElementById("hf-download-status");
+  const progressBar = document.getElementById("hf-progress-bar");
+
+  if (panel)       panel.style.display = "";
+  if (nameEl)      nameEl.textContent  = filename;
+  if (statusEl)    statusEl.textContent = "接続中...";
+  if (progressBar) progressBar.style.width = "0%";
+
+  updateStatusBar(`ダウンロード中: ${filename}`);
+
+  const url = `/api/hf/download?repo_id=${encodeURIComponent(repoId)}&filename=${encodeURIComponent(filename)}`;
+  _hfDownloadES = new EventSource(url);
+
+  _hfDownloadES.addEventListener("status", e => {
+    const d = JSON.parse(e.data);
+    if (statusEl) statusEl.textContent = d.status || "";
+  });
+
+  _hfDownloadES.addEventListener("done", e => {
+    _hfDownloadES.close();
+    _hfDownloadES = null;
+    const d = JSON.parse(e.data);
+    if (progressBar) progressBar.style.width = "100%";
+    if (statusEl)    statusEl.textContent = "完了！";
+    showAlert(`ダウンロード完了: ${filename}`, "success");
+    updateStatusBar("ダウンロード完了");
+    if (d.path) setTimeout(() => loadHFModel(d.path), 500);
+    // ファイルリストを再読み込み
+    if (_browseExpandedRepo === repoId) {
+      _browseExpandedRepo = null;
+      setTimeout(() => toggleBrowseFiles(repoId), 800);
+    }
+  });
+
+  _hfDownloadES.addEventListener("error", e => {
+    _hfDownloadES.close();
+    _hfDownloadES = null;
+    try {
+      const d = JSON.parse(e.data);
+      if (statusEl) statusEl.textContent = `エラー: ${d.error}`;
+      if (d.proxy_error) {
+        showAlert("プロキシによりブロックされました。手動ダウンロード手順を表示します。", "warning");
+        if (d.instructions) {
+          _showInstructions(d.instructions);
+          switchHFTab("manual");
+        } else {
+          showFileManualDownload(repoId, filename, null);
+        }
+      } else {
+        showAlert(`ダウンロードエラー: ${d.error}`, "error");
+      }
+    } catch (_) {
+      if (statusEl) statusEl.textContent = "エラー";
+    }
+  });
+}
+
+async function showFileManualDownload(repoId, filename, sizeGb) {
+  switchHFTab("manual");
+  try {
+    const data = await apiRequest("/api/hf/file-instructions", "POST", {
+      repo_id: repoId, filename, size_gb: sizeGb ? parseFloat(sizeGb) : null,
+    });
+    _showInstructions(data.instructions);
+    // Update the check button dest path
+    const panel = document.getElementById("hf-instructions-panel");
+    if (panel) panel.dataset.destPath = data.instructions.dest_path || "";
+  } catch (err) {
+    showAlert(`手順取得エラー: ${err.message}`, "error");
+  }
+}
+
+function _fmtNum(n) {
+  if (!n) return "0";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+// ---------------------------------------------------------------------------
 // 初期化（DOMContentLoaded から呼ばれる）
 // ---------------------------------------------------------------------------
 
@@ -512,6 +725,26 @@ function initHFUI() {
       const data = await apiRequest("/api/hf/scan").catch(() => ({ local: [] }));
       renderLocalModels(data.local || []);
       updateStatusBar("ローカルモデルを再スキャンしました");
+    });
+  }
+
+  // ライブ検索
+  const searchBtn = document.getElementById("hf-search-btn");
+  if (searchBtn) {
+    searchBtn.addEventListener("click", () => {
+      const q = document.getElementById("hf-search-input")?.value?.trim() || "";
+      hfSearch(q);
+    });
+  }
+  const topBtn = document.getElementById("hf-search-top-btn");
+  if (topBtn) topBtn.addEventListener("click", () => hfSearch(""));
+
+  const searchInput = document.getElementById("hf-search-input");
+  if (searchInput) {
+    searchInput.addEventListener("keydown", e => {
+      if (e.key === "Enter") {
+        hfSearch(e.target.value.trim());
+      }
     });
   }
 

@@ -68,37 +68,41 @@ def download_model():
     """
     HuggingFace Hub からモデルをダウンロードし、進行状況を SSE で配信する。
 
-    Query params:
-        model_id (str): カタログの model ID
+    Query params (どちらか一方を指定):
+        model_id  (str): カタログの model ID
+        repo_id   (str): 任意の HF repo ID（ライブ検索結果用）
+        filename  (str): repo_id 指定時は必須
 
     SSE events:
-        progress: {"done": bytes, "total": bytes, "pct": int, "speed_mbps": float}
-        status:   {"status": "メッセージ"}
-        done:     {"done": true, "path": str}
-        error:    {"error": "メッセージ", "proxy_error": bool, "instructions": dict|null}
+        status: {"status": str}
+        done:   {"done": true, "path": str}
+        error:  {"error": str, "proxy_error": bool, "instructions": dict|null}
     """
-    model_id = request.args.get("model_id", "").strip()
-    if not model_id:
-        return jsonify({"error": "model_id が指定されていません"}), 400
+    model_id  = request.args.get("model_id",  "").strip()
+    repo_id   = request.args.get("repo_id",   "").strip()
+    filename  = request.args.get("filename",  "").strip()
 
-    model_info = mgr.get_catalog_model(model_id)
-    if not model_info:
-        return jsonify({"error": f"カタログに存在しないモデル ID: {model_id}"}), 404
+    # resolve to repo_id + filename regardless of input form
+    if model_id:
+        model_info = mgr.get_catalog_model(model_id)
+        if not model_info:
+            return jsonify({"error": f"カタログに存在しないモデル ID: {model_id}"}), 404
+        repo_id  = model_info["repo_id"]
+        filename = model_info["filename"]
+        display  = model_info["name"]
+    elif repo_id and filename:
+        display = f"{repo_id.split('/')[-1]} / {filename}"
+    else:
+        return jsonify({"error": "model_id または repo_id+filename を指定してください"}), 400
 
     def _generate():
         def _sse(event: str, data: dict) -> str:
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-        yield _sse("status", {"status": f"{model_info['name']} のダウンロードを開始します..."})
-
-        # 既にダウンロード済みか確認
-        dest_path = mgr.get_model_dest_path(model_id, model_info["filename"])
-        if dest_path.is_file():
-            yield _sse("done", {"done": True, "path": str(dest_path), "already_exists": True})
-            return
+        yield _sse("status", {"status": f"{display} のダウンロードを開始します..."})
 
         try:
-            path = mgr.download_model(model_id)
+            path = mgr.download_file(repo_id, filename)
             yield _sse("done", {"done": True, "path": path})
         except RuntimeError as exc:
             exc_str = str(exc)
@@ -106,7 +110,9 @@ def download_model():
             instructions = None
             if is_proxy:
                 try:
-                    instructions = mgr.get_manual_instructions(model_id)
+                    instructions = mgr.get_manual_instructions_for_file(
+                        repo_id, filename, display
+                    )
                 except Exception:
                     pass
             yield _sse("error", {
@@ -120,11 +126,94 @@ def download_model():
     return Response(
         stream_with_context(_generate()),
         mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# ライブ検索
+# ---------------------------------------------------------------------------
+
+@bp.route("/search", methods=["GET"])
+def search_models():
+    """
+    HuggingFace API で GGUF モデルをライブ検索する。
+
+    Query params:
+        q        (str, optional): 検索クエリ（空 = 人気順トップ）
+        limit    (int, optional): 最大件数（デフォルト 20、最大 50）
+
+    Response JSON:
+        models: モデルリスト
+        query:  実行したクエリ
+        online: True（API 到達成功）
+    """
+    query = request.args.get("q", "").strip()
+    limit = min(int(request.args.get("limit", 20)), 50)
+
+    try:
+        results = mgr.search_hf_live(query=query, limit=limit)
+        return jsonify({"models": results, "query": query, "online": True})
+    except RuntimeError as exc:
+        return jsonify({
+            "models": [],
+            "query": query,
+            "online": False,
+            "error": str(exc),
+        }), 502
+
+
+@bp.route("/model-files", methods=["GET"])
+def get_model_files():
+    """
+    指定リポジトリの GGUF ファイル一覧をサイズ付きで返す。
+
+    Query params:
+        repo_id      (str): HuggingFace repo ID
+        max_size_gb  (float, optional): フィルタ上限 GB（デフォルト 19）
+
+    Response JSON:
+        files: ファイルリスト（サイズ昇順）
+        repo_id: 対象 repo ID
+    """
+    repo_id     = request.args.get("repo_id", "").strip()
+    max_size_gb = float(request.args.get("max_size_gb", 19.0))
+
+    if not repo_id:
+        return jsonify({"error": "repo_id が指定されていません"}), 400
+
+    try:
+        files = mgr.get_hf_model_files(repo_id, max_size_gb=max_size_gb)
+        return jsonify({"files": files, "repo_id": repo_id})
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc), "files": []}), 502
+
+
+@bp.route("/file-instructions", methods=["POST"])
+def get_file_instructions():
+    """
+    ライブ検索ファイル向け手動ダウンロード手順を返す。
+
+    Request JSON:
+        repo_id    (str): HF repo ID
+        filename   (str): GGUF ファイル名
+        model_name (str, optional): 表示名
+        size_gb    (float, optional): ファイルサイズ GB
+    """
+    data       = request.get_json(silent=True) or {}
+    repo_id    = data.get("repo_id",    "").strip()
+    filename   = data.get("filename",   "").strip()
+    model_name = data.get("model_name", "").strip()
+    size_gb    = data.get("size_gb")
+
+    if not repo_id or not filename:
+        return jsonify({"error": "repo_id と filename が必要です"}), 400
+
+    try:
+        inst = mgr.get_manual_instructions_for_file(repo_id, filename, model_name, size_gb)
+        return jsonify({"instructions": inst})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 # ---------------------------------------------------------------------------

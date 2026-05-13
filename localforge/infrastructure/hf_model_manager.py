@@ -265,13 +265,22 @@ HF_MODEL_CATALOG: List[Dict] = [
 
 
 def get_model_dest_dir(model_id: str) -> Path:
-    """モデルの保存ディレクトリパスを返す。"""
+    """カタログモデルの保存ディレクトリパスを返す。"""
     return MODELS_DIR / model_id
 
 
 def get_model_dest_path(model_id: str, filename: str) -> Path:
-    """モデルファイルの保存パスを返す。"""
+    """カタログモデルファイルの保存パスを返す。"""
     return get_model_dest_dir(model_id) / filename
+
+
+def repo_dest_dir(repo_id: str) -> Path:
+    """
+    live search モデルの保存ディレクトリパスを返す。
+    スラッシュを "--" に置換して OS セーフなディレクトリ名にする。
+    例: bartowski/Llama-3.1-8B → ~/.localforge/models/bartowski--Llama-3.1-8B
+    """
+    return MODELS_DIR / repo_id.replace("/", "--")
 
 
 def get_download_url(repo_id: str, filename: str) -> str:
@@ -405,6 +414,174 @@ def download_model(
         raise RuntimeError(hint) from exc
 
 
+_HF_API_BASE = "https://huggingface.co/api"
+_HF_API_TIMEOUT = 12   # seconds
+
+# Preferred quantizations in order of preference (quality ↔ size balance)
+_PREFERRED_QUANTS = ["Q4_K_M", "Q5_K_M", "Q4_K_S", "Q5_K_S", "Q3_K_M", "Q2_K", "Q8_0", "Q4_0"]
+
+
+def search_hf_live(
+    query: str = "",
+    limit: int = 20,
+    max_size_gb: float = 19.0,
+) -> List[Dict]:
+    """
+    HuggingFace API で GGUF モデルをライブ検索する。
+    認証不要（公開 API）。
+
+    Args:
+        query:       検索クエリ（空文字 = 人気順トップ）
+        limit:       最大取得件数（最大 50）
+        max_size_gb: 表示するファイルの最大サイズ（GB）
+
+    Returns:
+        モデル情報のリスト
+    """
+    import requests
+
+    params: Dict = {
+        "filter": "gguf",
+        "sort": "downloads",
+        "direction": "-1",
+        "limit": min(limit, 50),
+        "full": "false",
+    }
+    if query:
+        params["search"] = query
+
+    try:
+        resp = requests.get(
+            f"{_HF_API_BASE}/models",
+            params=params,
+            timeout=_HF_API_TIMEOUT,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        raise RuntimeError(f"HuggingFace API に接続できません: {exc}") from exc
+
+    result = []
+    for m in resp.json():
+        result.append({
+            "repo_id":       m.get("id", ""),
+            "author":        m.get("author", ""),
+            "name":          m.get("id", "").split("/")[-1],
+            "downloads":     m.get("downloads", 0),
+            "likes":         m.get("likes", 0),
+            "tags":          m.get("tags", []),
+            "last_modified": m.get("lastModified", ""),
+        })
+    return result
+
+
+def get_hf_model_files(repo_id: str, max_size_gb: float = 19.0) -> List[Dict]:
+    """
+    HuggingFace API で指定リポジトリの GGUF ファイル一覧とサイズを取得する。
+    max_size_gb を超えるファイルは除外する。
+
+    Returns:
+        ファイル情報のリスト（サイズ昇順）
+    """
+    import requests
+
+    try:
+        resp = requests.get(
+            f"{_HF_API_BASE}/models/{repo_id}",
+            timeout=_HF_API_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"モデル情報の取得に失敗しました ({repo_id}): {exc}") from exc
+
+    max_bytes = int(max_size_gb * 1024 ** 3)
+    dest_dir = repo_dest_dir(repo_id)
+    files = []
+
+    for sibling in data.get("siblings", []):
+        fname: str = sibling.get("rfilename", "")
+        if not fname.lower().endswith(".gguf"):
+            continue
+        size: int = sibling.get("size") or 0
+        if size and size > max_bytes:
+            continue
+
+        local_path = dest_dir / fname
+        size_gb = round(size / 1024 ** 3, 2) if size else None
+
+        # Detect quantization label from filename
+        quant = next((q for q in _PREFERRED_QUANTS if q in fname.upper()), "")
+
+        files.append({
+            "filename":     fname,
+            "size_bytes":   size,
+            "size_gb":      size_gb,
+            "quant":        quant,
+            "download_url": get_download_url(repo_id, fname),
+            "repo_id":      repo_id,
+            "downloaded":   local_path.is_file(),
+            "local_path":   str(local_path) if local_path.is_file() else "",
+        })
+
+    # Sort: preferred quants first, then by size
+    def _sort_key(f):
+        q_rank = _PREFERRED_QUANTS.index(f["quant"]) if f["quant"] in _PREFERRED_QUANTS else 99
+        return (q_rank, f["size_bytes"] or 0)
+
+    files.sort(key=_sort_key)
+    return files
+
+
+def download_file(repo_id: str, filename: str) -> str:
+    """
+    repo_id + filename を直接指定して GGUF ファイルをダウンロードする。
+    カタログに存在しないモデル（ライブ検索結果）にも対応。
+
+    Returns:
+        ダウンロードされたファイルの絶対パス
+
+    Raises:
+        RuntimeError: ネットワーク/プロキシエラー
+        FileNotFoundError: huggingface-hub 未インストール
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
+    except ImportError as exc:
+        raise FileNotFoundError(
+            f"huggingface-hub がインストールされていません。詳細: {exc}"
+        ) from exc
+
+    dest_dir = repo_dest_dir(repo_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / filename
+
+    if dest_path.is_file():
+        logger.info("既にダウンロード済みです: %s", dest_path)
+        return str(dest_path)
+
+    logger.info("ダウンロード中: %s / %s → %s", repo_id, filename, dest_dir)
+
+    try:
+        path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            local_dir=str(dest_dir),
+            local_dir_use_symlinks=False,
+        )
+        logger.info("ダウンロード完了: %s", path)
+        return str(path)
+    except (HfHubHTTPError, RepositoryNotFoundError, Exception) as exc:
+        exc_str = str(exc)
+        proxy_keywords = ["ProxyError", "ConnectionError", "SSLError", "Timeout",
+                          "proxy", "403", "407", "firewall"]
+        is_proxy = any(kw.lower() in exc_str.lower() for kw in proxy_keywords)
+        raise RuntimeError(
+            "プロキシまたはネットワーク制限によりブロックされました。"
+            if is_proxy else f"ダウンロードに失敗しました: {exc_str}"
+        ) from exc
+
+
 def get_manual_instructions(model_id: str) -> Dict:
     """
     手動ダウンロード用の詳細手順を返す。
@@ -451,5 +628,40 @@ def get_manual_instructions(model_id: str) -> Dict:
             f'   {dest_dir}',
             f'4. ファイル名が "{model["filename"]}" であることを確認してください。',
             f'5. アプリに戻り「ファイルを確認する」ボタンをクリックしてください。',
+        ],
+    }
+
+
+def get_manual_instructions_for_file(
+    repo_id: str,
+    filename: str,
+    model_name: str = "",
+    size_gb: Optional[float] = None,
+) -> Dict:
+    """ライブ検索結果の任意ファイル向け手動ダウンロード手順を返す。保存先フォルダを事前に作成する。"""
+    dest_dir = repo_dest_dir(repo_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / filename
+    url = get_download_url(repo_id, filename)
+    name = model_name or filename
+
+    return {
+        "model_name":   name,
+        "download_url": url,
+        "dest_dir":     str(dest_dir),
+        "dest_path":    str(dest_path),
+        "filename":     filename,
+        "size_gb":      size_gb,
+        "wget_cmd":     f'wget -O "{dest_path}" "{url}"',
+        "curl_cmd":     f'curl -L -o "{dest_path}" "{url}"',
+        "steps": [
+            f'1. 以下の URL をブラウザでダウンロードしてください:',
+            f'   {url}',
+            f'2. またはターミナルで:',
+            f'   wget -O "{dest_path}" "{url}"',
+            f'3. ファイルを以下のフォルダに配置してください（自動作成済み）:',
+            f'   {dest_dir}',
+            f'4. ファイル名が "{filename}" であることを確認してください。',
+            f'5. アプリに戻り「確認してロード」ボタンをクリックしてください。',
         ],
     }

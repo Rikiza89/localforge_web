@@ -221,6 +221,7 @@
         <!-- タブ -->
         <div class="hf-tabs">
           <button class="hf-tab-btn active" data-hf-tab="catalog">カタログ</button>
+          <button class="hf-tab-btn" data-hf-tab="browse">🔍 HF 検索</button>
           <button class="hf-tab-btn" data-hf-tab="local">ローカルモデル</button>
           <button class="hf-tab-btn" data-hf-tab="manual">手動ダウンロード</button>
         </div>
@@ -233,6 +234,21 @@
           </div>
           <div id="hf-catalog-list" class="hf-catalog-list">
             <div class="empty-state">読み込み中...</div>
+          </div>
+        </div>
+
+        <!-- HF 検索タブ -->
+        <div class="hf-tab-content" id="hf-tab-browse">
+          <div class="hf-browse-search-bar">
+            <input type="text" id="hf-search-input" class="hf-search-input"
+                   placeholder="モデル名で検索（例: llama, qwen, mistral）…"
+                   autocomplete="off">
+            <button class="btn btn-primary btn-sm" id="hf-search-btn">検索</button>
+            <button class="btn btn-secondary btn-sm" id="hf-search-top-btn" title="ダウンロード数トップ20">トップ 20</button>
+          </div>
+          <div id="hf-browse-status" class="hf-catalog-info" style="display:none;"></div>
+          <div id="hf-browse-results" class="hf-catalog-list">
+            <div class="empty-state">上の検索バーでモデルを探してください。<br>「トップ 20」をクリックすると人気モデルを表示します。</div>
           </div>
         </div>
 
