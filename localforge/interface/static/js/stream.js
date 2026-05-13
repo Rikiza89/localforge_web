@@ -164,6 +164,7 @@ function startStream(url, outputEl, handlers) {
   }
 
   function _dispatch(data) {
+    if (_closed) return;
     _resetIdle();
 
     if (data.heartbeat) return;

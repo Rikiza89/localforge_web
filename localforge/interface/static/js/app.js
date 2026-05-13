@@ -821,17 +821,9 @@ function generateReport() {
       const countStr = (idx && total) ? ` (${idx}/${total})` : "";
       updateStatusBar(`レポート生成中: ${name}${countStr}`);
 
-      // 同じセクションが再度来た場合（SSE再接続によるリスタート）はスキップ
+      // 同じセクションが再度来た場合 = SSE再接続によるリスタート。ストリームを閉じて中断する。
       if (_renderedSections.has(name)) {
-        // 既存のセクション要素を currentSectionEl として再利用してトークンを追記する
-        const existing = reportOutput.querySelector(`h3[data-section="${CSS.escape(name)}"]`);
-        if (existing) {
-          // DOM構造: h3 → hr → div.md-body
-          const hr = existing.nextElementSibling;
-          currentSectionEl = hr ? hr.nextElementSibling : null;
-          // 既存バッファをリセットして重複を防ぐ
-          if (currentSectionEl) currentSectionEl._mdBuf = "";
-        }
+        _es.close();
         return;
       }
       _renderedSections.add(name);
