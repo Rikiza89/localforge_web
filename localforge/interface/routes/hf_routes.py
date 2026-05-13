@@ -1,0 +1,308 @@
+"""
+HuggingFace ルート — /api/hf/* エンドポイントの定義。
+モデルカタログ・ダウンロード・手動案内・プロバイダー切替を提供する。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from pathlib import Path
+
+from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
+
+from localforge.infrastructure import hf_model_manager as mgr
+
+logger = logging.getLogger(__name__)
+
+bp = Blueprint("hf", __name__, url_prefix="/api/hf")
+
+# ダウンロード中かどうかを追跡するグローバルフラグ（1 ダウンロードのみ同時実行）
+_download_lock = threading.Lock()
+_active_download: dict = {}   # {"model_id": str, "cancel": bool}
+
+
+def _get_router():
+    return current_app.config["llm"]
+
+
+def _get_project_svc():
+    return current_app.config["project_service"]
+
+
+# ---------------------------------------------------------------------------
+# モデルカタログ
+# ---------------------------------------------------------------------------
+
+@bp.route("/models", methods=["GET"])
+def list_models():
+    """
+    カタログモデル一覧（ダウンロード状態付き）とローカルモデル一覧を返す。
+
+    Response JSON:
+        catalog: カタログモデルのリスト（downloaded フラグ付き）
+        local:   ローカルで見つかった GGUF ファイルのリスト
+        active_provider: 現在のプロバイダー ("ollama" | "huggingface")
+        loaded_model: HF クライアントが現在ロードしているモデルのパス（空文字 = なし）
+    """
+    router = _get_router()
+    catalog = mgr.get_catalog_with_status()
+    local = mgr.scan_local_models()
+    loaded = router.hf.get_loaded_model_path()
+
+    return jsonify({
+        "catalog": catalog,
+        "local": local,
+        "active_provider": router.active_provider,
+        "loaded_model": loaded,
+    })
+
+
+# ---------------------------------------------------------------------------
+# モデルダウンロード（SSE ストリーム）
+# ---------------------------------------------------------------------------
+
+@bp.route("/download", methods=["GET"])
+def download_model():
+    """
+    HuggingFace Hub からモデルをダウンロードし、進行状況を SSE で配信する。
+
+    Query params:
+        model_id (str): カタログの model ID
+
+    SSE events:
+        progress: {"done": bytes, "total": bytes, "pct": int, "speed_mbps": float}
+        status:   {"status": "メッセージ"}
+        done:     {"done": true, "path": str}
+        error:    {"error": "メッセージ", "proxy_error": bool, "instructions": dict|null}
+    """
+    model_id = request.args.get("model_id", "").strip()
+    if not model_id:
+        return jsonify({"error": "model_id が指定されていません"}), 400
+
+    model_info = mgr.get_catalog_model(model_id)
+    if not model_info:
+        return jsonify({"error": f"カタログに存在しないモデル ID: {model_id}"}), 404
+
+    def _generate():
+        def _sse(event: str, data: dict) -> str:
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        yield _sse("status", {"status": f"{model_info['name']} のダウンロードを開始します..."})
+
+        # 既にダウンロード済みか確認
+        dest_path = mgr.get_model_dest_path(model_id, model_info["filename"])
+        if dest_path.is_file():
+            yield _sse("done", {"done": True, "path": str(dest_path), "already_exists": True})
+            return
+
+        try:
+            path = mgr.download_model(model_id)
+            yield _sse("done", {"done": True, "path": path})
+        except RuntimeError as exc:
+            exc_str = str(exc)
+            is_proxy = "プロキシ" in exc_str or "ネットワーク" in exc_str
+            instructions = None
+            if is_proxy:
+                try:
+                    instructions = mgr.get_manual_instructions(model_id)
+                except Exception:
+                    pass
+            yield _sse("error", {
+                "error": exc_str,
+                "proxy_error": is_proxy,
+                "instructions": instructions,
+            })
+        except Exception as exc:
+            yield _sse("error", {"error": str(exc), "proxy_error": False, "instructions": None})
+
+    return Response(
+        stream_with_context(_generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# 手動ダウンロード案内
+# ---------------------------------------------------------------------------
+
+@bp.route("/instructions", methods=["POST"])
+def get_instructions():
+    """
+    手動ダウンロード用の手順を返す。
+    バックエンドが保存先フォルダを事前作成する。
+
+    Request JSON:
+        model_id (str): カタログの model ID
+
+    Response JSON:
+        instructions: 手順データ（url, wget_cmd, curl_cmd, steps, dest_dir, dest_path）
+    """
+    data = request.get_json(silent=True) or {}
+    model_id = data.get("model_id", "").strip()
+    if not model_id:
+        return jsonify({"error": "model_id が指定されていません"}), 400
+
+    try:
+        instructions = mgr.get_manual_instructions(model_id)
+        return jsonify({"instructions": instructions})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+# ---------------------------------------------------------------------------
+# モデルロード
+# ---------------------------------------------------------------------------
+
+@bp.route("/load", methods=["POST"])
+def load_model():
+    """
+    ローカルの GGUF ファイルを HuggingFace クライアントにロードする。
+    ロード前に現在のプロバイダーを huggingface に切り替える。
+
+    Request JSON:
+        path (str): GGUF ファイルの絶対パス
+        n_ctx (int, optional): コンテキスト長（デフォルト 8192）
+        n_threads (int, optional): CPU スレッド数（デフォルト 自動）
+
+    Response JSON:
+        loaded: True
+        path: ロードされたモデルのパス
+    """
+    data = request.get_json(silent=True) or {}
+    model_path = data.get("path", "").strip()
+    n_ctx = data.get("n_ctx", 8192)
+    n_threads = data.get("n_threads", 0)
+
+    if not model_path:
+        return jsonify({"error": "path が指定されていません"}), 400
+
+    path = Path(model_path)
+    if not path.is_file():
+        return jsonify({"error": f"ファイルが見つかりません: {model_path}"}), 404
+
+    router = _get_router()
+
+    try:
+        # プロバイダーを HF に切替（Ollama モデルをアンロード）
+        router.switch_provider("huggingface")
+        # GGUF ファイルをロード
+        router.hf.load_model(str(path), n_ctx=n_ctx, n_threads=n_threads)
+
+        # プロジェクト設定に保存
+        project_svc = _get_project_svc()
+        project = project_svc.current_project
+        if project:
+            project.config.llm_provider = "huggingface"
+            project.config.hf_model_path = str(path)
+            project_svc.save_config(project.root, project.config)
+
+        return jsonify({"loaded": True, "path": str(path)})
+
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
+    except Exception as exc:
+        logger.error("HF モデルロードエラー: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# スキャン（ローカルモデル一覧を再取得）
+# ---------------------------------------------------------------------------
+
+@bp.route("/scan", methods=["GET"])
+def scan_models():
+    """
+    ~/.localforge/models/ を再スキャンしてローカル GGUF ファイル一覧を返す。
+
+    Response JSON:
+        local: ローカルモデルのリスト
+    """
+    local = mgr.scan_local_models()
+    return jsonify({"local": local})
+
+
+# ---------------------------------------------------------------------------
+# プロバイダー切替
+# ---------------------------------------------------------------------------
+
+@bp.route("/provider", methods=["POST"])
+def switch_provider():
+    """
+    LLM プロバイダーを切り替える。
+    切替前に現在のプロバイダーのモデルをアンロードする。
+
+    Request JSON:
+        provider (str): "ollama" または "huggingface"
+
+    Response JSON:
+        provider: 切り替え後のプロバイダー名
+    """
+    data = request.get_json(silent=True) or {}
+    provider = data.get("provider", "").strip()
+
+    if provider not in ("ollama", "huggingface"):
+        return jsonify({"error": "provider は 'ollama' または 'huggingface' を指定してください"}), 400
+
+    router = _get_router()
+    try:
+        router.switch_provider(provider)
+
+        # プロジェクト設定に保存
+        project_svc = _get_project_svc()
+        project = project_svc.current_project
+        if project:
+            project.config.llm_provider = provider
+            project_svc.save_config(project.root, project.config)
+
+        return jsonify({"provider": router.active_provider})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+# ---------------------------------------------------------------------------
+# アンロード
+# ---------------------------------------------------------------------------
+
+@bp.route("/unload", methods=["POST"])
+def unload_hf_model():
+    """
+    HuggingFace クライアントのモデルをアンロードしてメモリを解放する。
+
+    Response JSON:
+        unloaded: True
+    """
+    router = _get_router()
+    router.hf.unload_model()
+    return jsonify({"unloaded": True})
+
+
+# ---------------------------------------------------------------------------
+# ステータス
+# ---------------------------------------------------------------------------
+
+@bp.route("/status", methods=["GET"])
+def hf_status():
+    """
+    HuggingFace クライアントの現在の状態を返す。
+
+    Response JSON:
+        available:     llama-cpp-python がインストールされているか
+        loaded:        モデルがロード済みか
+        loaded_model:  ロード済みモデルのパス（空文字 = なし）
+        active_provider: 現在のプロバイダー
+    """
+    router = _get_router()
+    return jsonify({
+        "available": router.hf.is_available(),
+        "loaded": router.hf.is_model_loaded(),
+        "loaded_model": router.hf.get_loaded_model_path(),
+        "active_provider": router.active_provider,
+    })

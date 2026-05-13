@@ -24,6 +24,9 @@ if not os.environ.get("LOCALFORGE_ST_MODEL_PATH"):
 
 logger = logging.getLogger(__name__)
 
+# Flask アプリへの参照（シグナルハンドラから HF クライアントにアクセスするため）
+_flask_app = None
+
 
 def _kill_ollama() -> None:
     """Ollamaプロセスを終了してVRAM/RAMを解放する。"""
@@ -46,10 +49,29 @@ def _kill_ollama() -> None:
         logger.warning("Ollamaプロセス終了に失敗しました: %s", exc)
 
 
-def _signal_handler(signum, frame) -> None:
-    """SIGTERMまたはSIGINT受信時にOllamaを終了してプロセスを終了する。"""
-    logger.info("シグナル %d を受信 — Ollamaを終了します", signum)
+def _unload_hf_model() -> None:
+    """HuggingFace モデルをアンロードしてRAMを解放する。"""
+    global _flask_app
+    try:
+        if _flask_app is not None:
+            hf_client = _flask_app.config.get("hf_client")
+            if hf_client is not None and hf_client.is_model_loaded():
+                hf_client.unload_model()
+                logger.info("HuggingFace モデルをアンロードしました")
+    except Exception as exc:
+        logger.warning("HuggingFace モデルアンロードに失敗しました: %s", exc)
+
+
+def _cleanup() -> None:
+    """アプリ終了時にすべての LLM リソースを解放する。"""
+    _unload_hf_model()
     _kill_ollama()
+
+
+def _signal_handler(signum, frame) -> None:
+    """SIGTERMまたはSIGINT受信時にすべての LLM リソースを解放してプロセスを終了する。"""
+    logger.info("シグナル %d を受信 — LLM リソースを解放します", signum)
+    _cleanup()
     os._exit(0)
 
 # Flaskサーバーのホスト・ポート設定
@@ -102,13 +124,16 @@ def main() -> None:
     """LocalForgeアプリケーションを起動する。"""
     from localforge.interface.server import create_app
 
-    # シグナルハンドラとatexitを登録（強制終了時にOllamaを確実に終了させる）
+    global _flask_app
+
+    # シグナルハンドラとatexitを登録（強制終了時にすべての LLM リソースを解放する）
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
-    atexit.register(_kill_ollama)
+    atexit.register(_cleanup)
 
     # Flaskアプリケーションを生成
     app = create_app()
+    _flask_app = app
 
     # Flaskを別スレッドで起動
     flask_thread = threading.Thread(
@@ -139,8 +164,8 @@ def main() -> None:
         )
         logger.info("pywebviewウィンドウを起動します")
         webview.start(debug=False)
-        # ウィンドウが閉じられた後にOllamaを終了する
-        _kill_ollama()
+        # ウィンドウが閉じられた後にすべての LLM リソースを解放する
+        _cleanup()
     except Exception as exc:
         # ImportError: pywebviewが未インストール
         # WebViewException: GTK/QTがない環境（Docker・ヘッドレス）

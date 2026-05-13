@@ -20,6 +20,8 @@ from localforge.application.resume_service import ResumeService
 from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
 from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
+from localforge.infrastructure.huggingface_client import HuggingFaceClient
+from localforge.infrastructure.model_router import ModelRouter
 from localforge.infrastructure.ollama_client import OllamaClient
 from localforge.infrastructure.vector_adapter import VectorAdapter
 
@@ -88,7 +90,9 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     fs = FileSystemAdapter()
     git = GitAdapter()
     index_adapter = IndexAdapter()
-    llm = OllamaClient()
+    ollama_client = OllamaClient()
+    hf_client = HuggingFaceClient()
+    llm = ModelRouter(ollama=ollama_client, hf=hf_client)
     vector = VectorAdapter()
 
     # LOCALFORGE_NUM_THREAD 環境変数が設定されている場合は CPU スレッド数を適用する
@@ -130,7 +134,9 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     app.config["explanation_service"] = explanation_svc
     app.config["resume_service"] = resume_svc
     app.config["context_service"] = context_svc
-    app.config["llm"] = llm
+    app.config["llm"] = llm                 # ModelRouter インスタンス
+    app.config["ollama_client"] = ollama_client
+    app.config["hf_client"] = hf_client
     app.config["git"] = git
     app.config["fs"] = fs
     app.config["vector"] = vector
@@ -143,11 +149,13 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     from localforge.interface.routes.generation_routes import bp as generation_bp
     from localforge.interface.routes.explain_routes import bp as explain_bp
     from localforge.interface.routes.git_routes import bp as git_bp
+    from localforge.interface.routes.hf_routes import bp as hf_bp
 
     app.register_blueprint(project_bp)
     app.register_blueprint(generation_bp)
     app.register_blueprint(explain_bp)
     app.register_blueprint(git_bp)
+    app.register_blueprint(hf_bp)
 
     # ---------------------------------------------------------------------------
     # メインルート（SPAシェル）
@@ -162,18 +170,22 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     # ---------------------------------------------------------------------------
     # 起動時Ollamaヘルスチェック
     # ---------------------------------------------------------------------------
-    if llm.is_available():
+    if ollama_client.is_available():
         try:
-            models = llm.list_models()
+            models = ollama_client.list_models()
             logger.info("Ollama接続確認: OK — 利用可能なモデル: %s", models)
         except Exception as exc:
             logger.warning("Ollama接続: サーバーは起動中だがモデル一覧取得失敗: %s", exc)
     else:
-        logger.error(
+        logger.warning(
             "Ollama接続失敗: http://localhost:11434 に到達できません。"
-            " Ollamaが起動していることを確認してください。"
-            " アプリは起動しますが、LLM機能はすべて使用不可です。"
+            " HuggingFace プロバイダーは引き続き使用可能です。"
         )
+
+    if hf_client.is_available():
+        logger.info("HuggingFace (llama-cpp-python) 利用可能")
+    else:
+        logger.info("HuggingFace (llama-cpp-python) 未インストール — Ollama のみ使用可能")
 
     logger.info("LocalForge Flaskアプリケーション初期化完了")
     return app

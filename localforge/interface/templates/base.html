@@ -15,9 +15,21 @@
         <span class="logo-text">LocalForge</span>
       </div>
       <div class="header-controls">
+        <!-- プロバイダー切替 -->
+        <div class="provider-toggle" id="provider-toggle" title="LLMプロバイダーを選択">
+          <button class="provider-btn active" id="provider-btn-ollama" data-provider="ollama">Ollama</button>
+          <button class="provider-btn" id="provider-btn-hf" data-provider="huggingface">HuggingFace</button>
+        </div>
+        <!-- Ollama モデルセレクタ -->
         <select id="model-selector" class="model-select" title="使用するOllamaモデル">
           <option value="">モデル読み込み中...</option>
         </select>
+        <!-- HuggingFace モデル選択ボタン -->
+        <button class="btn btn-secondary btn-sm" id="hf-model-select-btn" style="display:none" title="HuggingFaceモデルを選択">
+          🤗 モデル選択
+        </button>
+        <!-- ロード済み HF モデル表示 -->
+        <span id="hf-loaded-model-label" class="hf-model-label" style="display:none" title="ロード済みHFモデル"></span>
         <button class="btn btn-secondary btn-sm" id="unload-model-btn" title="現在のモデルをVRAMから解放">
           ⏏ 解放
         </button>
@@ -198,6 +210,81 @@
     </ul>
   </div>
 
+  <!-- HuggingFace モデル管理モーダル -->
+  <div class="modal-overlay" id="hf-modal" style="display:none;">
+    <div class="modal hf-modal-wide">
+      <div class="modal-header">
+        <span>🤗 HuggingFace モデル管理</span>
+        <button class="modal-close" id="hf-modal-close">✕</button>
+      </div>
+      <div class="modal-content hf-modal-content">
+        <!-- タブ -->
+        <div class="hf-tabs">
+          <button class="hf-tab-btn active" data-hf-tab="catalog">カタログ</button>
+          <button class="hf-tab-btn" data-hf-tab="local">ローカルモデル</button>
+          <button class="hf-tab-btn" data-hf-tab="manual">手動ダウンロード</button>
+        </div>
+
+        <!-- カタログタブ -->
+        <div class="hf-tab-content active" id="hf-tab-catalog">
+          <div class="hf-catalog-info">
+            推奨モデル一覧（32GB RAM 最適化・CPU 専用環境向け）。
+            Q4_K_M 量子化 GGUF 形式。ダウンロード後にロードして使用できます。
+          </div>
+          <div id="hf-catalog-list" class="hf-catalog-list">
+            <div class="empty-state">読み込み中...</div>
+          </div>
+        </div>
+
+        <!-- ローカルモデルタブ -->
+        <div class="hf-tab-content" id="hf-tab-local">
+          <div class="hf-catalog-info">
+            <code id="hf-models-dir">~/.localforge/models/</code> 以下の GGUF ファイル一覧。
+            <button class="btn btn-secondary btn-sm" id="hf-rescan-btn" style="margin-left:8px;">↻ 再スキャン</button>
+          </div>
+          <div id="hf-local-list" class="hf-catalog-list">
+            <div class="empty-state">読み込み中...</div>
+          </div>
+        </div>
+
+        <!-- 手動ダウンロードタブ -->
+        <div class="hf-tab-content" id="hf-tab-manual">
+          <div class="hf-catalog-info">
+            プロキシや企業ネットワークによりダウンロードがブロックされた場合、
+            以下の手順に従って手動でモデルをダウンロードしてください。
+          </div>
+          <div id="hf-manual-model-select" style="margin-bottom:12px;">
+            <label class="field-label">モデルを選択:</label>
+            <select id="hf-manual-model-selector" class="model-select" style="max-width:320px;">
+              <option value="">— モデルを選択 —</option>
+            </select>
+            <button class="btn btn-primary btn-sm" id="hf-get-instructions-btn" style="margin-left:8px;">
+              手順を表示
+            </button>
+          </div>
+          <div id="hf-instructions-panel" style="display:none;">
+            <div class="hf-instructions-box" id="hf-instructions-content"></div>
+            <button class="btn btn-success btn-sm" id="hf-check-file-btn" style="margin-top:12px;">
+              ✓ ファイルを確認してロード
+            </button>
+          </div>
+        </div>
+
+        <!-- ダウンロード進捗パネル（全タブ共通） -->
+        <div id="hf-download-panel" class="hf-download-panel" style="display:none;">
+          <div class="hf-download-header">
+            <span id="hf-download-model-name">ダウンロード中...</span>
+            <button class="btn btn-danger btn-sm" id="hf-cancel-download-btn">キャンセル</button>
+          </div>
+          <div class="hf-progress-bar-wrap">
+            <div class="hf-progress-bar" id="hf-progress-bar" style="width:0%"></div>
+          </div>
+          <div class="hf-download-status" id="hf-download-status">準備中...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
   <script>
     if (typeof marked !== "undefined") {
@@ -207,6 +294,7 @@
   <script src="{{ url_for('static', filename='js/stream.js') }}"></script>
   <script src="{{ url_for('static', filename='js/filetree.js') }}"></script>
   <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/hf.js') }}"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
