@@ -219,10 +219,14 @@ class ExplanationService:
         index_json = json.dumps(index_dict, ensure_ascii=False)
 
         # A6 フェーズ 1: LLM にどのファイルが必要か選ばせる
+        # dep_hints は全チャンクの imports_resolved からプリビルドする（上位200件以内）
+        dep_hints = {c.path: c.imports_resolved for c in chunks if c.imports_resolved}
         yield {"status": "関連ファイルを分析中..."}
         selected_paths: List[str] = []
         try:
-            sel_prompt = self._context.build_qa_file_selection_prompt(question, all_summaries)
+            sel_prompt = self._context.build_qa_file_selection_prompt(
+                question, all_summaries, dep_hints=dep_hints
+            )
             sel_response = self._llm.generate_sync(model, sel_prompt)
             # JSON 配列を抽出（余計なテキストが混入しても壊れないようにする）
             _start = sel_response.find("[")
@@ -237,18 +241,25 @@ class ExplanationService:
 
         # フォールバック: フェーズ 1 が失敗または空の場合はセマンティック検索 top-10 を使用
         if not selected_paths:
-            top_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
+            base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
         else:
             # フェーズ 1 の選択を優先する。不足分(10件未満)のみセマンティック検索で補完する
-            top_chunks = [chunk_map[p] for p in selected_paths if p in chunk_map]
-            if len(top_chunks) < 10:
-                seen: set[str] = {c.path for c in top_chunks}
+            base_chunks = [chunk_map[p] for p in selected_paths if p in chunk_map]
+            if len(base_chunks) < 10:
+                seen: set[str] = {c.path for c in base_chunks}
                 for c in self._analysis.get_top_chunks_semantic(chunks, question, top_n=10):
                     if c.path not in seen:
-                        top_chunks.append(c)
+                        base_chunks.append(c)
                         seen.add(c.path)
-                        if len(top_chunks) >= 10:
+                        if len(base_chunks) >= 10:
                             break
+
+        # 依存関係展開: 選択ファイルのimport先/被import元を自動追加してコンテキスト精度を向上させる
+        top_chunks, dep_map = self._analysis.expand_with_dependencies(
+            chunks,
+            [c.path for c in base_chunks],
+            max_total=20,
+        )
 
         # フルコンテンツ注入: project_index.json は content="" で保存されるため
         # 常にディスクから再読みする（FULL/HYBRID 問わず）。
@@ -271,6 +282,7 @@ class ExplanationService:
             top_summaries=top_summaries,
             full_contents=full_contents,
             conversation_history=history[-10:],
+            dep_map=dep_map,
         )
 
         start_time = time.time()

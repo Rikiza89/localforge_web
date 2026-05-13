@@ -108,6 +108,7 @@ class FileChunk(BaseModel):
     language: Optional[str] = None
     indexed_at: Optional[datetime] = None
     symbols: List["Symbol"] = Field(default_factory=list)
+    imports_resolved: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

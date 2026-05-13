@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from localforge.domain.exceptions import TokenBudgetExceededWarning
 from localforge.domain.models import FileChunk, GenerationPlan, Message, ProjectIndex
@@ -441,25 +441,34 @@ class ContextService:
         self,
         question: str,
         all_summaries: List[tuple[str, str]],
+        dep_hints: Optional[Dict[str, List[str]]] = None,
     ) -> str:
         """
         Q&A フェーズ 1: 質問に答えるために必要なファイルを LLM に選ばせるプロンプト。
         LLM はファイルパスの JSON 配列のみを返す。
+        dep_hints が指定された場合、各ファイルのインポート先を併記して選択精度を高める。
 
         Args:
             question: ユーザーの質問
             all_summaries: 全ファイルの (パス, サマリー) リスト
+            dep_hints: ファイルパス → インポート先パスのリスト（省略可）
 
         Returns:
             プロンプト文字列
         """
-        # 長すぎる場合は先頭 200 件に絞る（プロンプト爆発防止）
         shown = all_summaries[:200]
-        file_list = "\n".join(f"- {p}: {s}" for p, s in shown)
+        lines: List[str] = []
+        for p, s in shown:
+            line = f"- {p}: {s}"
+            if dep_hints and p in dep_hints:
+                deps_str = ", ".join(dep_hints[p][:5])
+                line += f" [imports: {deps_str}]"
+            lines.append(line)
+        file_list = "\n".join(lines)
         prompt = (
             "以下のファイル一覧から、この質問に答えるために読む必要があるファイルを選んでください。\n"
             "JSONの配列形式でファイルパスのみを出力してください。例: [\"src/foo.py\", \"lib/bar.py\"]\n"
-            "最大10件まで選択できます。不要なファイルは含めないでください。\n\n"
+            "最大10件まで選択できます。[imports: ...] はそのファイルが依存するプロジェクト内ファイルを示します。\n\n"
             f"質問: {question}\n\n"
             f"ファイル一覧:\n{file_list}\n\n"
             "選択したファイルのパスをJSONの配列として出力してください:"
@@ -473,6 +482,7 @@ class ContextService:
         top_summaries: List[tuple[str, str]],
         full_contents: List[tuple[str, str]],
         conversation_history: List[Message],
+        dep_map: Optional[Dict[str, List[str]]] = None,
     ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
@@ -480,14 +490,45 @@ class ContextService:
         Args:
             question: ユーザーの質問
             project_index_json: ProjectIndexのJSON文字列
-            top_summaries: 上位5件のファイルサマリー
-            full_contents: ハイブリッドファイルの全内容
+            top_summaries: 上位ファイルのサマリー
+            full_contents: ファイルの全内容
             conversation_history: 最近10件の会話履歴
+            dep_map: ファイルパス → インポート先パスのリスト（依存関係マップ）
 
         Returns:
-            組み立てたプロンプト文字列
+            (プロンプト文字列, 推定トークン数)
         """
         parts = [f"プロジェクト概要:\n{project_index_json}"]
+
+        # 依存関係マップ（存在する場合）— ファイル間の実際のインポート関係をLLMに提示する
+        if dep_map:
+            # 逆引きマップを構築: 誰がこのファイルをインポートしているか
+            imported_by: Dict[str, List[str]] = {}
+            for path, deps in dep_map.items():
+                for dep in deps:
+                    if dep not in imported_by:
+                        imported_by[dep] = []
+                    if path not in imported_by[dep]:
+                        imported_by[dep].append(path)
+
+            dep_lines: List[str] = []
+            all_dep_paths = set(dep_map.keys()) | set(imported_by.keys())
+            for path in sorted(all_dep_paths):
+                fwd = dep_map.get(path, [])
+                rev = imported_by.get(path, [])
+                parts_line: List[str] = []
+                if fwd:
+                    parts_line.append(f"imports → {', '.join(fwd)}")
+                if rev:
+                    parts_line.append(f"imported by ← {', '.join(rev)}")
+                if parts_line:
+                    dep_lines.append(f"  {path}: {' | '.join(parts_line)}")
+
+            if dep_lines:
+                parts.append(
+                    "ファイル依存関係マップ（実際のimport文から解決済み）:\n"
+                    + "\n".join(dep_lines)
+                )
 
         summaries_text = "\n".join(
             f"- {p}: {s}" for p, s in top_summaries
@@ -518,8 +559,8 @@ class ContextService:
                     "あなたはシニアソフトウェアアーキテクトとして、上記のコードベースに基づいて極めて詳細かつ網羅的に回答してください。\n"
                     "以下のルールに厳密に従ってください：\n"
                     "1. 抽象的な説明を避け、具体的なクラス名、関数名、変数名、データ構造を明記すること。\n"
-                    "2. 情報を引用する際は、必ず正確なファイルパス（例: `src/main.py`）を併記すること。\n"
-                    "3. 対象コンポーネントが他のどのファイル・モジュールに依存しているか、また何から依存されているか（依存関係）を追跡して説明すること。\n"
+                    "2. 情報を引用する際は、必ず正確なファイルパス（例: `src/main.py`）を併記すること。上記の依存関係マップに記載されたパスのみを使用し、推測しないこと。\n"
+                    "3. 対象コンポーネントが他のどのファイル・モジュールに依存しているか、また何から依存されているか（依存関係）を依存関係マップに基づいて説明すること。\n"
                     "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
                     "5. 提供されたコンテキスト内に情報が不足している場合は、推測で補わず「〇〇の詳細はコンテキストにありません」と正直に述べること。\n"
                 )
@@ -527,11 +568,6 @@ class ContextService:
 
         prompt = "\n\n".join(parts)
         return self._guard_budget(prompt, "qa"), _estimate_tokens(prompt)
-
-        # parts.append(f"質問: {question}\n\n上記のコードベースに基づいて回答してください。")
-
-        # prompt = "\n\n".join(parts)
-        # return self._guard_budget(prompt, "qa")
 
     # ------------------------------------------------------------------
     # Resumeモード用コンテキスト

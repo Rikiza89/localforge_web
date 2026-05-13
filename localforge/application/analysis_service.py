@@ -14,7 +14,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Generator, List, Optional, Tuple
+from typing import Callable, Dict, Generator, List, Optional, Set, Tuple
 
 from localforge.application.context_service import ContextService
 from localforge.domain.exceptions import IndexBuildError
@@ -645,6 +645,30 @@ class AnalysisService:
                 except Exception as exc:
                     logger.warning("中間インデックス保存失敗: %s", exc)
 
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        # 依存関係解決フェーズ: インポート文を実際のプロジェクト内ファイルパスに解決する
+        # キャッシュ済みで imports_resolved が空のチャンクも移行対象にする
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        from localforge.infrastructure.dependency_resolver import resolve_imports as _resolve_imports
+        _all_project_paths = {c.path.replace("\\", "/") for c in all_chunks}
+        _resolvable_langs = {"python", "javascript", "typescript", "tsx", "jsx"}
+        for _chunk in all_chunks:
+            if _chunk.imports_resolved:
+                continue  # already resolved (cached from a previous run)
+            if not _chunk.content:
+                continue  # Tier-0 stubs have no content to parse
+            if (_chunk.language or "").lower() not in _resolvable_langs:
+                continue
+            try:
+                _chunk.imports_resolved = _resolve_imports(
+                    _chunk.path.replace("\\", "/"),
+                    _chunk.content,
+                    _chunk.language,
+                    _all_project_paths,
+                )
+            except Exception as _exc:
+                logger.debug("依存関係解決エラー (%s): %s", _chunk.path, _exc)
+
         # インデックスを保存
         try:
             self._index_adapter.save_chunks(index_path, all_chunks)
@@ -755,6 +779,7 @@ class AnalysisService:
                 summary=c.summary,
                 language=c.language,
                 indexed_at=c.indexed_at,
+                imports_resolved=c.imports_resolved,
             )
             for c in chunks
         ]
@@ -932,6 +957,63 @@ class AnalysisService:
         # ChromaDB 未使用時は BM25 にフォールバック（旧キーワードカウントより高精度）
         from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25
         return get_top_chunks_bm25(chunks, query, top_n)
+
+    def expand_with_dependencies(
+        self,
+        chunks: List[FileChunk],
+        selected_paths: List[str],
+        max_total: int = 20,
+    ) -> tuple[List[FileChunk], Dict[str, List[str]]]:
+        """
+        Expand a set of selected file chunks with their direct import dependencies.
+
+        For each selected file, adds:
+          - Files it directly imports (forward deps)
+          - Files that directly import it (reverse deps)
+
+        Results are capped at max_total to stay within token budget.
+
+        Args:
+            chunks: all FileChunks from the project index
+            selected_paths: initially selected file paths
+            max_total: maximum number of chunks to return
+
+        Returns:
+            (expanded_chunks, dep_map) where dep_map maps each path to the list
+            of project files it imports (for display in the Q&A prompt).
+        """
+        from localforge.infrastructure.dependency_resolver import build_imported_by
+
+        chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
+        imported_by: Dict[str, List[str]] = build_imported_by(chunks)
+
+        seen: Set[str] = set(selected_paths)
+        ordered: List[str] = [p for p in selected_paths if p in chunk_map]
+
+        for path in list(ordered):
+            if len(ordered) >= max_total:
+                break
+            chunk = chunk_map.get(path)
+            if chunk is None:
+                continue
+            for dep in chunk.imports_resolved:
+                if dep not in seen and dep in chunk_map and len(ordered) < max_total:
+                    seen.add(dep)
+                    ordered.append(dep)
+            for rev in imported_by.get(path, []):
+                if rev not in seen and rev in chunk_map and len(ordered) < max_total:
+                    seen.add(rev)
+                    ordered.append(rev)
+
+        result_chunks = [chunk_map[p] for p in ordered if p in chunk_map]
+
+        # Build dep_map for prompt display — only non-empty resolved deps
+        dep_map: Dict[str, List[str]] = {}
+        for chunk in result_chunks:
+            if chunk.imports_resolved:
+                dep_map[chunk.path] = chunk.imports_resolved
+
+        return result_chunks, dep_map
 
     def get_top_chunks_by_keywords(
         self,
