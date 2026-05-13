@@ -1,66 +1,130 @@
 """
-VectorAdapter — ChromaDB + Ollama nomic-embed-text によるセマンティック検索アダプター。
+VectorAdapter — ChromaDB + sentence-transformers を使ったセマンティック検索アダプター。
 .localforge/chroma/ に永続化する組み込み ChromaDB コレクションを管理する。
 
-埋め込みは Ollama の /api/embeddings エンドポイント（nomic-embed-text:latest）を使用する。
-Ollama が起動していない、またはモデルが未インストールの場合は BM25 にフォールバックする。
+埋め込みモデルは sentence-transformers の all-MiniLM-L6-v2 (384 次元, ~25 MB) を
+プロセス内で実行する。Ollama への HTTP 呼び出しは不要。
+インクリメンタル更新をサポート: mtime+size が変化したファイルのみ再埋め込みする。
+
+all-MiniLM-L6-v2 は初回起動時に自動ダウンロードされ、
+~/.cache/huggingface/hub/ にキャッシュされる。
+
+SSL 証明書エラー（自己署名 CA / 企業プロキシ環境）への対処:
+  方法 1: ローカルにダウンロード済みのモデルを指定する
+      LOCALFORGE_ST_MODEL_PATH=/path/to/all-MiniLM-L6-v2 python main.py
+  方法 2: SSL 検証をスキップしてダウンロードする（初回のみ）
+      LOCALFORGE_DISABLE_SSL=1 python main.py
+  方法 3: ダウンロード後はキャッシュが使われるため以降は再設定不要
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import ssl
 from pathlib import Path
 from typing import List, Optional
-
-import requests
 
 from localforge.domain.models import FileChunk
 
 logger = logging.getLogger(__name__)
 
-_EMBED_MODEL = "nomic-embed-text:latest"
-_EMBED_URL = "http://127.0.0.1:11434/api/embeddings"
-_EMBED_TIMEOUT = 30  # 秒
-_COLLECTION_NAME = "localforge_nomic"
+_ST_MODEL_NAME = "all-MiniLM-L6-v2"
+_COLLECTION_NAME = "localforge_minilm"
 _CHROMA_DIR = "chroma"
 
+# モジュールレベルのモデルキャッシュ（プロセス内で一度だけロードする）
+_st_model_instance = None
+_st_model_load_attempted = False
 
-def _ollama_embed(text: str) -> Optional[List[float]]:
+
+def _is_ssl_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in ("ssl", "certificate", "cert", "client has been closed"))
+
+
+def _load_st_model():
     """
-    Ollama の /api/embeddings を呼び出して埋め込みベクトルを返す。
-    Ollama 未起動またはモデル未インストール時は None を返す（警告のみ）。
+    sentence-transformers モデルをロードしてキャッシュする。
+    インストールされていない場合は None を返す（警告のみ、クラッシュしない）。
+
+    優先順位:
+      1. LOCALFORGE_ST_MODEL_PATH 環境変数が指すローカルパス
+      2. 通常ダウンロード（キャッシュ利用）
+      3. SSL エラー時: LOCALFORGE_DISABLE_SSL=1 でリトライ
     """
+    global _st_model_instance, _st_model_load_attempted
+    if _st_model_load_attempted:
+        return _st_model_instance
+    _st_model_load_attempted = True
+
     try:
-        resp = requests.post(
-            _EMBED_URL,
-            json={"model": _EMBED_MODEL, "prompt": text},
-            timeout=_EMBED_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        embedding = data.get("embedding")
-        if not embedding:
-            logger.warning("Ollama 埋め込みレスポンスに embedding フィールドがありません")
-            return None
-        return embedding
-    except requests.exceptions.ConnectionError:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
         logger.warning(
-            "Ollama に接続できません — 埋め込みをスキップします。"
-            " RAG を有効にするには Ollama を起動して nomic-embed-text:latest を pull してください。"
+            "sentence-transformers がインストールされていません。"
+            " ベクトル埋め込みは無効になり、BM25 検索のみ使用されます。"
+            " 有効にするには: pip install sentence-transformers"
         )
         return None
-    except requests.exceptions.HTTPError as exc:
-        logger.warning("Ollama 埋め込み HTTP エラー: %s", exc)
-        return None
+
+    model_path: str = os.environ.get("LOCALFORGE_ST_MODEL_PATH", "") or _ST_MODEL_NAME
+    logger.info("sentence-transformers モデルをロード中: %s", model_path)
+
+    try:
+        _st_model_instance = SentenceTransformer(model_path)
+        logger.info("sentence-transformers モデルのロード完了: %s", model_path)
+        return _st_model_instance
     except Exception as exc:
-        logger.warning("Ollama 埋め込みエラー: %s", exc)
+        if not _is_ssl_error(exc):
+            logger.warning("sentence-transformers モデルのロードに失敗しました: %s", exc)
+            _log_st_help()
+            return None
+        logger.warning("SSL エラーでモデルのダウンロードに失敗しました: %s", exc)
+
+    disable_ssl = os.environ.get("LOCALFORGE_DISABLE_SSL", "").lower() in ("1", "true", "yes")
+    if not disable_ssl:
+        logger.warning(
+            "SSL 証明書エラーが発生しました。LOCALFORGE_DISABLE_SSL=1 を設定するか"
+            " モデルをローカルに配置してください。"
+        )
+        _log_st_help()
         return None
+
+    logger.info("LOCALFORGE_DISABLE_SSL=1: SSL 検証を無効化してリトライします")
+    _orig_ctx = ssl._create_default_https_context
+    ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[attr-defined]
+    try:
+        _st_model_instance = SentenceTransformer(model_path)
+        logger.info("sentence-transformers モデルのロード完了 (SSL バイパス): %s", model_path)
+    except Exception as exc2:
+        logger.warning("SSL バイパス後もモデルのロードに失敗しました: %s", exc2)
+        _log_st_help()
+        _st_model_instance = None
+    finally:
+        ssl._create_default_https_context = _orig_ctx  # type: ignore[attr-defined]
+
+    return _st_model_instance
+
+
+def _log_st_help() -> None:
+    logger.warning(
+        "sentence-transformers が利用不可のため BM25 検索にフォールバックします。\n"
+        "解決方法:\n"
+        "  [A] SSL をスキップしてダウンロード（初回のみ）:\n"
+        "        LOCALFORGE_DISABLE_SSL=1 python main.py\n"
+        "  [B] モデルを事前保存してローカルパスを指定:\n"
+        "        python -c \"from sentence_transformers import SentenceTransformer;"
+        " SentenceTransformer('all-MiniLM-L6-v2').save('/path/to/model')\"\n"
+        "        LOCALFORGE_ST_MODEL_PATH=/path/to/model python main.py\n"
+        "  [C] BM25 のみを使用する（設定不要 — 現在このモードで動作中）"
+    )
 
 
 class VectorAdapter:
     """
     ChromaDB を使ったベクトルインデックスの永続化・検索を担うアダプター。
-    Ollama の nomic-embed-text:latest で埋め込みを生成する。
+    sentence-transformers の all-MiniLM-L6-v2 でプロセス内埋め込みを生成する。
     """
 
     def __init__(self) -> None:
@@ -104,11 +168,19 @@ class VectorAdapter:
         return (project_root / ".localforge" / _CHROMA_DIR).exists()
 
     # ------------------------------------------------------------------
-    # 埋め込み生成
+    # 埋め込み生成（sentence-transformers プロセス内実行）
     # ------------------------------------------------------------------
 
     def _embed(self, text: str) -> Optional[List[float]]:
-        return _ollama_embed(text)
+        model = _load_st_model()
+        if model is None:
+            return None
+        try:
+            embedding = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
+            return embedding.tolist()
+        except Exception as exc:
+            logger.warning("埋め込み生成エラー: %s", exc)
+            return None
 
     def _chunk_to_embed_text(self, chunk: FileChunk) -> str:
         parts = [chunk.path]
@@ -196,7 +268,8 @@ class VectorAdapter:
     ) -> List[FileChunk]:
         """
         クエリに意味的に近い FileChunk を返す。
-        ChromaDB が初期化されていない、または Ollama が利用不可の場合は BM25 にフォールバックする。
+        ChromaDB が初期化されていない、または sentence-transformers が利用不可の場合は
+        BM25 にフォールバックする。
         """
         if not self._collection:
             return _bm25_fallback(all_chunks, query, top_n)
