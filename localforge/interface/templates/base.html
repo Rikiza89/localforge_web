@@ -15,21 +15,10 @@
         <span class="logo-text">LocalForge</span>
       </div>
       <div class="header-controls">
-        <!-- プロバイダー切替 -->
-        <div class="provider-toggle" id="provider-toggle" title="LLMプロバイダーを選択">
-          <button class="provider-btn active" id="provider-btn-ollama" data-provider="ollama">Ollama</button>
-          <button class="provider-btn" id="provider-btn-hf" data-provider="huggingface">HuggingFace</button>
-        </div>
         <!-- Ollama モデルセレクタ -->
         <select id="model-selector" class="model-select" title="使用するOllamaモデル">
           <option value="">モデル読み込み中...</option>
         </select>
-        <!-- HuggingFace モデル選択ボタン -->
-        <button class="btn btn-secondary btn-sm" id="hf-model-select-btn" style="display:none" title="HuggingFaceモデルを選択">
-          🤗 モデル選択
-        </button>
-        <!-- ロード済み HF モデル表示 -->
-        <span id="hf-loaded-model-label" class="hf-model-label" style="display:none" title="ロード済みHFモデル"></span>
         <button class="btn btn-secondary btn-sm" id="unload-model-btn" title="現在のモデルをVRAMから解放">
           ⏏ 解放
         </button>
@@ -229,77 +218,6 @@
     </ul>
   </div>
 
-  <!-- HuggingFace モデル管理モーダル -->
-  <div class="modal-overlay" id="hf-modal" style="display:none;">
-    <div class="modal hf-modal-wide">
-      <div class="modal-header">
-        <span>🤗 HuggingFace モデル管理</span>
-        <button class="modal-close" id="hf-modal-close">✕</button>
-      </div>
-      <div class="modal-content hf-modal-content">
-        <!-- タブ -->
-        <div class="hf-tabs">
-          <button class="hf-tab-btn active" data-hf-tab="catalog">カタログ</button>
-          <button class="hf-tab-btn" data-hf-tab="browse">🔍 HF 検索</button>
-          <button class="hf-tab-btn" data-hf-tab="local">ローカルモデル</button>
-          <button class="hf-tab-btn" data-hf-tab="manual">カスタム</button>
-        </div>
-
-        <!-- カタログタブ -->
-        <div class="hf-tab-content active" id="hf-tab-catalog">
-          <div class="hf-catalog-info">
-            推奨モデル一覧（32GB RAM 最適化・CPU 専用環境向け）。
-            Q4_K_M 量子化 GGUF 形式。ダウンロード後にロードして使用できます。
-          </div>
-          <div id="hf-catalog-list" class="hf-catalog-list">
-            <div class="empty-state">読み込み中...</div>
-          </div>
-        </div>
-
-        <!-- HF 検索タブ -->
-        <div class="hf-tab-content" id="hf-tab-browse">
-          <div class="hf-browse-search-bar">
-            <input type="text" id="hf-search-input" class="hf-search-input"
-                   placeholder="モデル名で検索（例: llama, qwen, mistral）…"
-                   autocomplete="off">
-            <button class="btn btn-primary btn-sm" id="hf-search-btn">検索</button>
-            <button class="btn btn-secondary btn-sm" id="hf-search-top-btn" title="ダウンロード数トップ20">トップ 20</button>
-          </div>
-          <div id="hf-browse-status" class="hf-catalog-info" style="display:none;"></div>
-          <div id="hf-browse-results" class="hf-catalog-list">
-            <div class="empty-state">上の検索バーでモデルを探してください。<br>「トップ 20」をクリックすると人気モデルを表示します。</div>
-          </div>
-        </div>
-
-        <!-- ローカルモデルタブ -->
-        <div class="hf-tab-content" id="hf-tab-local">
-          <div class="hf-catalog-info">
-            <code id="hf-models-dir">.localforge/models/</code> 以下の GGUF ファイル一覧。
-            このフォルダに GGUF ファイルを配置してください。
-            <button class="btn btn-secondary btn-sm" id="hf-rescan-btn" style="margin-left:8px;">↻ 再スキャン</button>
-          </div>
-          <div id="hf-local-list" class="hf-catalog-list">
-            <div class="empty-state">読み込み中...</div>
-          </div>
-        </div>
-
-        <!-- カスタムタブ（任意の repo_id で手順を表示） -->
-        <div class="hf-tab-content" id="hf-tab-manual">
-          <div class="hf-catalog-info">
-            カタログにないモデルの手順を表示します。HuggingFace の repo ID（例: <code>Qwen/Qwen2.5-3B-Instruct</code>）を入力してください。
-          </div>
-          <div class="hf-custom-repo-bar">
-            <input type="text" id="hf-custom-repo-input" class="hf-search-input"
-                   placeholder="例: Qwen/Qwen2.5-3B-Instruct"
-                   autocomplete="off">
-            <button class="btn btn-primary btn-sm" id="hf-custom-show-btn">手順を表示</button>
-          </div>
-          <div id="hf-custom-instructions" style="display:none; margin-top:8px; overflow-y:auto; flex:1;"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <script src="{{ url_for('static', filename='js/workspace.js') }}"></script>
   <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
   <script>
@@ -310,7 +228,6 @@
   <script src="{{ url_for('static', filename='js/stream.js') }}"></script>
   <script src="{{ url_for('static', filename='js/filetree.js') }}"></script>
   <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/hf.js') }}"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

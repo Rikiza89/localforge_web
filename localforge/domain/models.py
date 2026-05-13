@@ -201,10 +201,6 @@ class ProjectConfig(BaseModel):
     num_thread: Optional[int] = None
     # False にするとインデックス時の RAG 埋め込みフェーズをスキップする（CPU 専用機向け）
     enable_rag: bool = True
-    # LLM プロバイダー: "ollama" または "huggingface"
-    llm_provider: str = "ollama"
-    # HuggingFace GGUF モデルファイルの絶対パス
-    hf_model_path: str = ""
     # コンテキストピン留めされたパス（プロジェクト相対、ファイルまたはフォルダ）
     context_pinned: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.utcnow)

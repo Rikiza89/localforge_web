@@ -13,7 +13,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from localforge.application.project_service import ProjectService
 from localforge.domain.exceptions import LocalForgeError
-from localforge.infrastructure.model_router import ModelRouter
+from localforge.infrastructure.ollama_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,7 @@ def _get_project_svc() -> ProjectService:
     return current_app.config["project_service"]
 
 
-def _get_llm() -> ModelRouter:
-    """現在のアプリコンテキストからModelRouterを取得する。"""
+def _get_llm() -> OllamaClient:
     return current_app.config["llm"]
 
 
@@ -92,26 +91,6 @@ def open_project():
     if project.config.num_thread is not None:
         llm.set_num_thread(project.config.num_thread)
 
-    # 保存済みプロバイダー設定を復元する
-    saved_provider = project.config.llm_provider or "ollama"
-    if saved_provider != llm.active_provider:
-        try:
-            llm.switch_provider(saved_provider)
-        except Exception as exc:
-            logger.warning("プロバイダー復元失敗 (%s): %s", saved_provider, exc)
-
-    # HuggingFace プロバイダーで保存済みモデルパスがある場合はロードを試みる
-    if (saved_provider == "huggingface"
-            and project.config.hf_model_path
-            and not llm.hf.is_model_loaded()):
-        hf_path = project.config.hf_model_path
-        from pathlib import Path as _Path
-        if _Path(hf_path).is_file():
-            try:
-                llm.hf.load_model(hf_path)
-            except Exception as exc:
-                logger.warning("保存済み HF モデルのロード失敗 (%s): %s", hf_path, exc)
-
     mode = project.mode.value
     banner_messages = {
         "generate": "新しいプロジェクトを作成します。プロンプトを入力してください。",
@@ -138,8 +117,6 @@ def open_project():
         "banner": banner_messages.get(mode, ""),
         "file_tree": [_node_to_dict(n) for n in project.file_tree],
         "model": project.config.model,
-        "llm_provider": llm.active_provider,
-        "hf_model_path": project.config.hf_model_path,
     })
 
 

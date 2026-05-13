@@ -140,15 +140,6 @@ async function openProject(pathOverride = null) {
     // モードに応じてタブを切り替え
     switchTab(data.mode);
 
-    // プロバイダー状態を復元
-    if (data.llm_provider && typeof _updateProviderUI === "function") {
-      _updateProviderUI(data.llm_provider);
-      if (data.llm_provider === "huggingface" && data.hf_model_path) {
-        _hfLoadedModelPath = data.hf_model_path;
-        _updateProviderUI("huggingface");
-      }
-    }
-
     // モデルセレクタをプロジェクトの保存済みモデルに合わせる
     const modelSelectEl = document.getElementById("model-selector");
     if (modelSelectEl && data.model) {
@@ -943,9 +934,6 @@ async function applyCpuThread(numThread) {
 // =========================================================================
 
 document.addEventListener("DOMContentLoaded", async () => {
-  // HuggingFace UI の初期化
-  if (typeof initHFUI === "function") initHFUI();
-
   // タブ切替ボタン
   document.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
@@ -970,16 +958,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  // モデルアンロードボタン（Ollama と HuggingFace 両対応）
+  // モデルアンロードボタン
   const unloadBtn = document.getElementById("unload-model-btn");
   if (unloadBtn) {
     unloadBtn.addEventListener("click", async () => {
-      if (typeof _activeProvider !== "undefined" && _activeProvider === "huggingface") {
-        // HF モデルアンロード
-        if (typeof unloadHFModel === "function") await unloadHFModel();
-        return;
-      }
-      // Ollama モデルアンロード
       const model = modelSelect ? modelSelect.value : null;
       if (!model) {
         showAlert("アンロードするモデルが選択されていません。", "warning");
