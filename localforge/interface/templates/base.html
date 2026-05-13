@@ -223,7 +223,7 @@
           <button class="hf-tab-btn active" data-hf-tab="catalog">カタログ</button>
           <button class="hf-tab-btn" data-hf-tab="browse">🔍 HF 検索</button>
           <button class="hf-tab-btn" data-hf-tab="local">ローカルモデル</button>
-          <button class="hf-tab-btn" data-hf-tab="manual">手動ダウンロード</button>
+          <button class="hf-tab-btn" data-hf-tab="manual">カスタム</button>
         </div>
 
         <!-- カタログタブ -->
@@ -264,37 +264,18 @@
           </div>
         </div>
 
-        <!-- 手動ダウンロードタブ -->
+        <!-- カスタムタブ（任意の repo_id で手順を表示） -->
         <div class="hf-tab-content" id="hf-tab-manual">
           <div class="hf-catalog-info">
-            プロキシや企業ネットワークによりダウンロードがブロックされた場合、
-            <code>huggingface-cli</code> またはブラウザで手動ダウンロードしてください。
-            ダウンロード後は「ローカルモデル」タブで「↻ 再スキャン」してロードできます。
+            カタログにないモデルの手順を表示します。HuggingFace の repo ID（例: <code>Qwen/Qwen2.5-3B-Instruct</code>）を入力してください。
           </div>
-          <div id="hf-manual-model-select" style="margin-bottom:12px;">
-            <label class="field-label">モデルを選択:</label>
-            <select id="hf-manual-model-selector" class="model-select" style="max-width:320px;">
-              <option value="">— モデルを選択 —</option>
-            </select>
-            <button class="btn btn-primary btn-sm" id="hf-get-instructions-btn" style="margin-left:8px;">
-              手順を表示
-            </button>
+          <div class="hf-custom-repo-bar">
+            <input type="text" id="hf-custom-repo-input" class="hf-search-input"
+                   placeholder="例: Qwen/Qwen2.5-3B-Instruct"
+                   autocomplete="off">
+            <button class="btn btn-primary btn-sm" id="hf-custom-show-btn">手順を表示</button>
           </div>
-          <div id="hf-instructions-panel" style="display:none;">
-            <div class="hf-instructions-box" id="hf-instructions-content"></div>
-          </div>
-        </div>
-
-        <!-- ダウンロード進捗パネル（全タブ共通） -->
-        <div id="hf-download-panel" class="hf-download-panel" style="display:none;">
-          <div class="hf-download-header">
-            <span id="hf-download-model-name">ダウンロード中...</span>
-            <button class="btn btn-danger btn-sm" id="hf-cancel-download-btn">キャンセル</button>
-          </div>
-          <div class="hf-progress-bar-wrap">
-            <div class="hf-progress-bar" id="hf-progress-bar" style="width:0%"></div>
-          </div>
-          <div class="hf-download-status" id="hf-download-status">準備中...</div>
+          <div id="hf-custom-instructions" style="display:none; margin-top:8px; overflow-y:auto; flex:1;"></div>
         </div>
       </div>
     </div>

@@ -1678,17 +1678,22 @@ progress::-moz-progress-bar {
   border-radius: 6px;
   padding: 10px 12px;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  flex-direction: column;
+  gap: 0;
 }
 
-.hf-model-card.downloaded {
-  border-color: var(--success);
-}
+.hf-model-card.downloaded { border-color: var(--success); }
 
 .hf-model-card.loaded {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, var(--bg-tertiary));
+}
+
+/* カードのメイン行（情報 + ボタン） */
+.hf-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .hf-model-info { flex: 1; min-width: 0; }
@@ -1748,64 +1753,116 @@ progress::-moz-progress-bar {
 .hf-status-badge.loaded     { background: color-mix(in srgb, var(--accent)  20%, transparent); color: var(--accent); }
 .hf-status-badge.not-downloaded { background: var(--bg-input); color: var(--text-muted); }
 
-/* ダウンロード進捗パネル */
-.hf-download-panel {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px 12px;
+/* インライン手順パネル */
+.hf-inst-panel {
+  border-top: 1px solid var(--border);
   margin-top: 10px;
-  flex-shrink: 0;
+  padding-top: 10px;
 }
 
-.hf-download-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.hf-progress-bar-wrap {
-  height: 6px;
-  background: var(--bg-input);
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 6px;
-}
-
-.hf-progress-bar {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 3px;
-  transition: width 0.3s ease;
-}
-
-.hf-download-status {
-  font-size: 11px;
+.hf-inst-loading {
+  font-size: 12px;
   color: var(--text-muted);
-  font-family: var(--font-mono);
+  padding: 6px 0;
 }
 
-/* 手動ダウンロード案内 */
-.hf-instructions-box {
+.hf-inst-error {
+  font-size: 12px;
+  color: var(--danger, #e05252);
+  padding: 6px 0;
+}
+
+.hf-inst-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hf-inst-step {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.hf-inst-num {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+}
+
+.hf-inst-body { flex: 1; min-width: 0; }
+
+.hf-inst-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 5px;
+}
+
+.hf-inst-path-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   background: var(--bg-primary);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 14px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  line-height: 1.7;
-  overflow-y: auto;
-  max-height: 280px;
+  border-radius: 4px;
+  padding: 5px 8px;
+  margin-bottom: 5px;
+  flex-wrap: wrap;
 }
 
-.hf-url-link {
+.hf-inst-path-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--accent);
   word-break: break-all;
+  flex: 1;
+}
+
+.hf-inst-file-list {
+  list-style: none;
+  padding: 0;
+  margin: 5px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hf-inst-file {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-input);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.hf-inst-note-inline {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.hf-inst-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+/* カスタムタブ — repo_id 入力バー */
+.hf-custom-repo-bar {
+  display: flex;
+  gap: 6px;
+  padding: 10px 0 8px;
+  flex-shrink: 0;
 }
 
 .hf-copy-btn {
@@ -1849,53 +1906,3 @@ progress::-moz-progress-bar {
 
 .hf-browse-card { cursor: default; }
 
-/* ファイルリスト（カード直下に展開） */
-.hf-file-list {
-  margin: 0 0 6px 0;
-}
-
-.hf-file-list-inner {
-  border: 1px solid var(--accent);
-  border-radius: 0 0 6px 6px;
-  background: var(--bg-secondary);
-  padding: 4px 0;
-}
-
-.hf-file-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  gap: 10px;
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
-}
-
-.hf-file-row:last-child { border-bottom: none; }
-.hf-file-row.downloaded { background: color-mix(in srgb, var(--success) 5%, transparent); }
-
-.hf-file-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  flex: 1;
-  min-width: 0;
-}
-
-.hf-file-name {
-  font-family: var(--font-mono);
-  color: var(--text-primary);
-  word-break: break-all;
-}
-
-.hf-file-size {
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.hf-file-actions {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-}

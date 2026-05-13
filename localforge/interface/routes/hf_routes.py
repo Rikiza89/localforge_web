@@ -5,12 +5,10 @@ safetensors 形式モデルのカタログ・ダウンロード・ロード・�
 
 from __future__ import annotations
 
-import json
 import logging
-import threading
 from pathlib import Path
 
-from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
+from flask import Blueprint, current_app, jsonify, request
 
 from localforge.infrastructure import hf_model_manager as mgr
 from localforge.infrastructure.hf_model_manager import MODELS_DIR
@@ -46,111 +44,6 @@ def list_models():
         "loaded_model": loaded,
         "models_dir": str(MODELS_DIR).replace("\\", "/"),
     })
-
-
-# ---------------------------------------------------------------------------
-# モデルダウンロード（SSE ストリーム）
-# ---------------------------------------------------------------------------
-
-@bp.route("/download", methods=["GET"])
-def download_model():
-    """
-    HuggingFace Hub からモデルをダウンロードし、ファイルごとに進行状況を SSE で配信する。
-
-    Query params:
-        model_id (str): カタログの model ID
-        repo_id  (str): 任意の HF repo ID（ライブ検索用）
-    """
-    model_id = request.args.get("model_id", "").strip()
-    repo_id  = request.args.get("repo_id",  "").strip()
-
-    if model_id:
-        model_info = mgr.get_catalog_model(model_id)
-        if not model_info:
-            return jsonify({"error": f"カタログに存在しないモデル ID: {model_id}"}), 404
-        repo_id  = model_info["repo_id"]
-        display  = model_info["name"]
-    elif repo_id:
-        display = repo_id.split("/")[-1]
-    else:
-        return jsonify({"error": "model_id または repo_id を指定してください"}), 400
-
-    def _generate():
-        def _sse(event: str, data: dict) -> str:
-            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-        yield _sse("status", {"status": f"{display} のファイルリストを取得中..."})
-
-        # ダウンロード対象ファイルリストを取得
-        try:
-            files = mgr.get_repo_download_files(repo_id)
-        except RuntimeError as exc:
-            exc_str = str(exc)
-            is_proxy = "プロキシ" in exc_str or "ネットワーク" in exc_str or "接続" in exc_str
-            inst = None
-            if is_proxy:
-                try:
-                    inst = mgr.get_manual_instructions(repo_id, display)
-                except Exception:
-                    pass
-            yield _sse("error", {"error": exc_str, "proxy_error": is_proxy, "instructions": inst})
-            return
-        except Exception as exc:
-            yield _sse("error", {"error": str(exc), "proxy_error": False, "instructions": None})
-            return
-
-        if not files:
-            yield _sse("error", {
-                "error": f"ダウンロード対象ファイルが見つかりません: {repo_id}",
-                "proxy_error": False, "instructions": None,
-            })
-            return
-
-        total_bytes = sum(f.get("size", 0) for f in files)
-        total_files = len(files)
-        done_bytes = 0
-
-        yield _sse("status", {"status": f"{total_files} ファイル（合計 {_fmt_gb(total_bytes)} GB）をダウンロード中..."})
-
-        for i, file_info in enumerate(files):
-            fname = file_info["filename"]
-            yield _sse("status", {"status": f"({i+1}/{total_files}) {fname}..."})
-
-            try:
-                mgr.download_file(repo_id, fname)
-            except RuntimeError as exc:
-                exc_str = str(exc)
-                is_proxy = "プロキシ" in exc_str or "ネットワーク" in exc_str
-                inst = None
-                if is_proxy:
-                    try:
-                        inst = mgr.get_manual_instructions(repo_id, display)
-                    except Exception:
-                        pass
-                yield _sse("error", {"error": exc_str, "proxy_error": is_proxy, "instructions": inst})
-                return
-            except Exception as exc:
-                yield _sse("error", {"error": str(exc), "proxy_error": False, "instructions": None})
-                return
-
-            done_bytes += file_info.get("size", 0)
-            if total_bytes:
-                yield _sse("progress", {"done": done_bytes, "total": total_bytes})
-
-        dest_dir = str(mgr.repo_dest_dir(repo_id).resolve())
-        yield _sse("done", {"done": True, "path": dest_dir})
-
-    return Response(
-        stream_with_context(_generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-def _fmt_gb(size_bytes: int) -> str:
-    if not size_bytes:
-        return "?"
-    return f"{size_bytes / (1024 ** 3):.1f}"
 
 
 # ---------------------------------------------------------------------------

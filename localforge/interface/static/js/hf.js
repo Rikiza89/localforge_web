@@ -1,6 +1,7 @@
 /**
  * hf.js — HuggingFace モデル管理 UI (safetensors 形式)
- * プロバイダー切替、モデルカタログ、リポジトリダウンロード、手動ダウンロード案内を制御する。
+ * プロバイダー切替、モデルカタログ、手順表示、ロード/アンロードを制御する。
+ * ダウンロード機能は削除済み — ブラウザ手動ダウンロードを案内する。
  */
 
 "use strict";
@@ -10,7 +11,6 @@
 // ---------------------------------------------------------------------------
 
 let _activeProvider    = "ollama";
-let _hfDownloadES      = null;
 let _hfLoadedModelPath = "";
 
 // ---------------------------------------------------------------------------
@@ -128,28 +128,35 @@ function renderCatalog(catalog) {
       `<span class="hf-tag tag-${escapeHtml(t)}">${escapeHtml(t)}</span>`
     ).join("");
 
+    const panelId = `hf-inst-cat-${escapeHtml(m.id)}`;
+
     const actionBtns = isLoaded
       ? `<button class="btn btn-secondary btn-sm" onclick="unloadHFModel()">アンロード</button>`
       : isDownloaded
-        ? `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.local_path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>
-           <button class="btn btn-secondary btn-sm" data-id="${escapeHtml(m.id)}" onclick="startHFDownload(this.dataset.id)">再DL</button>`
-        : `<button class="btn btn-primary btn-sm" data-id="${escapeHtml(m.id)}" onclick="startHFDownload(this.dataset.id)">ダウンロード</button>
-           <button class="btn btn-secondary btn-sm" data-repo="${escapeHtml(m.repo_id)}" data-name="${escapeHtml(m.name)}" onclick="showManualDownload(this.dataset.repo, this.dataset.name)">手動DL</button>`;
+        ? `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.local_path)}" onclick="loadHFModel(this.dataset.path)">▶ ロード</button>`
+        : "";
 
     return `
       <div class="hf-model-card ${cardClass}" id="hf-card-${escapeHtml(m.id)}">
-        <div class="hf-model-info">
-          <div class="hf-model-name">${escapeHtml(m.name)} ${tags}</div>
-          <div class="hf-model-desc">${escapeHtml(m.description)}</div>
-          <div class="hf-model-meta">
-            <span>💾 ${m.size_gb} GB</span>
-            <span>✦ ${escapeHtml(m.recommended_for || "")}</span>
+        <div class="hf-card-main">
+          <div class="hf-model-info">
+            <div class="hf-model-name">${escapeHtml(m.name)} ${tags}</div>
+            <div class="hf-model-desc">${escapeHtml(m.description)}</div>
+            <div class="hf-model-meta">
+              <span>💾 ${m.size_gb} GB</span>
+              <span>✦ ${escapeHtml(m.recommended_for || "")}</span>
+            </div>
+          </div>
+          <div class="hf-model-actions">
+            <span class="hf-status-badge ${badgeClass}">${badgeText}</span>
+            ${actionBtns}
+            <button class="btn btn-secondary btn-sm hf-inst-toggle"
+              data-panel="${panelId}"
+              data-model-id="${escapeHtml(m.id)}"
+              onclick="toggleInstructions(this)">📋 手順</button>
           </div>
         </div>
-        <div class="hf-model-actions">
-          <span class="hf-status-badge ${badgeClass}">${badgeText}</span>
-          ${actionBtns}
-        </div>
+        <div class="hf-inst-panel" id="${panelId}" style="display:none;"></div>
       </div>`;
   }).join("");
 }
@@ -159,7 +166,7 @@ function renderLocalModels(local) {
   if (!el) return;
 
   if (local.length === 0) {
-    el.innerHTML = '<div class="empty-state">ローカルモデルが見つかりません。カタログからダウンロードしてください。</div>';
+    el.innerHTML = '<div class="empty-state">ローカルモデルが見つかりません。カタログの「📋 手順」からダウンロードしてください。</div>';
     return;
   }
 
@@ -168,109 +175,131 @@ function renderLocalModels(local) {
     const cardClass = isLoaded ? "loaded" : "";
     return `
       <div class="hf-model-card ${cardClass}">
-        <div class="hf-model-info">
-          <div class="hf-model-name">${escapeHtml(m.name)}</div>
-          <div class="hf-model-desc">${escapeHtml(m.description || "ローカルモデル")}</div>
-          <div class="hf-model-meta">
-            <span>💾 ${m.size_gb} GB</span>
+        <div class="hf-card-main">
+          <div class="hf-model-info">
+            <div class="hf-model-name">${escapeHtml(m.name)}</div>
+            <div class="hf-model-desc">${escapeHtml(m.description || "ローカルモデル")}</div>
+            <div class="hf-model-meta">
+              <span>💾 ${m.size_gb} GB</span>
+            </div>
           </div>
-        </div>
-        <div class="hf-model-actions">
-          ${isLoaded
-            ? `<span class="hf-status-badge loaded">✓ ロード済み</span>
-               <button class="btn btn-secondary btn-sm" onclick="unloadHFModel()">アンロード</button>`
-            : `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>`
-          }
+          <div class="hf-model-actions">
+            ${isLoaded
+              ? `<span class="hf-status-badge loaded">✓ ロード済み</span>
+                 <button class="btn btn-secondary btn-sm" onclick="unloadHFModel()">アンロード</button>`
+              : `<button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.path)}" onclick="loadHFModel(this.dataset.path)">▶ ロード</button>`
+            }
+          </div>
         </div>
       </div>`;
   }).join("");
 }
 
 // ---------------------------------------------------------------------------
-// ダウンロード（カタログ: model_id / ライブ検索: repo_id）
+// インライン手順パネル
 // ---------------------------------------------------------------------------
 
-function _startDownloadSSE(url, displayName) {
-  if (_hfDownloadES) { _hfDownloadES.close(); _hfDownloadES = null; }
+async function toggleInstructions(btnEl) {
+  const panelId = btnEl.dataset.panel;
+  const panel   = document.getElementById(panelId);
+  if (!panel) return;
 
-  const panel     = document.getElementById("hf-download-panel");
-  const nameEl    = document.getElementById("hf-download-model-name");
-  const statusEl  = document.getElementById("hf-download-status");
-  const progressBar = document.getElementById("hf-progress-bar");
+  // 閉じる
+  if (panel.style.display !== "none") {
+    panel.style.display = "none";
+    btnEl.textContent = "📋 手順";
+    return;
+  }
 
-  if (panel)       panel.style.display = "";
-  if (nameEl)      nameEl.textContent   = displayName;
-  if (statusEl)    statusEl.textContent = "接続中...";
-  if (progressBar) progressBar.style.width = "0%";
-  updateStatusBar(`ダウンロード中: ${displayName}`);
+  // 開く
+  panel.style.display = "";
+  btnEl.textContent = "▲ 閉じる";
 
-  _hfDownloadES = new EventSource(url);
+  // 既に読み込み済みならそのまま表示
+  if (panel.dataset.loaded === "1") return;
 
-  _hfDownloadES.addEventListener("status", e => {
-    const d = JSON.parse(e.data);
-    if (statusEl) statusEl.textContent = d.status || "";
-    updateStatusBar(d.status || "");
-  });
+  panel.innerHTML = '<div class="hf-inst-loading">手順を読み込み中...</div>';
 
-  _hfDownloadES.addEventListener("progress", e => {
-    const d = JSON.parse(e.data);
-    if (progressBar && d.total > 0) {
-      progressBar.style.width = `${Math.round((d.done / d.total) * 100)}%`;
-    }
-    if (statusEl && d.total > 0) {
-      statusEl.textContent = `${_fmtBytes(d.done)} / ${_fmtBytes(d.total)} (${Math.round((d.done / d.total) * 100)}%)`;
-    }
-  });
+  const payload = {};
+  if (btnEl.dataset.modelId) payload.model_id   = btnEl.dataset.modelId;
+  if (btnEl.dataset.repoId)  payload.repo_id    = btnEl.dataset.repoId;
+  if (btnEl.dataset.name)    payload.model_name = btnEl.dataset.name;
 
-  _hfDownloadES.addEventListener("done", e => {
-    _hfDownloadES.close(); _hfDownloadES = null;
-    const d = JSON.parse(e.data);
-    if (progressBar) progressBar.style.width = "100%";
-    if (statusEl)    statusEl.textContent = "ダウンロード完了！";
-    updateStatusBar("ダウンロード完了");
-    showAlert(`ダウンロード完了: ${displayName}`, "success");
-    if (d.path) setTimeout(() => loadHFModel(d.path), 500);
-    setTimeout(() => loadHFModels(), 800);
-  });
-
-  _hfDownloadES.addEventListener("error", e => {
-    _hfDownloadES.close(); _hfDownloadES = null;
-    try {
-      const d = JSON.parse(e.data);
-      if (statusEl) statusEl.textContent = `エラー: ${d.error}`;
-      updateStatusBar("ダウンロードエラー");
-      if (d.proxy_error) {
-        showAlert("プロキシによりブロックされました。手動ダウンロード手順を表示します。", "warning");
-        if (d.instructions) { _showInstructions(d.instructions); switchHFTab("manual"); }
-      } else {
-        showAlert(`ダウンロードエラー: ${d.error}`, "error");
-      }
-    } catch (_) {
-      if (statusEl) statusEl.textContent = "エラー";
-    }
-  });
+  try {
+    const data = await apiRequest("/api/hf/instructions", "POST", payload);
+    panel.innerHTML = _buildInstructionsHTML(data.instructions);
+    panel.dataset.loaded = "1";
+  } catch (err) {
+    panel.innerHTML = `<div class="hf-inst-error">エラー: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
-function startHFDownload(modelId) {
-  const model = /* catalog lookup via DOM */ null;
-  _startDownloadSSE(
-    `/api/hf/download?model_id=${encodeURIComponent(modelId)}`,
-    modelId,
-  );
-}
+function _buildInstructionsHTML(inst) {
+  const url         = inst.hf_url || `https://huggingface.co/${inst.repo_id}/tree/main`;
+  const destDisplay = inst.dest_display || inst.dest_dir || "";
+  const fileList    = inst.file_list || [];
 
-function startHFDownloadRepo(repoId) {
-  _startDownloadSSE(
-    `/api/hf/download?repo_id=${encodeURIComponent(repoId)}`,
-    repoId.split("/").pop(),
-  );
-}
+  let filesHtml;
+  if (fileList.length > 0) {
+    filesHtml = fileList.map(f =>
+      `<li><code class="hf-inst-file">${escapeHtml(f)}</code></li>`
+    ).join("");
+  } else {
+    filesHtml = [
+      `<li><code class="hf-inst-file">config.json</code></li>`,
+      `<li><code class="hf-inst-file">tokenizer.json</code></li>`,
+      `<li><code class="hf-inst-file">tokenizer_config.json</code></li>`,
+      `<li><code class="hf-inst-file">*.safetensors</code> <span class="hf-inst-note-inline">（全ウェイトファイル）</span></li>`,
+      `<li><code class="hf-inst-file">*.safetensors.index.json</code> <span class="hf-inst-note-inline">（存在する場合）</span></li>`,
+    ].join("");
+  }
 
-function cancelHFDownload() {
-  if (_hfDownloadES) { _hfDownloadES.close(); _hfDownloadES = null; }
-  const panel = document.getElementById("hf-download-panel");
-  if (panel) panel.style.display = "none";
-  updateStatusBar("ダウンロードをキャンセルしました");
+  const fetchNote = fileList.length === 0
+    ? `<div class="hf-inst-note">💡 ファイルリストを自動取得できませんでした。HuggingFace ページで <code>.safetensors</code> と設定ファイル（.json）をダウンロードしてください。</div>`
+    : `<div class="hf-inst-note">✓ HuggingFace API からファイルリストを取得しました（${fileList.length} ファイル）</div>`;
+
+  return `
+<div class="hf-inst-content">
+  <div class="hf-inst-step">
+    <span class="hf-inst-num">1</span>
+    <div class="hf-inst-body">
+      <div class="hf-inst-label">ブラウザで HuggingFace ページを開く</div>
+      <div class="hf-inst-path-box">
+        <span class="hf-inst-path-text">${escapeHtml(url)}</span>
+        <button class="hf-copy-btn" data-text="${escapeHtml(url)}" onclick="_copyText(this.dataset.text)">コピー</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="hf-inst-step">
+    <span class="hf-inst-num">2</span>
+    <div class="hf-inst-body">
+      <div class="hf-inst-label">以下のファイルをひとつずつダウンロード</div>
+      ${fetchNote}
+      <ul class="hf-inst-file-list">${filesHtml}</ul>
+      <div class="hf-inst-note">⚠ <code>.h5</code> <code>.gguf</code> <code>flax_*</code> <code>tf_*</code> <code>onnx/</code> は不要です</div>
+    </div>
+  </div>
+
+  <div class="hf-inst-step">
+    <span class="hf-inst-num">3</span>
+    <div class="hf-inst-body">
+      <div class="hf-inst-label">ダウンロードしたファイルをこのフォルダに移動</div>
+      <div class="hf-inst-path-box">
+        <span class="hf-inst-path-text">${escapeHtml(destDisplay)}</span>
+        <button class="hf-copy-btn" data-text="${escapeHtml(destDisplay)}" onclick="_copyText(this.dataset.text)">コピー</button>
+      </div>
+      <div class="hf-inst-note">フォルダは自動作成済みです。ファイルはフォルダ直下に置いてください（サブフォルダ不要）</div>
+    </div>
+  </div>
+
+  <div class="hf-inst-step">
+    <span class="hf-inst-num">4</span>
+    <div class="hf-inst-body">
+      <div class="hf-inst-label">「ローカルモデル」タブ → 「↻ 再スキャン」→「▶ ロード」</div>
+    </div>
+  </div>
+</div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,66 +332,6 @@ async function unloadHFModel() {
   } catch (err) {
     showAlert(`アンロードエラー: ${err.message}`, "error");
   }
-}
-
-// ---------------------------------------------------------------------------
-// 手動ダウンロード案内
-// ---------------------------------------------------------------------------
-
-async function showManualDownload(repoId, modelName) {
-  switchHFTab("manual");
-  try {
-    const data = await apiRequest("/api/hf/instructions", "POST", {
-      repo_id: repoId, model_name: modelName || "",
-    });
-    _showInstructions(data.instructions);
-  } catch (err) {
-    showAlert(`手順取得エラー: ${err.message}`, "error");
-  }
-}
-
-async function getManualInstructions() {
-  const sel = document.getElementById("hf-manual-model-selector");
-  const modelId = sel ? sel.value : "";
-  if (!modelId) { showAlert("モデルを選択してください", "warning"); return; }
-  const model = /* look up name */ sel.options[sel.selectedIndex]?.text || modelId;
-  try {
-    const data = await apiRequest("/api/hf/instructions", "POST", { model_id: modelId });
-    _showInstructions(data.instructions);
-  } catch (err) {
-    showAlert(`手順取得エラー: ${err.message}`, "error");
-  }
-}
-
-function _showInstructions(inst) {
-  const panel   = document.getElementById("hf-instructions-panel");
-  const content = document.getElementById("hf-instructions-content");
-  if (!panel || !content) return;
-  panel.style.display = "";
-  panel.dataset.repoId = inst.repo_id || "";
-
-  const destDisplay  = inst.dest_display || inst.dest_dir || "";
-  const scriptDir    = destDisplay;
-  const runCmd       = `venv\\Scripts\\python "${destDisplay.replace(/\//g, "\\")}\\download.py"`;
-
-  content.innerHTML = `
-<b>${escapeHtml(inst.model_name)}</b>
-
-アプリがダウンロードフォルダに <code>download.py</code> スクリプトを生成しました。
-以下のコマンドをアプリのルートフォルダ（localforge_web）のコマンドプロンプトで実行してください:
-
-<b>▶ 実行コマンド:</b>
-   <code>${escapeHtml(runCmd)}</code>
-   <button class="hf-copy-btn" data-text="${escapeHtml(runCmd)}" onclick="_copyText(this.dataset.text)">コピー</button>
-
-<b>スクリプトの場所:</b>
-   <code>${escapeHtml(destDisplay)}/download.py</code>
-
-<p style="color:var(--text-muted);font-size:11px;margin-top:8px;">
-  このスクリプトは SSL 検証を自動的に無効化するため、企業プロキシ環境でも動作します。
-</p>
-
-<b>ダウンロード完了後:</b> 「ローカルモデル」タブで「↻ 再スキャン」→「ロード」をクリックしてください。`;
 }
 
 // ---------------------------------------------------------------------------
@@ -399,27 +368,37 @@ async function hfSearch(query) {
       const isDownloaded = m.downloaded;
       const isLoaded     = m.local_path && m.local_path === _hfLoadedModelPath;
       const cardClass    = isLoaded ? "loaded" : isDownloaded ? "downloaded" : "";
+      const safeRepoId   = m.repo_id.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const panelId      = `hf-inst-browse-${safeRepoId}`;
+
       return `
         <div class="hf-model-card hf-browse-card ${cardClass}">
-          <div class="hf-model-info">
-            <div class="hf-model-name">${escapeHtml(m.name)}</div>
-            <div class="hf-model-desc" style="font-size:11px;color:var(--text-muted);">${escapeHtml(m.repo_id)}</div>
-            <div class="hf-model-meta">
-              <span>⬇ ${_fmtNum(m.downloads)}</span>
-              <span>♥ ${_fmtNum(m.likes)}</span>
+          <div class="hf-card-main">
+            <div class="hf-model-info">
+              <div class="hf-model-name">${escapeHtml(m.name)}</div>
+              <div class="hf-model-desc" style="font-size:11px;color:var(--text-muted);">${escapeHtml(m.repo_id)}</div>
+              <div class="hf-model-meta">
+                <span>⬇ ${_fmtNum(m.downloads)}</span>
+                <span>♥ ${_fmtNum(m.likes)}</span>
+              </div>
+            </div>
+            <div class="hf-model-actions">
+              ${isLoaded
+                ? `<span class="hf-status-badge loaded">✓ ロード済み</span>
+                   <button class="btn btn-secondary btn-sm" onclick="unloadHFModel()">アンロード</button>`
+                : isDownloaded
+                  ? `<span class="hf-status-badge downloaded">✓ DL済み</span>
+                     <button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.local_path)}" onclick="loadHFModel(this.dataset.path)">▶ ロード</button>`
+                  : ""
+              }
+              <button class="btn btn-secondary btn-sm hf-inst-toggle"
+                data-panel="${panelId}"
+                data-repo-id="${escapeHtml(m.repo_id)}"
+                data-name="${escapeHtml(m.name)}"
+                onclick="toggleInstructions(this)">📋 手順</button>
             </div>
           </div>
-          <div class="hf-model-actions">
-            ${isLoaded
-              ? `<span class="hf-status-badge loaded">✓ ロード済み</span>
-                 <button class="btn btn-secondary btn-sm" onclick="unloadHFModel()">アンロード</button>`
-              : isDownloaded
-                ? `<span class="hf-status-badge downloaded">✓ DL済み</span>
-                   <button class="btn btn-primary btn-sm" data-path="${escapeHtml(m.local_path)}" onclick="loadHFModel(this.dataset.path)">ロード</button>`
-                : `<button class="btn btn-primary btn-sm" data-repo="${escapeHtml(m.repo_id)}" onclick="startHFDownloadRepo(this.dataset.repo)">ダウンロード</button>
-                   <button class="btn btn-secondary btn-sm" data-repo="${escapeHtml(m.repo_id)}" data-name="${escapeHtml(m.name)}" onclick="showManualDownload(this.dataset.repo, this.dataset.name)">手動DL</button>`
-            }
-          </div>
+          <div class="hf-inst-panel" id="${panelId}" style="display:none;"></div>
         </div>`;
     }).join("");
 
@@ -430,17 +409,31 @@ async function hfSearch(query) {
 }
 
 // ---------------------------------------------------------------------------
-// ユーティリティ
+// カスタムタブ（任意の repo_id で手順を表示）
 // ---------------------------------------------------------------------------
 
-function _fmtBytes(bytes) {
-  if (!bytes) return "0 B";
-  const gb = bytes / (1024 ** 3);
-  if (gb >= 1) return `${gb.toFixed(2)} GB`;
-  const mb = bytes / (1024 ** 2);
-  if (mb >= 1) return `${mb.toFixed(1)} MB`;
-  return `${Math.round(bytes / 1024)} KB`;
+async function showCustomInstructions() {
+  const input = document.getElementById("hf-custom-repo-input");
+  const panel = document.getElementById("hf-custom-instructions");
+  if (!input || !panel) return;
+
+  const repoId = input.value.trim();
+  if (!repoId) { showAlert("repo ID を入力してください", "warning"); return; }
+
+  panel.style.display = "";
+  panel.innerHTML = '<div class="hf-inst-loading">手順を読み込み中...</div>';
+
+  try {
+    const data = await apiRequest("/api/hf/instructions", "POST", { repo_id: repoId });
+    panel.innerHTML = _buildInstructionsHTML(data.instructions);
+  } catch (err) {
+    panel.innerHTML = `<div class="hf-inst-error">エラー: ${escapeHtml(err.message)}</div>`;
+  }
 }
+
+// ---------------------------------------------------------------------------
+// ユーティリティ
+// ---------------------------------------------------------------------------
 
 function _fmtNum(n) {
   if (!n) return "0";
@@ -481,9 +474,6 @@ function initHFUI() {
     btn.addEventListener("click", () => switchHFTab(btn.dataset.hfTab));
   });
 
-  const cancelBtn = document.getElementById("hf-cancel-download-btn");
-  if (cancelBtn) cancelBtn.addEventListener("click", cancelHFDownload);
-
   const rescanBtn = document.getElementById("hf-rescan-btn");
   if (rescanBtn) {
     rescanBtn.addEventListener("click", async () => {
@@ -505,29 +495,17 @@ function initHFUI() {
     if (e.key === "Enter") hfSearch(e.target.value.trim());
   });
 
-  // 手動ダウンロード — カタログセレクタ
-  const instrBtn = document.getElementById("hf-get-instructions-btn");
-  if (instrBtn) instrBtn.addEventListener("click", getManualInstructions);
-
-  // 手動ダウンロードタブ用カタログセレクタを初期化
-  _populateManualSelector();
+  // カスタムタブ
+  const customBtn = document.getElementById("hf-custom-show-btn");
+  if (customBtn) customBtn.addEventListener("click", showCustomInstructions);
+  const customInput = document.getElementById("hf-custom-repo-input");
+  if (customInput) customInput.addEventListener("keydown", e => {
+    if (e.key === "Enter") showCustomInstructions();
+  });
 
   // 起動時 HF 状態を確認
   apiRequest("/api/hf/status").then(data => {
     _hfLoadedModelPath = data.loaded_model || "";
     _updateProviderUI(data.active_provider || "ollama");
-  }).catch(() => {});
-}
-
-function _populateManualSelector() {
-  const sel = document.getElementById("hf-manual-model-selector");
-  if (!sel || sel.options.length > 1) return;
-  apiRequest("/api/hf/models").then(data => {
-    (data.catalog || []).forEach(m => {
-      const opt = document.createElement("option");
-      opt.value = m.id;
-      opt.textContent = `${m.name} (${m.size_gb} GB)`;
-      sel.appendChild(opt);
-    });
   }).catch(() => {});
 }

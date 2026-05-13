@@ -388,13 +388,23 @@ def download_file(repo_id: str, filename: str) -> str:
 def get_manual_instructions(repo_id: str, model_name: str = "") -> Dict:
     """
     手動ダウンロード用の詳細手順を返す。保存先ディレクトリを事前に作成する。
+    HF API からファイルリストの取得を試み、成功した場合は file_list に含める。
     """
     dest_dir = repo_dest_dir(repo_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     name = model_name or repo_id.split("/")[-1]
     dest_display = str(dest_dir).replace("\\", "/")
+    hf_url = f"https://huggingface.co/{repo_id}/tree/main"
 
-    # 手動ダウンロード用スクリプトをフォルダに書き出す（SSL バイパス込み）
+    # ファイルリストを HF API から取得試行（失敗しても手順は返す）
+    file_list: List[str] = []
+    try:
+        files = get_repo_download_files(repo_id)
+        file_list = [f["filename"] for f in files]
+    except Exception:
+        pass
+
+    # 手動ダウンロード用スクリプトをフォルダに書き出す（requests monkey-patch SSL バイパス込み）
     script_path = dest_dir / "download.py"
     script_path.write_text(
         '# Manual download script — run with: venv/Scripts/python download.py\n'
@@ -417,31 +427,12 @@ def get_manual_instructions(repo_id: str, model_name: str = "") -> Dict:
     )
 
     return {
-        "model_name":  name,
-        "repo_id":     repo_id,
-        "dest_dir":    str(dest_dir),
+        "model_name":   name,
+        "repo_id":      repo_id,
+        "hf_url":       hf_url,
+        "dest_dir":     str(dest_dir),
         "dest_display": dest_display,
-        "cli_cmd":     f'huggingface-cli download {repo_id} --local-dir "{dest_display}"',
-        "python_cmd":  (
-            f'from huggingface_hub import snapshot_download\n'
-            f'snapshot_download("{repo_id}", local_dir=r"{dest_display}")'
-        ),
-        "python_oneliner": (
-            f'from huggingface_hub import snapshot_download; '
-            f'snapshot_download("{repo_id}", local_dir=r"{dest_display}")'
-        ),
-        "steps": [
-            f"1. Python でダウンロード（推奨・venv から実行）:",
-            f"   venv\\Scripts\\python -c \"from huggingface_hub import snapshot_download; snapshot_download('{repo_id}', local_dir=r'{dest_display}')\"",
-            f"",
-            f"2. または huggingface-cli（venv を有効化している場合）:",
-            f"   huggingface-cli download {repo_id} --local-dir \"{dest_display}\"",
-            f"",
-            f"3. ダウンロード先（自動作成済み）:",
-            f"   {dest_display}",
-            f"",
-            f"4. ダウンロード完了後、「ローカルモデル」タブで「↻ 再スキャン」をクリックしてロードしてください。",
-        ],
+        "file_list":    file_list,
     }
 
 
