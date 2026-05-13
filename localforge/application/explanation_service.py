@@ -85,10 +85,11 @@ class ExplanationService:
             return
 
         chunks = project_index.file_chunks
+        # レポートセクションには summary（構造化テキスト）のみ渡す。
+        # ファイルパス一覧は Q&A フェーズ1専用で、レポートでは不要かつ巨大なので除外する。
         index_dict = project_index.model_dump(
             include={"project_name", "summary", "total_files", "indexed_files"}
         )
-        index_dict["files"] = [c.path for c in chunks]
         index_json = json.dumps(index_dict, ensure_ascii=False)
 
         total_sections = len(REPORT_SECTIONS)
@@ -105,12 +106,14 @@ class ExplanationService:
                 }
             }
 
-            # セクションに関連するチャンクを選択（セマンティック検索 → キーワードフォールバック）
+            # セクションに関連するチャンクを選択（top_n=6 でプロンプトを抑制）
             relevant_chunks = self._analysis.get_top_chunks_semantic(
-                chunks, section_name, top_n=10
+                chunks, section_name, top_n=6
             )
+            # 各サマリーを1行目のみに絞ってトークンを節約する
             relevant_summaries = [
-                (c.path, c.summary or "") for c in relevant_chunks if c.summary
+                (c.path, (c.summary or "").split("\n")[0][:120])
+                for c in relevant_chunks if c.summary
             ]
 
             # プロンプトを構築してストリーミング生成
