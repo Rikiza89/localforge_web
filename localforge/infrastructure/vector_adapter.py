@@ -6,15 +6,15 @@ VectorAdapter — ChromaDB + sentence-transformers を使ったセマンティ�
 プロセス内で実行する。Ollama への HTTP 呼び出しは不要。
 インクリメンタル更新をサポート: mtime+size が変化したファイルのみ再埋め込みする。
 
-all-MiniLM-L6-v2 は初回起動時に自動ダウンロードされ、
-~/.cache/huggingface/hub/ にキャッシュされる。
+モデルのキャッシュ戦略:
+  1. LOCALFORGE_ST_MODEL_PATH が設定されている → そのパスから直接ロード
+  2. プロジェクトルートの models/all-MiniLM-L6-v2/ が存在する → そこからロード
+     （main.py が自動検出して LOCALFORGE_ST_MODEL_PATH を設定する）
+  3. 上記いずれもない → HuggingFace からダウンロードして models/ に保存
+     → 次回起動から models/ を参照（ダウンロードは一度だけ）
 
 SSL 証明書エラー（自己署名 CA / 企業プロキシ環境）への対処:
-  方法 1: ローカルにダウンロード済みのモデルを指定する
-      LOCALFORGE_ST_MODEL_PATH=/path/to/all-MiniLM-L6-v2 python main.py
-  方法 2: SSL 検証をスキップしてダウンロードする（初回のみ）
-      LOCALFORGE_DISABLE_SSL=1 python main.py
-  方法 3: ダウンロード後はキャッシュが使われるため以降は再設定不要
+  LOCALFORGE_DISABLE_SSL=1 python main.py  （初回ダウンロード時のみ必要）
 """
 
 from __future__ import annotations
@@ -33,6 +33,11 @@ _ST_MODEL_NAME = "all-MiniLM-L6-v2"
 _COLLECTION_NAME = "localforge_minilm"
 _CHROMA_DIR = "chroma"
 
+# プロジェクトルートの models/ フォルダ（main.py と同じ階層）
+# localforge/infrastructure/vector_adapter.py → ../../ = プロジェクトルート
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_LOCAL_MODEL_DIR = _PROJECT_ROOT / "models" / _ST_MODEL_NAME
+
 # モジュールレベルのモデルキャッシュ（プロセス内で一度だけロードする）
 _st_model_instance = None
 _st_model_load_attempted = False
@@ -46,12 +51,14 @@ def _is_ssl_error(exc: Exception) -> bool:
 def _load_st_model():
     """
     sentence-transformers モデルをロードしてキャッシュする。
-    インストールされていない場合は None を返す（警告のみ、クラッシュしない）。
 
     優先順位:
       1. LOCALFORGE_ST_MODEL_PATH 環境変数が指すローカルパス
-      2. 通常ダウンロード（キャッシュ利用）
-      3. SSL エラー時: LOCALFORGE_DISABLE_SSL=1 でリトライ
+      2. プロジェクトルートの models/all-MiniLM-L6-v2/ フォルダ
+      3. HuggingFace からダウンロード → models/ に保存（以降は 2 が適用される）
+      4. SSL エラー時: LOCALFORGE_DISABLE_SSL=1 でリトライ後に保存
+
+    インストールされていない場合は None を返す（警告のみ、クラッシュしない）。
     """
     global _st_model_instance, _st_model_load_attempted
     if _st_model_load_attempted:
@@ -68,55 +75,92 @@ def _load_st_model():
         )
         return None
 
-    model_path: str = os.environ.get("LOCALFORGE_ST_MODEL_PATH", "") or _ST_MODEL_NAME
-    logger.info("sentence-transformers モデルをロード中: %s", model_path)
+    # --- ロードするパスを決定 ---
+    env_path = os.environ.get("LOCALFORGE_ST_MODEL_PATH", "").strip()
+    if env_path and Path(env_path).is_dir():
+        # 環境変数が有効なローカルディレクトリを指している
+        load_from = env_path
+        save_after_load = False
+    elif _LOCAL_MODEL_DIR.is_dir():
+        # プロジェクト内の models/ フォルダに既にある
+        load_from = str(_LOCAL_MODEL_DIR)
+        save_after_load = False
+    else:
+        # ローカルになし → HuggingFace からダウンロードして models/ に保存する
+        load_from = _ST_MODEL_NAME
+        save_after_load = True
 
+    logger.info("sentence-transformers モデルをロード中: %s", load_from)
+
+    model = _try_load(SentenceTransformer, load_from)
+    if model is None:
+        _log_st_help()
+        return None
+
+    if save_after_load:
+        _save_model_locally(model)
+
+    _st_model_instance = model
+    return _st_model_instance
+
+
+def _try_load(SentenceTransformer, load_from: str):
+    """モデルのロードを試みる。SSL エラー時は LOCALFORGE_DISABLE_SSL=1 でリトライ。"""
     try:
-        _st_model_instance = SentenceTransformer(model_path)
-        logger.info("sentence-transformers モデルのロード完了: %s", model_path)
-        return _st_model_instance
+        model = SentenceTransformer(load_from)
+        logger.info("sentence-transformers モデルのロード完了: %s", load_from)
+        return model
     except Exception as exc:
         if not _is_ssl_error(exc):
             logger.warning("sentence-transformers モデルのロードに失敗しました: %s", exc)
-            _log_st_help()
             return None
-        logger.warning("SSL エラーでモデルのダウンロードに失敗しました: %s", exc)
+        logger.warning("SSL エラーでモデルのロードに失敗しました: %s", exc)
 
     disable_ssl = os.environ.get("LOCALFORGE_DISABLE_SSL", "").lower() in ("1", "true", "yes")
     if not disable_ssl:
         logger.warning(
-            "SSL 証明書エラーが発生しました。LOCALFORGE_DISABLE_SSL=1 を設定するか"
-            " モデルをローカルに配置してください。"
+            "SSL 証明書エラーが発生しました。LOCALFORGE_DISABLE_SSL=1 を設定して"
+            " 再起動するか、モデルをローカルに配置してください。"
         )
-        _log_st_help()
         return None
 
     logger.info("LOCALFORGE_DISABLE_SSL=1: SSL 検証を無効化してリトライします")
     _orig_ctx = ssl._create_default_https_context
     ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[attr-defined]
     try:
-        _st_model_instance = SentenceTransformer(model_path)
-        logger.info("sentence-transformers モデルのロード完了 (SSL バイパス): %s", model_path)
+        model = SentenceTransformer(load_from)
+        logger.info("sentence-transformers モデルのロード完了 (SSL バイパス): %s", load_from)
+        return model
     except Exception as exc2:
         logger.warning("SSL バイパス後もモデルのロードに失敗しました: %s", exc2)
-        _log_st_help()
-        _st_model_instance = None
+        return None
     finally:
         ssl._create_default_https_context = _orig_ctx  # type: ignore[attr-defined]
 
-    return _st_model_instance
+
+def _save_model_locally(model) -> None:
+    """ダウンロード済みモデルをプロジェクトの models/ フォルダに保存する。"""
+    try:
+        _LOCAL_MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
+        model.save(str(_LOCAL_MODEL_DIR))
+        # 次回起動時に main.py が検出できるよう環境変数も更新する
+        os.environ["LOCALFORGE_ST_MODEL_PATH"] = str(_LOCAL_MODEL_DIR)
+        logger.info(
+            "sentence-transformers モデルを保存しました: %s"
+            " — 次回起動からローカルファイルを使用します", _LOCAL_MODEL_DIR
+        )
+    except Exception as exc:
+        logger.warning("モデルのローカル保存に失敗しました（動作には影響なし）: %s", exc)
 
 
 def _log_st_help() -> None:
     logger.warning(
         "sentence-transformers が利用不可のため BM25 検索にフォールバックします。\n"
         "解決方法:\n"
-        "  [A] SSL をスキップしてダウンロード（初回のみ）:\n"
+        "  [A] 通常起動でモデルを自動ダウンロード（models/ に保存、以降は再ダウンロード不要）:\n"
+        "        python main.py\n"
+        "  [B] SSL エラーがある場合はスキップしてダウンロード（初回のみ）:\n"
         "        LOCALFORGE_DISABLE_SSL=1 python main.py\n"
-        "  [B] モデルを事前保存してローカルパスを指定:\n"
-        "        python -c \"from sentence_transformers import SentenceTransformer;"
-        " SentenceTransformer('all-MiniLM-L6-v2').save('/path/to/model')\"\n"
-        "        LOCALFORGE_ST_MODEL_PATH=/path/to/model python main.py\n"
         "  [C] BM25 のみを使用する（設定不要 — 現在このモードで動作中）"
     )
 

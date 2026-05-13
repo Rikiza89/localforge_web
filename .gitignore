@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# LocalForge — ローカルキャッシュ済み sentence-transformers モデル
+# （初回起動時に自動ダウンロードされる。再コミット不要）
+models/
