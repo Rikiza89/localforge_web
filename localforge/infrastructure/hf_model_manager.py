@@ -28,21 +28,26 @@ def _disable_ssl_verify() -> None:
     if _ssl_verify_disabled:
         return
     try:
-        import urllib3
+        import ssl, urllib3
+        ssl._create_default_https_context = ssl._create_unverified_context
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        import requests as _req
-        from huggingface_hub import configure_http_backend
 
-        def _insecure_session() -> _req.Session:
-            s = _req.Session()
-            s.verify = False
-            return s
+        # configure_http_backend は huggingface_hub >= 0.20 で利用可能
+        try:
+            import requests as _req
+            from huggingface_hub import configure_http_backend
 
-        configure_http_backend(backend_factory=_insecure_session)
+            def _insecure_session() -> _req.Session:
+                s = _req.Session()
+                s.verify = False
+                return s
+
+            configure_http_backend(backend_factory=_insecure_session)
+        except ImportError:
+            pass  # ssl._create_default_https_context で代替
+
         _ssl_verify_disabled = True
-        logger.warning(
-            "SSL 証明書の検証を無効化しました（自己署名証明書プロキシを検出）。"
-        )
+        logger.warning("SSL 証明書の検証を無効化しました（自己署名証明書プロキシを検出）。")
     except Exception as e:
         logger.warning("SSL 無効化の設定に失敗しました: %s", e)
 
@@ -395,21 +400,17 @@ def get_manual_instructions(repo_id: str, model_name: str = "") -> Dict:
     # 手動ダウンロード用スクリプトをフォルダに書き出す（SSL バイパス込み）
     script_path = dest_dir / "download.py"
     script_path.write_text(
-        f'"""手動ダウンロードスクリプト — venv\\Scripts\\python download.py で実行"""\n'
-        f'import requests, urllib3\n'
-        f'urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n'
-        f'from huggingface_hub import configure_http_backend, snapshot_download\n\n'
-        f'def _no_ssl():\n'
-        f'    s = requests.Session()\n'
-        f'    s.verify = False\n'
-        f'    return s\n\n'
-        f'configure_http_backend(backend_factory=_no_ssl)\n'
+        '# Manual download script — run with: venv/Scripts/python download.py\n'
+        'import ssl, urllib3\n'
+        'ssl._create_default_https_context = ssl._create_unverified_context\n'
+        'urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n\n'
+        'from huggingface_hub import snapshot_download\n\n'
         f'snapshot_download(\n'
         f'    "{repo_id}",\n'
         f'    local_dir=r"{dest_display}",\n'
         f'    ignore_patterns=["*.h5", "*.msgpack", "flax_*", "tf_*", "rust_*"],\n'
         f')\n'
-        f'print("ダウンロード完了:", r"{dest_display}")\n',
+        f'print("Done:", r"{dest_display}")\n',
         encoding="utf-8",
     )
 
