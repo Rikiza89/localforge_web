@@ -278,11 +278,25 @@ def load_model():
 
     path = Path(model_path).resolve()
 
+    logger.info(
+        "HF load リクエスト: raw=%r  resolved=%s  exists=%s  MODELS_DIR=%s",
+        model_path, path, path.exists(), MODELS_DIR.resolve(),
+    )
+
     if path.suffix.lower() != ".gguf":
+        logger.warning("HF load 拒否: GGUF 以外の拡張子 %s", path.suffix)
         return jsonify({"error": "GGUF ファイルのみサポートしています"}), 400
 
     if not path.is_file():
         models_dir_display = str(MODELS_DIR).replace("\\", "/")
+        logger.warning(
+            "HF load 失敗: ファイルが存在しない  path=%s  models_dir=%s  "
+            "models_dir_exists=%s  models_dir_contents=%s",
+            path,
+            MODELS_DIR.resolve(),
+            MODELS_DIR.exists(),
+            [str(p) for p in MODELS_DIR.rglob("*.gguf")] if MODELS_DIR.exists() else [],
+        )
         return jsonify({
             "error": (
                 f"ファイルが見つかりません: {path}\n"
