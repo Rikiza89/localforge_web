@@ -407,42 +407,6 @@ class ContextService:
         # )
         return self._guard_budget(prompt, f"file_summary:{file_path}")
 
-    def build_project_index_prompt(
-        self,
-        file_summaries: List[tuple[str, str]],
-        folder_tree: str,
-        root_configs: str,
-    ) -> str:
-        """
-        ProjectIndexマスタードキュメント生成のプロンプトを組み立てる。
-
-        Args:
-            file_summaries: [(ファイルパス, サマリー)] のリスト
-            folder_tree: ディレクトリツリーのテキスト表現
-            root_configs: ルート設定ファイルの内容
-
-        Returns:
-            組み立てたプロンプト文字列
-        """
-        summaries_text = "\n".join(
-            f"- {path}: {summary}" for path, summary in file_summaries
-        )
-
-        parts = [
-            f"ディレクトリ構成:\n{folder_tree}",
-        ]
-        if root_configs.strip():
-            parts.append(f"ルート設定ファイル:\n{root_configs}")
-        parts.append(f"ファイルサマリー:\n{summaries_text}")
-        parts.append(
-            "上記の情報を基に、プロジェクト全体の概要を3〜5文の日本語で作成してください。"
-            " プロジェクトの目的、主要コンポーネント、技術スタックを含めてください。"
-            " 概要のみを出力してください。"
-        )
-
-        prompt = "\n\n".join(parts)
-        return self._guard_budget(prompt, "project_index")
-
     def build_report_section_prompt(
         self,
         section_name: str,

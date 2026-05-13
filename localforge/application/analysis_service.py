@@ -169,6 +169,84 @@ def _is_auto_generated(content: str) -> bool:
     return bool(_AUTO_GENERATED_PATTERNS.search(header))
 
 
+def _auto_project_summary(project_name: str, chunks: List[FileChunk]) -> str:
+    """
+    LLM を使わずにファイルメタデータとシンボルから構造化プロジェクトサマリーを生成する。
+    全ファイルをカバーし、トークン制限に依存しない。
+    """
+    from collections import Counter, defaultdict
+
+    total = len(chunks)
+
+    # 言語別ファイル数カウント
+    lang_counter: Counter = Counter()
+    for c in chunks:
+        lang = c.language or "other"
+        lang_counter[lang] += 1
+
+    lang_parts = ", ".join(
+        f"{lang} ({count})"
+        for lang, count in lang_counter.most_common(12)
+    )
+
+    # トップレベルディレクトリ別の集計
+    dir_files: dict = defaultdict(list)
+    for c in chunks:
+        parts = c.path.replace("\\", "/").split("/")
+        top = parts[0] if len(parts) > 1 else "(root)"
+        dir_files[top].append(c)
+
+    dir_lines: List[str] = []
+    for top_dir, dir_chunks in sorted(dir_files.items(), key=lambda x: -len(x[1])):
+        # このディレクトリで見つかったクラス名を最大5件収集
+        class_names: List[str] = []
+        for c in dir_chunks:
+            for sym in (c.symbols or []):
+                if sym.kind == "class" and sym.name not in class_names:
+                    class_names.append(sym.name)
+                if len(class_names) >= 5:
+                    break
+            if len(class_names) >= 5:
+                break
+        class_hint = f" — Classes: {', '.join(class_names)}" if class_names else ""
+        dir_lines.append(f"  {top_dir}/  ({len(dir_chunks)} files){class_hint}")
+
+    # エントリポイント検出
+    entry_names = {
+        "main.py", "app.py", "index.py", "manage.py", "server.py",
+        "index.js", "index.ts", "main.ts", "main.js", "app.js", "app.ts",
+        "index.jsx", "index.tsx", "main.go", "main.rs", "main.java",
+    }
+    entry_points = [
+        c.path for c in chunks
+        if Path(c.path).name.lower() in entry_names
+    ]
+
+    # ドキュメントファイル一覧
+    doc_exts = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".odt"}
+    doc_files = [c.path for c in chunks if Path(c.path).suffix.lower() in doc_exts]
+
+    lines: List[str] = [
+        f"Project: {project_name} ({total} files indexed)",
+        f"Languages: {lang_parts}",
+        "",
+        "Directory breakdown:",
+    ]
+    lines.extend(dir_lines[:25])  # 最大25ディレクトリ
+    if len(dir_files) > 25:
+        lines.append(f"  ... and {len(dir_files) - 25} more directories")
+
+    if entry_points:
+        lines.append("")
+        lines.append(f"Entry points: {', '.join(entry_points[:10])}")
+
+    if doc_files:
+        lines.append("")
+        lines.append(f"Documents: {', '.join(Path(p).name for p in doc_files[:20])}")
+
+    return "\n".join(lines)
+
+
 def _try_heuristic_summary(chunk: FileChunk) -> Optional[str]:
     """
     ファイルが自明な場合にLLMを使わずサマリーを返す。
@@ -626,7 +704,6 @@ class AnalysisService:
         )
 
         if should_regenerate:
-            yield {"status": f"プロジェクトサマリーを生成中... ({len(all_chunks)} ファイル)"}
             project_index = self._build_project_index(root, model, all_chunks)
         else:
             logger.info(
@@ -653,39 +730,17 @@ class AnalysisService:
     ) -> ProjectIndex:
         """
         ファイルチャンクからProjectIndexを構築する内部メソッド。
+        LLMを使わず _auto_project_summary() でサマリーを生成する。
 
         Args:
             root: プロジェクトルート
-            model: 使用するモデル名
+            model: 使用するモデル名（後方互換性のため残すが使用しない）
             chunks: FileChunkのリスト
 
         Returns:
             ProjectIndex
         """
-        # ファイルツリーのテキスト表現
-        folder_tree = self._build_tree_text(root)
-
-        # ルート設定ファイルの内容
-        root_config_content = self._read_root_configs(root)
-
-        # サマリーリスト（大規模プロジェクトでもLLMが処理できるよう最大300件に制限）
-        _all_summaries = [(c.path, c.summary or "") for c in chunks if c.summary]
-        file_summaries = _all_summaries[:300]
-        if len(_all_summaries) > 300:
-            logger.info("ProjectIndex: サマリーを %d/%d 件に絞って送信します", len(file_summaries), len(_all_summaries))
-
-        # ProjectIndex概要をLLMで生成
-        prompt = self._context.build_project_index_prompt(
-            file_summaries=file_summaries,
-            folder_tree=folder_tree,
-            root_configs=root_config_content,
-        )
-        try:
-            summary = self._llm.generate_sync(model, prompt).strip()
-        except Exception as exc:
-            logger.error("ProjectIndex概要生成エラー: %s", exc)
-            summary = f"プロジェクト概要の生成に失敗しました: {exc}"
-
+        summary = _auto_project_summary(root.name, chunks)
         return ProjectIndex(
             project_root=str(root),
             project_name=root.name,
