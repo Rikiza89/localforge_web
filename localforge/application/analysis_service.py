@@ -49,6 +49,14 @@ _HEURISTIC_EXTENSIONS = frozenset({
     ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
     ".woff", ".woff2", ".ttf", ".eot",
     ".map", ".snap", ".csv", ".xml",
+    # ドキュメント形式
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".odt", ".ods", ".odp",
+})
+# バイナリドキュメント形式（テキスト抽出が必要な拡張子）
+_DOCUMENT_EXTENSIONS = frozenset({
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".odt", ".ods", ".odp",
 })
 # ロックファイル名（依存関係のロックファイル）
 _LOCK_FILE_NAMES = frozenset({
@@ -89,6 +97,10 @@ def _detect_language(path: Path) -> str:
         ".sh": "bash", ".yaml": "yaml", ".yml": "yaml",
         ".toml": "toml", ".json": "json", ".sql": "sql",
         ".md": "markdown",
+        ".pdf": "pdf", ".docx": "docx", ".doc": "docx",
+        ".xlsx": "xlsx", ".xls": "xlsx",
+        ".pptx": "pptx", ".ppt": "pptx",
+        ".odt": "document", ".ods": "spreadsheet", ".odp": "presentation",
     }
     return ext_map.get(path.suffix.lower(), "text")
 
@@ -174,6 +186,17 @@ def _try_heuristic_summary(chunk: FileChunk) -> Optional[str]:
 
     if path.name in _LOCK_FILE_NAMES:
         return "依存関係のロックファイル"
+
+    if path.suffix.lower() in _DOCUMENT_EXTENSIONS:
+        if not content.strip():
+            return f"{path.suffix.upper()[1:]} document (empty or extraction failed)"
+        preview = content[:500].strip()
+        # word boundary truncation
+        if len(content) > 500:
+            last_space = preview.rfind(" ")
+            if last_space > 200:
+                preview = preview[:last_space]
+        return f"[{path.suffix.upper()[1:]}] {preview}"
 
     if path.suffix.lower() in _HEURISTIC_EXTENSIONS:
         lang = _detect_language(path)
@@ -291,7 +314,11 @@ class AnalysisService:
         """
         mtime, size = self._fs.get_mtime_size(path)
         try:
-            source = self._fs.read_text(path)
+            if path.suffix.lower() in _DOCUMENT_EXTENSIONS:
+                from localforge.infrastructure.document_extractor import extract_text as _extract_doc
+                source = _extract_doc(path)
+            else:
+                source = self._fs.read_text(path)
         except Exception as exc:
             logger.warning("ファイル読み込みエラー: %s — %s", path, exc)
             source = ""

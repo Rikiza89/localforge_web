@@ -29,6 +29,7 @@ CODE_EXTENSIONS = frozenset({
     ".sh", ".bash", ".zsh", ".yaml", ".yml", ".toml", ".json",
     ".md", ".rst", ".txt", ".sql", ".graphql", ".proto",
     ".dockerfile", ".tf", ".hcl",
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".odt", ".ods", ".odp",
 })
 
 
