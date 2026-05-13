@@ -178,6 +178,39 @@ def stream_plan():
     except Exception as exc:
         logger.warning("ProjectIndex/RAGファイルサマリー取得エラー: %s", exc)
 
+    # ── ピン留めコンテキスト ──
+    pinned_contents: list = []
+    try:
+        pinned_paths = project_svc.get_pinned_context(root)
+        if pinned_paths:
+            pi_path = root / ".localforge" / "project_index.json"
+            pi = _get_index_adapter().load_index(pi_path)
+            if pi:
+                pin_chunks, _ = analysis_svc.resolve_pinned_chunks(
+                    root, pinned_paths, pi.file_chunks, max_total=15
+                )
+                _max_pin = 4000
+                for pc in pin_chunks:
+                    fp = root / pc.path
+                    if fp.exists():
+                        try:
+                            pinned_contents.append((pc.path, fp.read_text(encoding="utf-8", errors="replace")[:_max_pin]))
+                        except OSError:
+                            pass
+    except Exception as exc:
+        logger.warning("プランピン留めコンテキスト解決エラー: %s", exc)
+
+    # ── ワークスペースプロジェクトのサマリー ──
+    workspace_summaries: list = []
+    try:
+        ws_roots = project_svc.get_workspace_roots(root)
+        for ws_root, ws_name in ws_roots[:3]:
+            ws_idx = _get_index_adapter().load_index(ws_root / ".localforge" / "project_index.json")
+            if ws_idx:
+                workspace_summaries.append((ws_name, ws_idx.summary[:300]))
+    except Exception as exc:
+        logger.warning("ワークスペースサマリー取得エラー: %s", exc)
+
     gen = generation_svc.stream_plan(
         root=root,
         model=model,
@@ -188,6 +221,8 @@ def stream_plan():
         git_log=git_log,
         file_summaries=file_summaries,
         project_index_json=project_index_json,
+        pinned_contents=pinned_contents or None,
+        workspace_summaries=workspace_summaries or None,
     )
     return _sse_response(gen)
 

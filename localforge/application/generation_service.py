@@ -82,6 +82,8 @@ class GenerationService:
         git_log: str,
         file_summaries: Optional[List[tuple[str, str]]] = None,
         project_index_json: Optional[str] = None,
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+        workspace_summaries: Optional[List[tuple[str, str]]] = None,
     ) -> Generator[dict, None, None]:
         """
         ユーザープロンプトからプロジェクト生成プランをストリーミング生成する。
@@ -111,6 +113,8 @@ class GenerationService:
             file_summaries=file_summaries,
             model_name=model,
             project_index_json=project_index_json,
+            pinned_contents=pinned_contents,
+            workspace_summaries=workspace_summaries,
         )
 
         start_time = time.time()

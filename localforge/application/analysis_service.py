@@ -1015,6 +1015,78 @@ class AnalysisService:
 
         return result_chunks, dep_map
 
+    def load_chunks_for_roots(
+        self,
+        roots: List[Tuple[Path, str]],
+    ) -> List[Tuple[str, str, "FileChunk"]]:
+        """
+        複数プロジェクトルートからチャンクをロードして (project_name, root_str, chunk) タプルとして返す。
+
+        Args:
+            roots: (project_root_path, project_name) のリスト
+
+        Returns:
+            (project_name, root_str, FileChunk) のリスト
+        """
+        result: List[Tuple[str, str, FileChunk]] = []
+        for proj_root, proj_name in roots:
+            idx = self.load_project_index(proj_root)
+            if idx:
+                for chunk in idx.file_chunks:
+                    result.append((proj_name, str(proj_root), chunk))
+        return result
+
+    def resolve_pinned_chunks(
+        self,
+        root: Path,
+        pinned_paths: List[str],
+        chunks: List[FileChunk],
+        max_total: int = 30,
+    ) -> Tuple[List[FileChunk], Dict[str, List[str]]]:
+        """
+        ピン留めパス（ファイルまたはフォルダ）をチャンクに解決し、
+        import依存関係を自動展開して返す。
+
+        フォルダが指定された場合、そのフォルダ以下の全ファイルを選択する。
+        各ファイルのimport先・被import元を自動追加する。
+
+        Args:
+            root: プロジェクトルート
+            pinned_paths: ピン留めされたパスのリスト（プロジェクト相対）
+            chunks: 全 FileChunk のリスト
+            max_total: 最大返却チャンク数
+
+        Returns:
+            (expanded_chunks, dep_map)
+        """
+        chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
+        resolved_files: List[str] = []
+        seen: Set[str] = set()
+
+        for pinned in pinned_paths:
+            norm = pinned.replace("\\", "/").rstrip("/")
+            # フォルダの場合: そのプレフィックスを持つ全チャンクを選択
+            is_folder = norm in {
+                c.path.replace("\\", "/").rsplit("/", 1)[0] for c in chunks
+            } or not any(
+                c.path.replace("\\", "/") == norm for c in chunks
+            )
+            if is_folder:
+                prefix = norm + "/"
+                for c in chunks:
+                    cp = c.path.replace("\\", "/")
+                    if cp == norm or cp.startswith(prefix):
+                        if cp not in seen:
+                            seen.add(cp)
+                            resolved_files.append(cp)
+            else:
+                if norm in chunk_map and norm not in seen:
+                    seen.add(norm)
+                    resolved_files.append(norm)
+
+        # import依存関係を展開（expand_with_dependenciesを再利用）
+        return self.expand_with_dependencies(chunks, resolved_files, max_total=max_total)
+
     def get_top_chunks_by_keywords(
         self,
         chunks: List[FileChunk],

@@ -86,6 +86,8 @@ class ContextService:
         file_summaries: Optional[List[tuple[str, str]]] = None,
         model_name: str = "",
         project_index_json: Optional[str] = None,
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+        workspace_summaries: Optional[List[tuple[str, str]]] = None,
     ) -> str:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
@@ -125,6 +127,16 @@ class ContextService:
             parts.append(f"プロジェクトコンテキスト:\n{context_md}")
         if git_log.strip():
             parts.append(f"最近のgitコミット:\n{git_log}")
+
+        # ピン留めファイル（ユーザーが選択した既存コード）
+        if pinned_contents:
+            pin_texts = "\n".join(f"--- {p} ---\n{c[:4000]}" for p, c in pinned_contents[:10])
+            parts.append(f"[ピン留めされた既存コード — 必ず参照・統合すること]\n{pin_texts}")
+
+        # ワークスペースプロジェクトのサマリー（外部モジュール情報）
+        if workspace_summaries:
+            ws_lines = "\n".join(f"- [{name}] {summary}" for name, summary in workspace_summaries[:5])
+            parts.append(f"ワークスペース内の他プロジェクト（外部モジュールとして参照可能）:\n{ws_lines}")
 
         # モデル特有の指示の追加
         if "deepseek-r1" in model_name.lower():
@@ -483,6 +495,8 @@ class ContextService:
         full_contents: List[tuple[str, str]],
         conversation_history: List[Message],
         dep_map: Optional[Dict[str, List[str]]] = None,
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+        workspace_projects: Optional[List[Dict[str, object]]] = None,
     ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
@@ -529,6 +543,26 @@ class ContextService:
                     "ファイル依存関係マップ（実際のimport文から解決済み）:\n"
                     + "\n".join(dep_lines)
                 )
+
+        # ピン留めファイル（ユーザー選択済み・常にフル内容で注入）
+        if pinned_contents:
+            pin_texts = "\n".join(f"--- {p} ---\n{c}" for p, c in pinned_contents[:15])
+            parts.append(f"[ピン留めコンテキスト — ユーザーが選択したファイル]\n{pin_texts}")
+
+        # ワークスペース内の他プロジェクトのコンテキスト
+        if workspace_projects:
+            for wp in workspace_projects[:3]:
+                wp_name = wp.get("name", "")
+                wp_summaries = wp.get("summaries", [])
+                wp_contents = wp.get("contents", [])
+                if wp_summaries or wp_contents:
+                    header = f"[ワークスペース: {wp_name}]"
+                    lines: List[str] = [header]
+                    for p, s in (wp_summaries or [])[:5]:
+                        lines.append(f"  - {p}: {s}")
+                    for p, c in (wp_contents or [])[:3]:
+                        lines.append(f"  --- {p} ---\n  {c[:2000]}")
+                    parts.append("\n".join(lines))
 
         summaries_text = "\n".join(
             f"- {p}: {s}" for p, s in top_summaries

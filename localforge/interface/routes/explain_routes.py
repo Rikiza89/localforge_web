@@ -203,11 +203,17 @@ def ask_question():
     model = project.config.model
     root = project.root
 
+    # ワークスペースプロジェクトと ピン留めコンテキストを解決して渡す
+    workspace_roots = project_svc.get_workspace_roots(root)
+    pinned_paths = project_svc.get_pinned_context(root)
+
     gen = explanation_svc.stream_answer(
         root=root,
         model=model,
         question=question,
         history=history,
+        workspace_roots=workspace_roots or None,
+        pinned_paths=pinned_paths or None,
     )
     return _sse_response(gen)
 

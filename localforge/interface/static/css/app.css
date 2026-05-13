@@ -1906,3 +1906,146 @@ progress::-moz-progress-bar {
 
 .hf-browse-card { cursor: default; }
 
+/* =========================================================================
+   ワークスペースバー
+   ========================================================================= */
+
+.workspace-bar {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 0;
+  flex-shrink: 0;
+}
+
+.workspace-bar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px 4px;
+}
+
+.workspace-bar-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.workspace-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.workspace-project-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 3px;
+  cursor: default;
+  user-select: none;
+  min-width: 0;
+}
+
+.workspace-project-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.workspace-project-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.workspace-project-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.workspace-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.badge-auto {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+.badge-manual {
+  background: color-mix(in srgb, var(--text-muted) 20%, transparent);
+  color: var(--text-muted);
+}
+
+.workspace-remove-btn {
+  font-size: 10px;
+  opacity: 0;
+  padding: 1px 4px;
+  transition: opacity 0.15s;
+}
+
+.workspace-project-item:hover .workspace-remove-btn {
+  opacity: 1;
+}
+
+/* =========================================================================
+   ピン留めモード
+   ========================================================================= */
+
+.pin-status-bar {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  font-size: 11px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.btn-link:hover { color: var(--text-primary); }
+
+.pin-toggle-btn.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-radius: 4px;
+}
+
+.tree-pin-check {
+  width: 13px;
+  height: 13px;
+  margin-right: 4px;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.tree-node.pinned {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.tree-node.pinned > .tree-node-label {
+  color: var(--accent);
+}

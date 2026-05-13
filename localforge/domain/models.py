@@ -94,6 +94,22 @@ class GenerationPlan(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# ワークスペース（複数プロジェクト管理）
+# ---------------------------------------------------------------------------
+
+class WorkspaceEntry(BaseModel):
+    """ワークスペースに属するプロジェクトのエントリ。"""
+    root: str               # 絶対パス
+    name: str               # フォルダ名
+    auto: bool = False      # True = .localforgeスキャンで自動検出
+
+
+class WorkspaceState(BaseModel):
+    """ワークスペースの状態（.localforge/workspace.json に保存）。"""
+    manual_entries: List["WorkspaceEntry"] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # ファイルチャンク（インデックス用）
 # ---------------------------------------------------------------------------
 
@@ -189,6 +205,8 @@ class ProjectConfig(BaseModel):
     llm_provider: str = "ollama"
     # HuggingFace GGUF モデルファイルの絶対パス
     hf_model_path: str = ""
+    # コンテキストピン留めされたパス（プロジェクト相対、ファイルまたはフォルダ）
+    context_pinned: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)

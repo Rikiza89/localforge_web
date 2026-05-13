@@ -54,10 +54,29 @@
 
     <!-- ファイルツリー（左サイドバー） -->
     <aside class="file-tree-panel" id="left-sidebar">
+      <!-- ワークスペースバー -->
+      <div class="workspace-bar" id="workspace-bar" style="display:none;">
+        <div class="workspace-bar-header">
+          <span class="workspace-bar-label">🔗 ワークスペース</span>
+          <button class="icon-btn workspace-add-btn" id="workspace-add-btn" title="プロジェクトを追加">＋</button>
+        </div>
+        <div class="workspace-projects" id="workspace-projects"></div>
+      </div>
+
       <div class="panel-header">
         <span>ファイルツリー</span>
-        <button class="icon-btn" id="refresh-tree-btn" title="ツリーを更新">↻</button>
+        <div class="panel-header-actions">
+          <button class="icon-btn pin-toggle-btn" id="pin-mode-btn" title="ピン留めモードを切り替え">📎</button>
+          <button class="icon-btn" id="refresh-tree-btn" title="ツリーを更新">↻</button>
+        </div>
       </div>
+
+      <!-- ピン留めステータスバー -->
+      <div class="pin-status-bar" id="pin-status-bar" style="display:none;">
+        <span id="pin-status-text">0件ピン留め</span>
+        <button class="btn-link" id="pin-clear-btn">クリア</button>
+      </div>
+
       <div class="file-tree-container" id="file-tree">
         <div class="empty-state">フォルダを開いてください</div>
       </div>
@@ -281,6 +300,7 @@
     </div>
   </div>
 
+  <script src="{{ url_for('static', filename='js/workspace.js') }}"></script>
   <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
   <script>
     if (typeof marked !== "undefined") {

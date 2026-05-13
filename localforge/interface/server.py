@@ -150,12 +150,14 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     from localforge.interface.routes.explain_routes import bp as explain_bp
     from localforge.interface.routes.git_routes import bp as git_bp
     from localforge.interface.routes.hf_routes import bp as hf_bp
+    from localforge.interface.routes.workspace_routes import bp as workspace_bp
 
     app.register_blueprint(project_bp)
     app.register_blueprint(generation_bp)
     app.register_blueprint(explain_bp)
     app.register_blueprint(git_bp)
     app.register_blueprint(hf_bp)
+    app.register_blueprint(workspace_bp)
 
     # ---------------------------------------------------------------------------
     # メインルート（SPAシェル）

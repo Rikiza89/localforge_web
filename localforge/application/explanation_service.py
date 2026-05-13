@@ -191,6 +191,8 @@ class ExplanationService:
         model: str,
         question: str,
         history: List[Message],
+        workspace_roots: Optional[List[tuple[Path, str]]] = None,
+        pinned_paths: Optional[List[str]] = None,
     ) -> Generator[dict, None, None]:
         """
         Q&A質問への回答をSSEイベントとしてストリーミング生成する。
@@ -217,6 +219,60 @@ class ExplanationService:
         index_dict = project_index.model_dump(include={"project_name", "summary", "total_files", "indexed_files"})
         index_dict["files"] = [c.path for c in chunks]
         index_json = json.dumps(index_dict, ensure_ascii=False)
+
+        # ── ピン留めコンテキスト解決 ──
+        pinned_chunk_contents: List[tuple[str, str]] = []
+        if pinned_paths:
+            yield {"status": "ピン留めコンテキストを展開中..."}
+            try:
+                pinned_chunks, _ = self._analysis.resolve_pinned_chunks(
+                    root, pinned_paths, chunks, max_total=25
+                )
+                _max_pin_chars = self._context.max_qa_file_chars()
+                for pc in pinned_chunks:
+                    fp = root / pc.path
+                    if fp.exists():
+                        try:
+                            content = fp.read_text(encoding="utf-8", errors="replace")
+                            pinned_chunk_contents.append((pc.path, content[:_max_pin_chars]))
+                        except OSError:
+                            pass
+            except Exception as exc:
+                logger.warning("ピン留めコンテキスト解決エラー: %s", exc)
+
+        # ── ワークスペース他プロジェクトのコンテキスト ──
+        workspace_project_data: List[dict] = []
+        if workspace_roots:
+            yield {"status": "ワークスペースプロジェクトを検索中..."}
+            for ws_root, ws_name in workspace_roots[:3]:
+                try:
+                    ws_idx = self._analysis.load_project_index(ws_root)
+                    if not ws_idx:
+                        continue
+                    ws_chunks = ws_idx.file_chunks
+                    ws_top = self._analysis.get_top_chunks_semantic(ws_chunks, question, top_n=5)
+                    ws_exp_chunks, _ = self._analysis.expand_with_dependencies(
+                        ws_chunks, [c.path for c in ws_top], max_total=8
+                    )
+                    ws_summaries = [(c.path, c.summary or "") for c in ws_exp_chunks if c.summary]
+                    ws_contents: List[tuple[str, str]] = []
+                    _max_ws_chars = self._context.max_qa_file_chars() // 2
+                    for wc in ws_exp_chunks[:3]:
+                        fp = ws_root / wc.path
+                        if fp.exists():
+                            try:
+                                content = fp.read_text(encoding="utf-8", errors="replace")
+                                ws_contents.append((wc.path, content[:_max_ws_chars]))
+                            except OSError:
+                                pass
+                    workspace_project_data.append({
+                        "name": ws_name,
+                        "root": str(ws_root),
+                        "summaries": ws_summaries,
+                        "contents": ws_contents,
+                    })
+                except Exception as exc:
+                    logger.warning("ワークスペース [%s] Q&Aエラー: %s", ws_name, exc)
 
         # A6 フェーズ 1: LLM にどのファイルが必要か選ばせる
         # dep_hints は全チャンクの imports_resolved からプリビルドする（上位200件以内）
@@ -283,6 +339,8 @@ class ExplanationService:
             full_contents=full_contents,
             conversation_history=history[-10:],
             dep_map=dep_map,
+            pinned_contents=pinned_chunk_contents or None,
+            workspace_projects=workspace_project_data or None,
         )
 
         start_time = time.time()

@@ -170,6 +170,10 @@ async function openProject(pathOverride = null) {
       await loadResumeState();
     }
 
+    // ワークスペースとピン留め状態を読み込む
+    if (typeof loadWorkspace === "function") await loadWorkspace();
+    if (typeof loadPinnedFromServer === "function") await loadPinnedFromServer();
+
     // ステータスバーを更新
     await refreshProjectStatus();
     updateStatusBar(`プロジェクトを開きました: ${data.project_root}`);
