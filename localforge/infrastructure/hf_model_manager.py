@@ -400,20 +400,23 @@ def get_manual_instructions(repo_id: str, model_name: str = "") -> Dict:
         "cli_cmd":     f'huggingface-cli download {repo_id} --local-dir "{dest_display}"',
         "python_cmd":  (
             f'from huggingface_hub import snapshot_download\n'
-            f'snapshot_download("{repo_id}", local_dir="{dest_display}")'
+            f'snapshot_download("{repo_id}", local_dir=r"{dest_display}")'
+        ),
+        "python_oneliner": (
+            f'from huggingface_hub import snapshot_download; '
+            f'snapshot_download("{repo_id}", local_dir=r"{dest_display}")'
         ),
         "steps": [
-            f"1. huggingface-hub CLI でダウンロード（推奨）:",
-            f"   huggingface-cli download {repo_id} --local-dir \"{dest_display}\"",
+            f"1. Python でダウンロード（推奨・venv から実行）:",
+            f"   venv\\Scripts\\python -c \"from huggingface_hub import snapshot_download; snapshot_download('{repo_id}', local_dir=r'{dest_display}')\"",
             f"",
-            f"2. または Python スクリプトで:",
-            f"   from huggingface_hub import snapshot_download",
-            f"   snapshot_download(\"{repo_id}\", local_dir=\"{dest_display}\")",
+            f"2. または huggingface-cli（venv を有効化している場合）:",
+            f"   huggingface-cli download {repo_id} --local-dir \"{dest_display}\"",
             f"",
             f"3. ダウンロード先（自動作成済み）:",
             f"   {dest_display}",
             f"",
-            f"4. ダウンロード完了後、アプリに戻り「↻ 再スキャン」をクリックしてください。",
+            f"4. ダウンロード完了後、「ローカルモデル」タブで「↻ 再スキャン」をクリックしてロードしてください。",
         ],
     }
 

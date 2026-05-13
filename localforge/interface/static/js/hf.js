@@ -341,24 +341,24 @@ function _showInstructions(inst) {
   panel.style.display = "";
   panel.dataset.repoId = inst.repo_id || "";
 
-  const destDisplay = escapeHtml(inst.dest_display || inst.dest_dir || "");
-  const cliCmd      = escapeHtml(inst.cli_cmd || "");
-  const pyCmd       = escapeHtml(inst.python_cmd || "");
+  const destDisplay  = inst.dest_display || inst.dest_dir || "";
+  const oneliner     = inst.python_oneliner || "";
+  const cliCmd       = inst.cli_cmd || "";
 
   content.innerHTML = `
 <b>${escapeHtml(inst.model_name)}</b>
 
-<b>1. huggingface-cli でダウンロード（推奨）:</b>
-   <code>${cliCmd}</code>
-   <button class="hf-copy-btn" data-text="${cliCmd}" onclick="_copyText(this.dataset.text)">コピー</button>
+<b>1. コマンドプロンプトで実行（venv フォルダから）:</b>
+   <code>${escapeHtml(oneliner)}</code>
+   <button class="hf-copy-btn" data-text="${escapeHtml(oneliner)}" onclick="_copyText(this.dataset.text)">コピー</button>
 
-<b>2. Python スクリプトで:</b>
-   <code>${pyCmd}</code>
-   <button class="hf-copy-btn" data-text="${pyCmd}" onclick="_copyText(this.dataset.text)">コピー</button>
+<b>2. または huggingface-cli（venv を activate 済みの場合）:</b>
+   <code>${escapeHtml(cliCmd)}</code>
+   <button class="hf-copy-btn" data-text="${escapeHtml(cliCmd)}" onclick="_copyText(this.dataset.text)">コピー</button>
 
 <b>3. ダウンロード先（自動作成済み）:</b>
-   <code>${destDisplay}</code>
-   <button class="hf-copy-btn" data-text="${destDisplay}" onclick="_copyText(this.dataset.text)">コピー</button>
+   <code>${escapeHtml(destDisplay)}</code>
+   <button class="hf-copy-btn" data-text="${escapeHtml(destDisplay)}" onclick="_copyText(this.dataset.text)">コピー</button>
 
 <b>4.</b> ダウンロード完了後、「ローカルモデル」タブで「↻ 再スキャン」をクリックしてロードしてください。`;
 }
