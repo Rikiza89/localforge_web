@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from localforge.domain.exceptions import GitOperationError
 
@@ -234,3 +235,136 @@ class GitAdapter:
         """
         git_dir = path / ".git"
         return git_dir.is_dir()
+
+    # ------------------------------------------------------------------
+    # チェックポイント・ブランチ操作
+    # ------------------------------------------------------------------
+
+    def create_checkpoint(self, path: Path, label: str = "") -> str:
+        """
+        現在の状態をコミットしてチェックポイントタグを作成する。
+        未コミット変更がある場合はまず自動コミットする。
+
+        Args:
+            path: リポジトリルート
+            label: チェックポイントラベル（プラン名など）
+
+        Returns:
+            チェックポイントのコミットハッシュ（失敗時は空文字列）
+        """
+        if not self._is_git_repo(path):
+            return ""
+        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        tag_label = label or "batch"
+        msg = f"[LocalForge checkpoint] pre-{tag_label} @ {ts}"
+        try:
+            # 未コミット変更があればコミットしておく
+            status = self._run_no_raise(["status", "--short"], path).strip()
+            if status:
+                self.commit_all(path, msg)
+            commit_hash = self._run_no_raise(
+                ["rev-parse", "--short", "HEAD"], path
+            ).strip()
+            # 軽量タグでチェックポイントをマーク
+            tag_name = f"localforge-cp-{ts}"
+            self._run_no_raise(["tag", tag_name], path)
+            logger.info("チェックポイント作成: %s (%s)", msg, commit_hash)
+            return commit_hash
+        except Exception as exc:
+            logger.warning("チェックポイント作成失敗: %s", exc)
+            return ""
+
+    def rollback_to_checkpoint(self, path: Path, commit_hash: str) -> bool:
+        """
+        指定コミットハッシュに hard reset する。
+
+        Args:
+            path: リポジトリルート
+            commit_hash: ロールバック先のコミットハッシュ
+
+        Returns:
+            成功時 True
+        """
+        if not self._is_git_repo(path) or not commit_hash:
+            return False
+        try:
+            self._run(["reset", "--hard", commit_hash], path)
+            logger.info("ロールバック完了: %s", commit_hash)
+            return True
+        except GitOperationError as exc:
+            logger.error("ロールバック失敗: %s", exc)
+            return False
+
+    def get_last_checkpoint(self, path: Path) -> Optional[dict]:
+        """
+        最新の LocalForge チェックポイントタグを返す。
+
+        Returns:
+            {"hash": ..., "tag": ..., "message": ...} または None
+        """
+        if not self._is_git_repo(path):
+            return None
+        try:
+            # localforge-cp-* タグのうち最新を取得
+            output = self._run_no_raise(
+                ["tag", "--list", "localforge-cp-*", "--sort=-creatordate"],
+                path,
+            ).strip()
+            if not output:
+                return None
+            latest_tag = output.splitlines()[0].strip()
+            commit_hash = self._run_no_raise(
+                ["rev-list", "-n", "1", latest_tag], path
+            ).strip()[:8]
+            msg = self._run_no_raise(
+                ["log", "-1", "--pretty=%s", latest_tag], path
+            ).strip()
+            return {"hash": commit_hash, "tag": latest_tag, "message": msg}
+        except Exception:
+            return None
+
+    def create_and_switch_branch(self, path: Path, branch_name: str) -> str:
+        """
+        新しいブランチを作成してスイッチする。
+
+        Args:
+            path: リポジトリルート
+            branch_name: 作成するブランチ名
+
+        Returns:
+            ブランチ名（失敗時は空文字列）
+        """
+        if not self._is_git_repo(path):
+            return ""
+        try:
+            self._run(["checkout", "-b", branch_name], path)
+            logger.info("ブランチ作成・スイッチ: %s", branch_name)
+            return branch_name
+        except GitOperationError as exc:
+            logger.error("ブランチ作成失敗 [%s]: %s", branch_name, exc)
+            return ""
+
+    def merge_branch(self, path: Path, source_branch: str, target_branch: str = "main") -> bool:
+        """
+        source_branch を target_branch にマージする。
+
+        Args:
+            path: リポジトリルート
+            source_branch: マージ元ブランチ
+            target_branch: マージ先ブランチ
+
+        Returns:
+            成功時 True
+        """
+        if not self._is_git_repo(path):
+            return False
+        try:
+            current = self.get_current_branch(path)
+            if current != target_branch:
+                self._run(["checkout", target_branch], path)
+            self._run(["merge", "--no-ff", source_branch], path)
+            logger.info("マージ完了: %s → %s", source_branch, target_branch)
+            return True
+        except GitOperationError as exc:
+            logger.error("マージ失敗 [%s → %s]: %s", source_branch, target_branch, exc)
+            return False

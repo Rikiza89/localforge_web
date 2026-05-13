@@ -220,6 +220,16 @@ function startStream(url, outputEl, handlers) {
       updateStatusBar(data.status);
       return;
     }
+
+    if (data.checkpoint !== undefined) {
+      if (handlers.onCheckpoint) handlers.onCheckpoint(data.checkpoint);
+      return;
+    }
+
+    if (data.warning !== undefined) {
+      if (handlers.onWarning) handlers.onWarning(data.warning);
+      return;
+    }
   }
 
   function _open() {
@@ -334,6 +344,15 @@ async function startPostStream(url, body, outputEl, handlers) {
         if (data.progress !== undefined && handlers.onProgress) {
           const { done: d, total, current_file } = data.progress;
           handlers.onProgress(d, total, current_file || "");
+        }
+        if (data.status !== undefined) {
+          updateStatusBar(data.status);
+        }
+        if (data.checkpoint !== undefined && handlers.onCheckpoint) {
+          handlers.onCheckpoint(data.checkpoint);
+        }
+        if (data.warning !== undefined && handlers.onWarning) {
+          handlers.onWarning(data.warning);
         }
       }
     }

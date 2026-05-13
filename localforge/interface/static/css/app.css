@@ -1703,3 +1703,64 @@ progress::-moz-progress-bar {
 .tree-node.pinned > .tree-node-label {
   color: var(--accent);
 }
+
+/* =========================================================================
+   チェックポイント・ロールバック
+   ========================================================================= */
+
+.checkpoint-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
+  border: 1px solid color-mix(in srgb, var(--success) 35%, transparent);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: default;
+}
+
+.checkpoint-badge::before { content: "🔖 "; }
+
+.btn-warning {
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+  color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+}
+
+.btn-warning:hover {
+  background: color-mix(in srgb, var(--warning) 35%, transparent);
+}
+
+/* ブランチ生成トグル */
+.branch-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.branch-toggle-label input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+}
+
+.branch-toggle-label:hover { color: var(--text-primary); }
+
+/* 警告メッセージ（warning イベント） */
+.stream-warning {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  border-left: 3px solid var(--warning);
+  padding: 4px 8px;
+  margin: 2px 0;
+  border-radius: 0 4px 4px 0;
+  font-size: 12px;
+}

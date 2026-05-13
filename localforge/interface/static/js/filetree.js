@@ -492,6 +492,9 @@ async function triggerRegenerateFile(filePath) {
         showAlert(`ファイルを再生成しました: ${path}`, "success");
         refreshFileTree();
       },
+      onWarning: (msg) => {
+        showAlert(msg, "warning", 8000);
+      },
       onDone: () => { updateStatusBar("再生成完了"); },
       onError: (err) => {
         showAlert(`再生成エラー: ${err}`, "error");

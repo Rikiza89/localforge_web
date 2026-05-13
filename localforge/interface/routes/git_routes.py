@@ -155,3 +155,79 @@ def git_status():
         return jsonify({"status": status_text, "branch": branch})
     except GitOperationError as exc:
         return _error_response(exc)
+
+
+@bp.route("/checkpoint", methods=["GET"])
+def git_checkpoint():
+    """
+    最新の LocalForge チェックポイント情報を返す。
+
+    Response JSON:
+        checkpoint: {hash, tag, message} または null
+    """
+    project_svc = _get_project_svc()
+    git = _get_git()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    checkpoint = git.get_last_checkpoint(project.root)
+    return jsonify({"checkpoint": checkpoint})
+
+
+@bp.route("/rollback", methods=["POST"])
+def git_rollback():
+    """
+    指定チェックポイントにロールバックする。
+
+    Request JSON:
+        hash (str): ロールバック先のコミットハッシュ
+
+    Response JSON:
+        ok: bool
+        message: str
+    """
+    project_svc = _get_project_svc()
+    git = _get_git()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    data = request.get_json(silent=True) or {}
+    commit_hash = data.get("hash", "").strip()
+    if not commit_hash:
+        return jsonify({"error": "BadRequest", "message": "hash が必要です"}), 400
+
+    ok = git.rollback_to_checkpoint(project.root, commit_hash)
+    if ok:
+        return jsonify({"ok": True, "message": f"ロールバック完了: {commit_hash}"})
+    return jsonify({"ok": False, "message": "ロールバックに失敗しました"}), 500
+
+
+@bp.route("/branch", methods=["POST"])
+def git_branch():
+    """
+    新しいブランチを作成してスイッチする。
+
+    Request JSON:
+        name (str): ブランチ名（省略時は localforge/gen-{timestamp}）
+
+    Response JSON:
+        branch: 作成したブランチ名
+    """
+    import time as _time
+    project_svc = _get_project_svc()
+    git = _get_git()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    data = request.get_json(silent=True) or {}
+    name = data.get("name", "").strip()
+    if not name:
+        name = f"localforge/gen-{int(_time.time())}"
+
+    branch = git.create_and_switch_branch(project.root, name)
+    if branch:
+        return jsonify({"branch": branch})
+    return jsonify({"error": "BranchError", "message": "ブランチ作成に失敗しました"}), 500

@@ -411,22 +411,28 @@ def _synthesize_plan_for_file(root: Path, file_path: str) -> GenerationPlan:
     project_description = project_index.summary if project_index else ""
 
     # 各ファイルの最初のチャンクのサマリーを使ってPlannedFileを合成
+    # 既存ファイルは action="modify" に設定して誤上書きを防ぐ
     file_map: dict[str, str] = {}
     for chunk in chunks:
         if chunk.path not in file_map:
             file_map[chunk.path] = chunk.summary or chunk.path
 
     planned_files = [
-        PlannedFile(path=p, description=s, action="create")
+        PlannedFile(
+            path=p,
+            description=s,
+            action="modify" if (root / p).exists() else "create",
+        )
         for p, s in file_map.items()
     ]
 
     # 対象ファイルがインデックスにない場合でも必ずリストに含める
     if not any(f.path == file_path for f in planned_files):
+        action = "modify" if (root / file_path).exists() else "create"
         planned_files.append(PlannedFile(
             path=file_path,
             description=f"{file_path} を再生成する",
-            action="create",
+            action=action,
         ))
 
     return GenerationPlan(

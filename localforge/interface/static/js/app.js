@@ -15,6 +15,8 @@ let _currentPlanText = "";
 let _cancelGenStream = null;
 // インデックス構築済みフラグ
 let _indexBuilt = false;
+// 最後のチェックポイントハッシュ
+let _lastCheckpointHash = null;
 
 /**
  * RAGインデックスの有無に応じてExplainタブのボタン状態を切り替える。
@@ -87,6 +89,63 @@ function _unlockUI() {
 
   const stopBtn = document.getElementById("global-stop-btn");
   if (stopBtn) stopBtn.style.display = "none";
+}
+
+// =========================================================================
+// チェックポイント管理
+// =========================================================================
+
+function _setCheckpoint(hash) {
+  _lastCheckpointHash = hash;
+  const badge = document.getElementById("checkpoint-badge");
+  const rollbackBtn = document.getElementById("rollback-btn");
+  if (badge) {
+    badge.textContent = hash;
+    badge.style.display = "";
+    badge.title = `チェックポイント: ${hash} — ロールバック可能`;
+  }
+  if (rollbackBtn) rollbackBtn.style.display = "";
+}
+
+function _clearCheckpoint() {
+  _lastCheckpointHash = null;
+  const badge = document.getElementById("checkpoint-badge");
+  const rollbackBtn = document.getElementById("rollback-btn");
+  if (badge) badge.style.display = "none";
+  if (rollbackBtn) rollbackBtn.style.display = "none";
+}
+
+async function _loadCheckpointFromServer() {
+  if (!_currentProjectRoot) return;
+  try {
+    const data = await apiRequest("/api/git/checkpoint", "GET");
+    if (data.checkpoint && data.checkpoint.hash) {
+      _setCheckpoint(data.checkpoint.hash);
+    } else {
+      _clearCheckpoint();
+    }
+  } catch (e) {
+    _clearCheckpoint();
+  }
+}
+
+async function _doRollback() {
+  if (!_lastCheckpointHash) return;
+  if (!confirm(`チェックポイント ${_lastCheckpointHash} にロールバックしますか？\n⚠ この操作は元に戻せません。`)) return;
+  try {
+    const res = await apiRequest("/api/git/rollback", "POST", { hash: _lastCheckpointHash });
+    if (res.ok) {
+      showAlert(`ロールバック完了: ${_lastCheckpointHash}`, "success");
+      _clearCheckpoint();
+      refreshFileTree();
+      refreshContextPanel();
+      refreshGitLog();
+    } else {
+      showAlert(`ロールバック失敗: ${res.message}`, "error");
+    }
+  } catch (err) {
+    showAlert(`ロールバックエラー: ${err.message}`, "error");
+  }
 }
 
 // =========================================================================
@@ -164,6 +223,9 @@ async function openProject(pathOverride = null) {
     // ワークスペースとピン留め状態を読み込む
     if (typeof loadWorkspace === "function") await loadWorkspace();
     if (typeof loadPinnedFromServer === "function") await loadPinnedFromServer();
+
+    // チェックポイント状態を復元
+    await _loadCheckpointFromServer();
 
     // ステータスバーを更新
     await refreshProjectStatus();
@@ -512,6 +574,19 @@ async function approvePlanAndGenerate() {
     catch (e) { console.warn("モデル同期エラー:", e.message); }
   }
 
+  // 新ブランチで生成するか確認
+  const branchToggle = document.getElementById("gen-branch-toggle");
+  if (branchToggle && branchToggle.checked) {
+    try {
+      const branchRes = await apiRequest("/api/git/branch", "POST", {});
+      if (branchRes.branch) {
+        showAlert(`新ブランチ「${branchRes.branch}」で生成します`, "success", 3000);
+      }
+    } catch (e) {
+      console.warn("ブランチ作成エラー:", e.message);
+    }
+  }
+
   const _es = startStream("/api/generate/start", genStream, {
     onProgress: (done, total, currentFile) => {
       if (genProgress) {
@@ -525,6 +600,19 @@ async function approvePlanAndGenerate() {
     },
     onFileWritten: (path) => {
       refreshFileTree();
+    },
+    onCheckpoint: (hash) => {
+      _setCheckpoint(hash);
+    },
+    onWarning: (msg) => {
+      if (genStream) {
+        const div = document.createElement("div");
+        div.className = "stream-warning";
+        div.textContent = msg;
+        genStream.appendChild(div);
+        div.scrollIntoView({ block: "end" });
+      }
+      showAlert(msg, "warning", 8000);
     },
     onDone: () => {
       _unlockUI();
@@ -1043,6 +1131,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       updateStatusBar("生成を停止しました");
     });
   }
+
+  // ロールバックボタン
+  const rollbackBtn = document.getElementById("rollback-btn");
+  if (rollbackBtn) rollbackBtn.addEventListener("click", _doRollback);
 
   // Explainタブのボタン
   const buildIndexBtn = document.getElementById("build-index-btn");

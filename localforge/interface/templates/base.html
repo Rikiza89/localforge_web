@@ -31,6 +31,9 @@
         <button class="btn btn-danger" id="global-stop-btn" style="display:none" title="生成を停止">
           ⏹ 停止
         </button>
+        <button class="btn btn-warning btn-sm" id="rollback-btn" style="display:none" title="最後のチェックポイントにロールバック">
+          ⎌ 元に戻す
+        </button>
       </div>
     </header>
 
@@ -145,6 +148,7 @@
       <span class="status-vram" id="status-vram"></span>
       <span class="status-tokens" id="status-tokens"></span>
       <span class="status-git" id="status-git"></span>
+      <span class="checkpoint-badge" id="checkpoint-badge" style="display:none" title="最後の生成チェックポイント"></span>
       <span class="status-port">:7331</span>
     </footer>
   </div>

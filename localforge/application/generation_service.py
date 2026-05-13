@@ -16,6 +16,7 @@ from typing import Generator, List, Optional, Tuple
 from localforge.application.context_service import ContextService
 from localforge.domain.exceptions import PlanParseError
 from localforge.domain.models import GenerationLogEntry, GenerationPlan, PlannedFile
+from localforge.infrastructure.code_validator import delete_backup, restore_backup, validate
 from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
 from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
@@ -234,6 +235,12 @@ class GenerationService:
         # .bak ファイルを git 管理対象外にする（.gitignore への追記）
         self._ensure_bak_ignored(root)
 
+        # 生成前チェックポイント（ロールバック基点）
+        if start_idx == 0:
+            cp_hash = self._git.create_checkpoint(root, plan.project_name)
+            if cp_hash:
+                yield {"checkpoint": cp_hash, "status": f"🔖 チェックポイント作成: {cp_hash}"}
+
         for idx, planned_file in enumerate(files[start_idx:], start=start_idx):
             if _cancel_flag:
                 yield {"error": "キャンセルされました"}
@@ -260,7 +267,15 @@ class GenerationService:
                         pass
 
             file_path = root / planned_file.path
-            is_modify = planned_file.action == "modify" and file_path.exists()
+            # ファイルが既に存在する場合は action="create" でも修正路に昇格する
+            file_exists_on_disk = file_path.exists()
+            is_modify = planned_file.action == "modify" or (
+                planned_file.action == "create" and file_exists_on_disk
+            )
+            if planned_file.action == "create" and file_exists_on_disk:
+                logger.info(
+                    "既存ファイルのため create → modify に昇格: %s", planned_file.path
+                )
             log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
             start_time = time.time()
 
@@ -369,6 +384,16 @@ class GenerationService:
                     yield {"file_written": planned_file.path}
                     continue
 
+                # 部分失敗ガード: 失敗率 > 50% の場合はバックアップから復元してスキップ
+                total_blocks = applied + len(failed)
+                if total_blocks > 0 and len(failed) / total_blocks > 0.5:
+                    yield {"warning": (
+                        f"⚠ {planned_file.path}: {len(failed)}/{total_blocks}件のブロックが失敗 "
+                        f"— バックアップから復元してスキップします"
+                    )}
+                    restore_backup(file_path)
+                    continue
+
                 if failed:
                     yield {"status": (
                         f"⚠ {planned_file.path}: {len(failed)}件のブロックが最終的に一致しませんでした"
@@ -382,10 +407,19 @@ class GenerationService:
                     yield {"error": str(exc)}
                     continue
 
+                # 構文検証
+                ok, err_msg = validate(file_path, modified_content)
+                if not ok:
+                    yield {"warning": f"⚠ {planned_file.path}: 構文エラー — {err_msg} — バックアップから復元"}
+                    restore_backup(file_path)
+                    continue
+                delete_backup(file_path)
+
+                line_count = modified_content.count("\n") + 1
                 try:
                     self._git.commit_all(
                         root,
-                        f"LocalForge: {planned_file.path} を編集 ({applied}件の変更)",
+                        f"LocalForge [modify] {planned_file.path} — {applied}件のブロック適用, {line_count}行, 検証済み ✓",
                     )
                 except Exception as exc:
                     logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
@@ -432,9 +466,22 @@ class GenerationService:
                     yield {"error": str(exc)}
                     continue
 
+                # 構文検証
+                ok, err_msg = validate(file_path, file_content)
+                if not ok:
+                    yield {"warning": f"⚠ {planned_file.path}: 構文エラー — {err_msg}"}
+                    # 新規作成の場合はファイルを削除してスキップ
+                    try:
+                        file_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    continue
+
+                line_count = file_content.count("\n") + 1
                 try:
                     self._git.commit_all(
-                        root, f"LocalForge: {planned_file.path} を生成"
+                        root,
+                        f"LocalForge [create] {planned_file.path} — {line_count}行, 検証済み ✓",
                     )
                 except Exception as exc:
                     logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
@@ -491,7 +538,10 @@ class GenerationService:
                     pass
 
         full_path = root / planned_file.path
-        is_modify = planned_file.action == "modify" and full_path.exists()
+        file_exists_on_disk = full_path.exists()
+        is_modify = planned_file.action == "modify" or (
+            planned_file.action == "create" and file_exists_on_disk
+        )
 
         if is_modify:
             self._ensure_bak_ignored(root)
@@ -547,6 +597,17 @@ class GenerationService:
                 yield {"done": True}
                 return
 
+            # 部分失敗ガード
+            total_blocks = applied + len(failed)
+            if total_blocks > 0 and len(failed) / total_blocks > 0.5:
+                yield {"warning": (
+                    f"⚠ {planned_file.path}: {len(failed)}/{total_blocks}件のブロックが失敗 "
+                    f"— バックアップから復元"
+                )}
+                restore_backup(full_path)
+                yield {"done": True}
+                return
+
             if failed:
                 yield {"status": f"⚠ {len(failed)}件のブロックが一致しませんでした"}
 
@@ -556,10 +617,20 @@ class GenerationService:
                 yield {"error": str(exc)}
                 return
 
+            # 構文検証
+            ok, err_msg = validate(full_path, modified_content)
+            if not ok:
+                yield {"warning": f"⚠ {planned_file.path}: 構文エラー — {err_msg} — バックアップから復元"}
+                restore_backup(full_path)
+                yield {"done": True}
+                return
+            delete_backup(full_path)
+
+            line_count = modified_content.count("\n") + 1
             try:
                 self._git.commit_all(
                     root,
-                    f"LocalForge: {planned_file.path} を再編集 ({applied}件の変更)",
+                    f"LocalForge [modify] {planned_file.path} — {applied}件のブロック適用, {line_count}行, 検証済み ✓",
                 )
             except Exception as exc:
                 logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
@@ -591,8 +662,22 @@ class GenerationService:
                 yield {"error": str(exc)}
                 return
 
+            ok, err_msg = validate(full_path, file_content)
+            if not ok:
+                yield {"warning": f"⚠ {planned_file.path}: 構文エラー — {err_msg}"}
+                try:
+                    full_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                yield {"done": True}
+                return
+
+            line_count = file_content.count("\n") + 1
             try:
-                self._git.commit_all(root, f"LocalForge: {planned_file.path} を再生成")
+                self._git.commit_all(
+                    root,
+                    f"LocalForge [create] {planned_file.path} — {line_count}行, 検証済み ✓",
+                )
             except Exception as exc:
                 logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
 
