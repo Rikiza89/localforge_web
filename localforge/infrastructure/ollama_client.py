@@ -101,6 +101,37 @@ class OllamaClient:
         except requests.RequestException:
             return False
 
+    def is_model_loaded(self, model: str) -> Optional[bool]:
+        """
+        Ollama /api/ps を使って指定モデルが現在メモリに存在するか確認する。
+        None: 確認できなかった（APIエラー等）
+        True: ロード済み
+        False: 未ロード（cold start が発生する）
+
+        Args:
+            model: 確認するモデル名
+
+        Returns:
+            True / False / None
+        """
+        try:
+            resp = self._session.get(
+                f"{self._base_url}/api/ps",
+                timeout=(_CONNECT_TIMEOUT, 5),
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            running = data.get("models", [])
+            model_base = model.split(":")[0].lower()
+            for m in running:
+                name = m.get("name", m.get("model", "")).lower()
+                if model_base in name or model.lower() in name:
+                    return True
+            return False
+        except Exception:
+            return None
+
     def list_models(self) -> List[str]:
         """
         Ollamaで利用可能なモデルの一覧を返す。

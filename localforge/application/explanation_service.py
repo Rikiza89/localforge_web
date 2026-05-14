@@ -310,25 +310,28 @@ class ExplanationService:
                     logger.warning("ワークスペース [%s] Q&Aエラー: %s", ws_name, exc)
 
         # ── Phase C: ファイル選択 ──
-        # ピン留めファイルが存在する場合は LLM によるファイル選択 (Phase 1) をスキップする。
-        # ユーザーが既に関連ファイルを指定しているため、余分な LLM 呼び出しは不要かつ CPU では数分かかる。
+        # スキップ条件:
+        #   1. ピン留めファイルが存在する (ユーザーが既に選択済み)
+        #   2. CPU専用デバイス (cold start で必ず timeout するため semantic search の方が速い)
         selected_paths: List[str] = []
+        _skip_phase1 = bool(pinned_base_chunks) or not getattr(self._llm, "cuda_available", False)
         if pinned_base_chunks:
-            # ピン留めを優先。セマンティック検索で補完のみ行う
             yield {"phase": "ファイル選択", "detail": f"ピン留め {len(pinned_base_chunks)} ファイルを使用 (LLM選択スキップ)"}
-            yield {"status": f"ピン留めファイルを使用中 ({len(pinned_base_chunks)} 件) — LLMファイル選択をスキップ"}
+            yield {"status": f"ピン留めファイルを使用中 ({len(pinned_base_chunks)} 件)"}
+        elif _skip_phase1:
+            # CPU専用: LLMを余分に呼ばずセマンティック検索に直行する
+            yield {"phase": "ファイル選択", "detail": "CPU専用モード — セマンティック検索で直接ファイルを選択"}
+            yield {"status": "セマンティック検索でファイルを選択中..."}
         else:
-            # ピン留めなし: LLM にどのファイルが必要か選ばせる (Phase 1)
+            # GPU あり: LLM にどのファイルが必要か選ばせる (Phase 1)
             dep_hints = {c.path: c.imports_resolved for c in chunks if c.imports_resolved}
             yield {"phase": "LLMファイル選択中", "detail": f"{len(all_summaries)} ファイルから関連ファイルを選択"}
-            yield {"status": "LLMがファイルを選択中... (CPU では数分かかる場合があります)"}
+            yield {"status": "LLMがファイルを選択中..."}
             try:
                 sel_prompt = self._context.build_qa_file_selection_prompt(
                     question, all_summaries, dep_hints=dep_hints
                 )
-                # CPU での長時間ブロックを防ぐため短めのタイムアウト (120s) を使用
                 sel_response = self._llm.generate_sync(model, sel_prompt, read_timeout=120)
-                # JSON 配列を堅牢に抽出する
                 _start = sel_response.find("[")
                 _end = sel_response.rfind("]")
                 if _start != -1 and _end != -1:
@@ -339,14 +342,17 @@ class ExplanationService:
                     yield {"phase": "LLMファイル選択中", "detail": f"{len(selected_paths)} ファイルを選択"}
             except Exception as exc:
                 logger.warning("ファイル選択フェーズエラー（フォールバック）: %s", exc)
-                yield {"phase": "LLMファイル選択中", "detail": f"エラーのためセマンティック検索にフォールバック: {exc}"}
+                yield {"phase": "LLMファイル選択中", "detail": f"タイムアウト — セマンティック検索にフォールバック"}
 
         # ── Phase D: セマンティック検索で補完 ──
+        # CPU専用では top_n を絞ってコンテキストサイズを抑制する（8000+ トークンを防ぐ）
+        _is_cpu = not getattr(self._llm, "cuda_available", False)
+        _top_n = 5 if _is_cpu else 10
         if pinned_base_chunks:
             # ピン留めファイルを起点に、不足分をセマンティック検索で補完
             base_chunks = list(pinned_base_chunks)
             seen_paths: set[str] = {c.path for c in base_chunks}
-            extra = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
+            extra = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
             for c in extra:
                 if c.path not in seen_paths:
                     base_chunks.append(c)
@@ -355,20 +361,20 @@ class ExplanationService:
                         break
         elif selected_paths:
             base_chunks = [chunk_map[p] for p in selected_paths if p in chunk_map]
-            if len(base_chunks) < 10:
+            if len(base_chunks) < _top_n:
                 seen_paths = {c.path for c in base_chunks}
-                for c in self._analysis.get_top_chunks_semantic(chunks, question, top_n=10):
+                for c in self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n):
                     if c.path not in seen_paths:
                         base_chunks.append(c)
                         seen_paths.add(c.path)
-                        if len(base_chunks) >= 10:
+                        if len(base_chunks) >= _top_n:
                             break
         else:
-            base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
+            base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
 
         # ── Phase E: 依存関係展開 (BFS 5 hop, カスタムインポートのみ) ──
-        # ピン留め時は max_total を大きくして深い依存関係まで取得する
-        _dep_max = 40 if pinned_base_chunks else 20
+        # CPU専用: max_total を絞ってプロンプトサイズを抑制する
+        _dep_max = 40 if pinned_base_chunks else (10 if _is_cpu else 20)
         yield {"phase": "依存関係展開中", "detail": f"{len(base_chunks)} ファイルから最大 {_dep_max} ファイルに展開 (5 hop BFS)"}
         yield {"status": f"依存関係を展開中... ({len(base_chunks)} → 最大 {_dep_max} ファイル)"}
         top_chunks, dep_map = self._analysis.expand_with_dependencies(
@@ -418,10 +424,26 @@ class ExplanationService:
         yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})"}
         yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
 
+        # モデルがすでに VRAM/RAM にロードされているか確認する
+        model_loaded = getattr(self._llm, "is_model_loaded", lambda m: None)(model)
+        if model_loaded is False:
+            yield {"phase": "Ollamaモデルロード中", "detail": f"{model} をメモリに読み込み中 (CPUでは数分かかります)"}
+            yield {"status": f"Ollamaがモデルをロード中... ({model}) — 最初のトークンが来るまでお待ちください"}
+        else:
+            yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})"}
+            yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
+
         start_time = time.time()
         answer_tokens: List[str] = []
+        _first_token_received = False
         try:
             for token in self._llm.stream_completion(model, prompt):
+                if not _first_token_received:
+                    _first_token_received = True
+                    _load_s = time.time() - start_time
+                    if _load_s > 5:
+                        yield {"phase": "Ollama生成中", "detail": f"最初のトークン到着 (待機 {_load_s:.1f}s)"}
+                        yield {"status": f"Ollamaが回答を生成中... (待機 {_load_s:.1f}s 後に開始)"}
                 answer_tokens.append(token)
                 yield {"token": token}
         except Exception as exc:
