@@ -284,21 +284,59 @@ class OllamaClient:
         except Exception:
             return None
 
+    def get_ram_info(self) -> dict:
+        """
+        システムRAM使用状況を psutil で取得する。
+        CPU専用デバイスではVRAMの代替として常に利用可能。
+
+        Returns:
+            {"total": int, "used": int, "free": int} (単位: MiB)
+        """
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            to_mib = 1024 * 1024
+            return {
+                "total": mem.total // to_mib,
+                "used": mem.used // to_mib,
+                "free": mem.available // to_mib,
+            }
+        except Exception:
+            return {"total": 0, "used": 0, "free": 0}
+
+    def get_sysinfo(self) -> dict:
+        """
+        GPU(VRAM)とシステムRAMの両方を返す複合エンドポイント用メソッド。
+        GPUが存在しない場合は gpu フィールドを None にする。
+
+        Returns:
+            {"gpu": dict|None, "ram": dict, "cuda_available": bool}
+        """
+        return {
+            "gpu": self.get_vram_info(),
+            "ram": self.get_ram_info(),
+            "cuda_available": self.cuda_available,
+        }
+
     def generate_sync(
         self,
         model: str,
         prompt: str,
         system: Optional[str] = None,
-        num_ctx: Optional[int] = None,  # Add num_ctx here
+        num_ctx: Optional[int] = None,
+        read_timeout: int = _GENERATE_READ_TIMEOUT,
     ) -> str:
         """
         ストリーミングなしで完全なテキスト応答を生成する（テスト・内部用）。
         大型ローカルモデル向けに長めのタイムアウトを使用する。
+        read_timeout を指定することで CPU 推論での過長待機を防げる（例: 120s）。
 
         Args:
             model: 使用するOllamaモデル名
             prompt: ユーザープロンプト
             system: システムプロンプト（省略可能）
+            num_ctx: コンテキスト長（省略可能）
+            read_timeout: 読み込みタイムアウト秒数
 
         Returns:
             生成されたテキスト全文
@@ -308,10 +346,9 @@ class OllamaClient:
             OllamaModelNotFoundError: 指定モデルが見つからない場合
         """
         return "".join(self.stream_completion(
-            model=model, 
-            prompt=prompt, 
-            system=system, 
-            read_timeout=_GENERATE_READ_TIMEOUT,
-            num_ctx=num_ctx  # Pass it down to the stream_completion method
+            model=model,
+            prompt=prompt,
+            system=system,
+            read_timeout=read_timeout,
+            num_ctx=num_ctx,
         ))
-        # return "".join(self.stream_completion(model, prompt, system, read_timeout=_GENERATE_READ_TIMEOUT))

@@ -515,11 +515,22 @@ class ContextService:
         Returns:
             (プロンプト文字列, 推定トークン数)
         """
+        # 固定コスト部分: 質問・概要・依存関係マップ・指示文
+        instructions = (
+            f"質問: {question}\n\n"
+            "あなたはシニアソフトウェアアーキテクトとして、上記のコードベースに基づいて極めて詳細かつ網羅的に回答してください。\n"
+            "以下のルールに厳密に従ってください：\n"
+            "1. 抽象的な説明を避け、具体的なクラス名、関数名、変数名、データ構造を明記すること。\n"
+            "2. 情報を引用する際は、必ず正確なファイルパス（例: `src/main.py`）を併記すること。上記の依存関係マップに記載されたパスのみを使用し、推測しないこと。\n"
+            "3. 対象コンポーネントが他のどのファイル・モジュールに依存しているか、また何から依存されているか（依存関係）を依存関係マップに基づいて説明すること。\n"
+            "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
+            "5. 提供されたコンテキスト内に情報が不足している場合は、推測で補わず「〇〇の詳細はコンテキストにありません」と正直に述べること。\n"
+        )
+
         parts = [f"プロジェクト概要:\n{project_index_json}"]
 
-        # 依存関係マップ（存在する場合）— ファイル間の実際のインポート関係をLLMに提示する
+        # 依存関係マップ — ファイル間の実際のインポート関係をLLMに提示する
         if dep_map:
-            # 逆引きマップを構築: 誰がこのファイルをインポートしているか
             imported_by: Dict[str, List[str]] = {}
             for path, deps in dep_map.items():
                 for dep in deps:
@@ -547,10 +558,9 @@ class ContextService:
                     + "\n".join(dep_lines)
                 )
 
-        # ピン留めファイル（ユーザー選択済み・常にフル内容で注入）
-        if pinned_contents:
-            pin_texts = "\n".join(f"--- {p} ---\n{c}" for p, c in pinned_contents[:15])
-            parts.append(f"[ピン留めコンテキスト — ユーザーが選択したファイル]\n{pin_texts}")
+        summaries_text = "\n".join(f"- {p}: {s}" for p, s in top_summaries)
+        if summaries_text:
+            parts.append(f"関連ファイルサマリー:\n{summaries_text}")
 
         # ワークスペース内の他プロジェクトのコンテキスト
         if workspace_projects:
@@ -567,44 +577,74 @@ class ContextService:
                         lines.append(f"  --- {p} ---\n  {c[:2000]}")
                     parts.append("\n".join(lines))
 
-        summaries_text = "\n".join(
-            f"- {p}: {s}" for p, s in top_summaries
-        )
-        if summaries_text:
-            parts.append(f"関連ファイルサマリー:\n{summaries_text}")
+        # 会話履歴 — 予算を圧迫しないよう古い履歴から切り詰める
+        if conversation_history:
+            history_msgs = list(conversation_history[-10:])
+            _budget_check = self._token_limit - _estimate_tokens("\n\n".join(parts)) - _estimate_tokens(instructions) - 4096
+            while history_msgs and _estimate_tokens(
+                "\n".join(f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}" for m in history_msgs)
+            ) > max(_budget_check // 4, 500):
+                history_msgs.pop(0)
+            if history_msgs:
+                history_text = "\n".join(
+                    f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}"
+                    for m in history_msgs
+                )
+                parts.append(f"会話履歴:\n{history_text}")
 
-        # フルコンテンツの注入（予算管理）
-        available = self._token_limit - _estimate_tokens("\n\n".join(parts))
+        # 残りの予算を計算してファイルコンテンツを注入（ピン留め優先）
+        # 指示文と固定部分のコストを差し引いた残量を算出する
+        _fixed_cost = _estimate_tokens("\n\n".join(parts)) + _estimate_tokens(instructions) + 200
+        available = max(self._token_limit - _fixed_cost, 0)
+
+        # ピン留めファイルを優先して注入（予算内）
+        if pinned_contents:
+            pinned_added: List[tuple[str, str]] = []
+            for p, c in pinned_contents:
+                fc_text = f"--- {p} ---\n{c}"
+                cost = _estimate_tokens(fc_text)
+                if cost <= available:
+                    pinned_added.append((p, c))
+                    available -= cost
+                else:
+                    # ファイルが大きすぎる場合は先頭部分のみ注入して警告
+                    _chars_budget = max(available * 3, 500)
+                    pinned_added.append((p, c[:_chars_budget]))
+                    available = 0
+                    logger.warning(
+                        "ピン留めファイル [%s] がトークン予算を超過。先頭 %d 文字のみ注入。",
+                        p, _chars_budget,
+                    )
+                    break
+            if pinned_added:
+                pin_texts = "\n".join(f"--- {p} ---\n{c}" for p, c in pinned_added)
+                parts.append(f"[ピン留めコンテキスト — ユーザーが選択したファイル]\n{pin_texts}")
+
+        # 残予算でその他ファイルを注入
         for fc_path, fc_content in full_contents:
+            if available <= 0:
+                break
             fc_text = f"--- {fc_path} ---\n{fc_content}"
-            if _estimate_tokens(fc_text) < available:
+            cost = _estimate_tokens(fc_text)
+            if cost <= available:
                 parts.append(f"ファイル内容:\n{fc_text}")
-                available -= _estimate_tokens(fc_text)
+                available -= cost
             else:
+                # 残予算に収まる分だけ先頭を注入
+                _chars = max(available * 3, 200)
+                parts.append(f"ファイル内容:\n--- {fc_path} ---\n{fc_content[:_chars]}\n...[予算超過により切り詰め]")
+                available = 0
                 break
 
-        # 会話履歴（最大10件）
-        if conversation_history:
-            history_text = "\n".join(
-                f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}"
-                for m in conversation_history[-10:]
-            )
-            parts.append(f"会話履歴:\n{history_text}")
-
-        instructions = (
-                    f"質問: {question}\n\n"
-                    "あなたはシニアソフトウェアアーキテクトとして、上記のコードベースに基づいて極めて詳細かつ網羅的に回答してください。\n"
-                    "以下のルールに厳密に従ってください：\n"
-                    "1. 抽象的な説明を避け、具体的なクラス名、関数名、変数名、データ構造を明記すること。\n"
-                    "2. 情報を引用する際は、必ず正確なファイルパス（例: `src/main.py`）を併記すること。上記の依存関係マップに記載されたパスのみを使用し、推測しないこと。\n"
-                    "3. 対象コンポーネントが他のどのファイル・モジュールに依存しているか、また何から依存されているか（依存関係）を依存関係マップに基づいて説明すること。\n"
-                    "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
-                    "5. 提供されたコンテキスト内に情報が不足している場合は、推測で補わず「〇〇の詳細はコンテキストにありません」と正直に述べること。\n"
-                )
         parts.append(instructions)
 
         prompt = "\n\n".join(parts)
-        return self._guard_budget(prompt, "qa"), _estimate_tokens(prompt)
+        estimated = _estimate_tokens(prompt)
+        if estimated > self._token_limit:
+            logger.warning(
+                "Q&Aプロンプトがトークン予算を超過: 推定=%d, 上限=%d", estimated, self._token_limit
+            )
+        return self._guard_budget(prompt, "qa"), estimated
 
     # ------------------------------------------------------------------
     # Resumeモード用コンテキスト

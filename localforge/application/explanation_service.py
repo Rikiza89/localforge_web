@@ -224,14 +224,15 @@ class ExplanationService:
         """
         Q&A質問への回答をSSEイベントとしてストリーミング生成する。
 
-        Args:
-            root: プロジェクトルート
-            model: 使用するOllamaモデル名
-            question: ユーザーの質問
-            history: 会話履歴（最大10件）
+        パイプライン:
+          1. ピン留めファイルがある場合は直接展開 (Phase 1 スキップ)
+          2. ピン留めなしの場合のみ LLM ファイル選択 (Phase 1)
+          3. セマンティック検索で補完
+          4. 依存関係展開 (BFS 5 hop, カスタムインポートのみ)
+          5. プロンプト構築 & Ollama ストリーミング
 
         Yields:
-            SSEペイロード辞書（token, done, error）
+            SSEペイロード辞書（phase, prompt_preview, token, done, error）
         """
         project_index = self._analysis.load_project_index(root)
         if not project_index:
@@ -242,34 +243,41 @@ class ExplanationService:
         chunk_map = {c.path: c for c in chunks}
         all_summaries = [(c.path, c.summary or "") for c in chunks if c.summary]
 
-        # A5: ファイル一覧を含む index_json を組み立てる（LLM がプロジェクト全体を把握できるように）
         index_dict = project_index.model_dump(include={"project_name", "summary", "total_files", "indexed_files"})
         index_dict["files"] = [c.path for c in chunks]
         index_json = json.dumps(index_dict, ensure_ascii=False)
 
-        # ── ピン留めコンテキスト解決 ──
+        # ── Phase A: ピン留めコンテキスト解決 ──
+        # ピン留めファイルはユーザーが明示的に選んだもの。全内容を読み込む（文字数上限なし）。
+        # トークン予算は build_qa_prompt 内で管理する。
         pinned_chunk_contents: List[tuple[str, str]] = []
+        pinned_base_chunks: List = []
         if pinned_paths:
-            yield {"status": "ピン留めコンテキストを展開中..."}
+            yield {"phase": "ピン留めファイル解決中", "detail": f"{len(pinned_paths)} 件のパスを展開中"}
+            yield {"status": f"ピン留めファイルを展開中... ({len(pinned_paths)} 件)"}
             try:
+                # ピン留めの場合は依存関係をより深く (max_total=40) 展開する
                 pinned_chunks, _ = self._analysis.resolve_pinned_chunks(
-                    root, pinned_paths, chunks, max_total=25
+                    root, pinned_paths, chunks, max_total=40
                 )
-                _max_pin_chars = self._context.max_qa_file_chars()
+                pinned_base_chunks = pinned_chunks
+                yield {"phase": "ピン留めファイル解決中", "detail": f"依存関係を含む {len(pinned_chunks)} ファイルを取得"}
                 for pc in pinned_chunks:
                     fp = root / pc.path
                     if fp.exists():
                         try:
+                            # 文字数上限なし — build_qa_prompt のトークン予算に委ねる
                             content = fp.read_text(encoding="utf-8", errors="replace")
-                            pinned_chunk_contents.append((pc.path, content[:_max_pin_chars]))
-                        except OSError:
-                            pass
+                            pinned_chunk_contents.append((pc.path, content))
+                        except OSError as exc:
+                            logger.warning("ピン留めファイル読み込みエラー [%s]: %s", pc.path, exc)
             except Exception as exc:
                 logger.warning("ピン留めコンテキスト解決エラー: %s", exc)
 
-        # ── ワークスペース他プロジェクトのコンテキスト ──
+        # ── Phase B: ワークスペース他プロジェクトのコンテキスト ──
         workspace_project_data: List[dict] = []
         if workspace_roots:
+            yield {"phase": "ワークスペース検索中", "detail": f"{len(workspace_roots)} プロジェクト"}
             yield {"status": "ワークスペースプロジェクトを検索中..."}
             for ws_root, ws_name in workspace_roots[:3]:
                 try:
@@ -301,64 +309,96 @@ class ExplanationService:
                 except Exception as exc:
                     logger.warning("ワークスペース [%s] Q&Aエラー: %s", ws_name, exc)
 
-        # A6 フェーズ 1: LLM にどのファイルが必要か選ばせる
-        # dep_hints は全チャンクの imports_resolved からプリビルドする（上位200件以内）
-        dep_hints = {c.path: c.imports_resolved for c in chunks if c.imports_resolved}
-        yield {"status": "関連ファイルを分析中..."}
+        # ── Phase C: ファイル選択 ──
+        # ピン留めファイルが存在する場合は LLM によるファイル選択 (Phase 1) をスキップする。
+        # ユーザーが既に関連ファイルを指定しているため、余分な LLM 呼び出しは不要かつ CPU では数分かかる。
         selected_paths: List[str] = []
-        try:
-            sel_prompt = self._context.build_qa_file_selection_prompt(
-                question, all_summaries, dep_hints=dep_hints
-            )
-            sel_response = self._llm.generate_sync(model, sel_prompt)
-            # JSON 配列を抽出（余計なテキストが混入しても壊れないようにする）
-            _start = sel_response.find("[")
-            _end = sel_response.rfind("]")
-            if _start != -1 and _end != -1:
-                selected_paths = json.loads(sel_response[_start:_end + 1])
-                if not isinstance(selected_paths, list):
-                    selected_paths = []
-                selected_paths = [p for p in selected_paths if isinstance(p, str) and p in chunk_map]
-        except Exception as exc:
-            logger.warning("ファイル選択フェーズエラー（フォールバック）: %s", exc)
-
-        # フォールバック: フェーズ 1 が失敗または空の場合はセマンティック検索 top-10 を使用
-        if not selected_paths:
-            base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
+        if pinned_base_chunks:
+            # ピン留めを優先。セマンティック検索で補完のみ行う
+            yield {"phase": "ファイル選択", "detail": f"ピン留め {len(pinned_base_chunks)} ファイルを使用 (LLM選択スキップ)"}
+            yield {"status": f"ピン留めファイルを使用中 ({len(pinned_base_chunks)} 件) — LLMファイル選択をスキップ"}
         else:
-            # フェーズ 1 の選択を優先する。不足分(10件未満)のみセマンティック検索で補完する
+            # ピン留めなし: LLM にどのファイルが必要か選ばせる (Phase 1)
+            dep_hints = {c.path: c.imports_resolved for c in chunks if c.imports_resolved}
+            yield {"phase": "LLMファイル選択中", "detail": f"{len(all_summaries)} ファイルから関連ファイルを選択"}
+            yield {"status": "LLMがファイルを選択中... (CPU では数分かかる場合があります)"}
+            try:
+                sel_prompt = self._context.build_qa_file_selection_prompt(
+                    question, all_summaries, dep_hints=dep_hints
+                )
+                # CPU での長時間ブロックを防ぐため短めのタイムアウト (120s) を使用
+                sel_response = self._llm.generate_sync(model, sel_prompt, read_timeout=120)
+                # JSON 配列を堅牢に抽出する
+                _start = sel_response.find("[")
+                _end = sel_response.rfind("]")
+                if _start != -1 and _end != -1:
+                    _parsed = json.loads(sel_response[_start:_end + 1])
+                    if isinstance(_parsed, list):
+                        selected_paths = [p for p in _parsed if isinstance(p, str) and p in chunk_map]
+                if selected_paths:
+                    yield {"phase": "LLMファイル選択中", "detail": f"{len(selected_paths)} ファイルを選択"}
+            except Exception as exc:
+                logger.warning("ファイル選択フェーズエラー（フォールバック）: %s", exc)
+                yield {"phase": "LLMファイル選択中", "detail": f"エラーのためセマンティック検索にフォールバック: {exc}"}
+
+        # ── Phase D: セマンティック検索で補完 ──
+        if pinned_base_chunks:
+            # ピン留めファイルを起点に、不足分をセマンティック検索で補完
+            base_chunks = list(pinned_base_chunks)
+            seen_paths: set[str] = {c.path for c in base_chunks}
+            extra = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
+            for c in extra:
+                if c.path not in seen_paths:
+                    base_chunks.append(c)
+                    seen_paths.add(c.path)
+                    if len(base_chunks) >= 30:
+                        break
+        elif selected_paths:
             base_chunks = [chunk_map[p] for p in selected_paths if p in chunk_map]
             if len(base_chunks) < 10:
-                seen: set[str] = {c.path for c in base_chunks}
+                seen_paths = {c.path for c in base_chunks}
                 for c in self._analysis.get_top_chunks_semantic(chunks, question, top_n=10):
-                    if c.path not in seen:
+                    if c.path not in seen_paths:
                         base_chunks.append(c)
-                        seen.add(c.path)
+                        seen_paths.add(c.path)
                         if len(base_chunks) >= 10:
                             break
+        else:
+            base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
 
-        # 依存関係展開: 選択ファイルのimport先/被import元を自動追加してコンテキスト精度を向上させる
+        # ── Phase E: 依存関係展開 (BFS 5 hop, カスタムインポートのみ) ──
+        # ピン留め時は max_total を大きくして深い依存関係まで取得する
+        _dep_max = 40 if pinned_base_chunks else 20
+        yield {"phase": "依存関係展開中", "detail": f"{len(base_chunks)} ファイルから最大 {_dep_max} ファイルに展開 (5 hop BFS)"}
+        yield {"status": f"依存関係を展開中... ({len(base_chunks)} → 最大 {_dep_max} ファイル)"}
         top_chunks, dep_map = self._analysis.expand_with_dependencies(
             chunks,
             [c.path for c in base_chunks],
-            max_total=20,
+            max_total=_dep_max,
         )
+        yield {"phase": "依存関係展開中", "detail": f"展開後 {len(top_chunks)} ファイル確定"}
 
-        # フルコンテンツ注入: project_index.json は content="" で保存されるため
-        # 常にディスクから再読みする（FULL/HYBRID 問わず）。
-        _max_chars = self._context.max_qa_file_chars()
+        # ── Phase F: ファイル内容読み込み ──
+        yield {"phase": "ファイル内容読み込み中", "detail": f"{len(top_chunks)} ファイルをディスクから読み込み"}
+        yield {"status": f"ファイル内容を読み込み中... ({len(top_chunks)} ファイル)"}
         full_contents: List[tuple[str, str]] = []
         for chunk in top_chunks:
+            # ピン留めファイルはすでに pinned_chunk_contents に含まれているので重複しない
+            if pinned_base_chunks and any(p == chunk.path for p, _ in pinned_chunk_contents):
+                continue
             file_path = root / chunk.path
             if file_path.exists():
                 try:
                     content = file_path.read_text(encoding="utf-8", errors="replace")
-                    full_contents.append((chunk.path, content[:_max_chars]))
+                    full_contents.append((chunk.path, content))
                 except OSError:
                     pass
 
         top_summaries = [(c.path, c.summary or "") for c in top_chunks]
 
+        # ── Phase G: プロンプト構築 ──
+        yield {"phase": "プロンプト構築中", "detail": "コンテキストを組み立てています"}
+        yield {"status": "プロンプトを構築中..."}
         prompt, tokens = self._context.build_qa_prompt(
             question=question,
             project_index_json=index_json,
@@ -369,6 +409,14 @@ class ExplanationService:
             pinned_contents=pinned_chunk_contents or None,
             workspace_projects=workspace_project_data or None,
         )
+
+        # プロンプトのプレビューを送信（最初の 1000 文字 + 末尾 200 文字）
+        preview_head = prompt[:1000]
+        preview_tail = prompt[-200:] if len(prompt) > 1200 else ""
+        preview = preview_head + ("\n...[中略]...\n" + preview_tail if preview_tail else "")
+        yield {"prompt_preview": preview, "prompt_tokens": tokens}
+        yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})"}
+        yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
 
         start_time = time.time()
         answer_tokens: List[str] = []
@@ -393,6 +441,7 @@ class ExplanationService:
         log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
         self._analysis._index_adapter.append_log_entry(log_path, log_entry)
 
+        yield {"phase": "完了", "detail": f"回答生成完了 ({elapsed/1000:.1f}s)"}
         yield {"done": True}
 
     def append_qa_entry(self, root: Path, question: str, answer: str) -> None:

@@ -153,24 +153,56 @@
     </footer>
   </div>
 
-  <!-- Ollamaライブ出力パネル（固定位置オーバーレイ、右端） -->
+  <!-- Ollamaライブ出力 & プロセスログパネル（固定位置オーバーレイ、右端） -->
   <div id="ollama-panel" class="ollama-panel collapsed">
     <button id="ollama-panel-toggle" class="ollama-panel-tab" title="Ollamaライブ出力を開く/閉じる">
       <span class="ollama-stream-dot"></span>
       <span class="ollama-tab-label">Ollama</span>
     </button>
     <div class="ollama-panel-body">
-      <div class="ollama-panel-header">
-        <span class="ollama-panel-title">Ollamaライブ出力</span>
-        <div class="ollama-panel-actions">
-          <button id="ollama-thinking-toggle" class="btn btn-secondary btn-sm" title="思考トークンを表示">思考を表示</button>
-          <button id="ollama-clear-btn" class="btn btn-secondary btn-sm" title="クリア">クリア</button>
+      <!-- パネル内タブ -->
+      <div class="ollama-inner-tabs">
+        <button class="ollama-inner-tab active" data-inner-tab="live" id="inner-tab-live">ライブ出力</button>
+        <button class="ollama-inner-tab" data-inner-tab="processlog" id="inner-tab-processlog">
+          プロセスログ
+          <span class="process-log-badge" id="process-log-badge" style="display:none">●</span>
+        </button>
+      </div>
+
+      <!-- ライブ出力タブ -->
+      <div class="ollama-inner-content" id="inner-content-live">
+        <div class="ollama-panel-header">
+          <span class="ollama-panel-title">Ollamaライブ出力</span>
+          <div class="ollama-panel-actions">
+            <button id="ollama-thinking-toggle" class="btn btn-secondary btn-sm" title="思考トークンを表示">思考を表示</button>
+            <button id="ollama-clear-btn" class="btn btn-secondary btn-sm" title="クリア">クリア</button>
+          </div>
+        </div>
+        <div id="ollama-output-normal" class="ollama-output"></div>
+        <div id="ollama-output-thinking" class="ollama-output ollama-thinking hidden">
+          <div class="ollama-thinking-label">— 思考トークン —</div>
+          <div id="ollama-thinking-content"></div>
         </div>
       </div>
-      <div id="ollama-output-normal" class="ollama-output"></div>
-      <div id="ollama-output-thinking" class="ollama-output ollama-thinking hidden">
-        <div class="ollama-thinking-label">— 思考トークン —</div>
-        <div id="ollama-thinking-content"></div>
+
+      <!-- プロセスログタブ -->
+      <div class="ollama-inner-content hidden" id="inner-content-processlog">
+        <div class="ollama-panel-header">
+          <span class="ollama-panel-title">プロセスログ</span>
+          <div class="ollama-panel-actions">
+            <button id="processlog-clear-btn" class="btn btn-secondary btn-sm" title="ログをクリア">クリア</button>
+          </div>
+        </div>
+        <!-- フェーズタイムライン -->
+        <div id="process-phase-list" class="process-phase-list"></div>
+        <!-- プロンプトプレビュー（折りたたみ可能） -->
+        <details class="prompt-preview-details" id="prompt-preview-details" style="display:none">
+          <summary class="prompt-preview-summary">
+            送信プロンプトのプレビュー
+            <span id="prompt-token-badge" class="prompt-token-badge"></span>
+          </summary>
+          <pre id="prompt-preview-content" class="prompt-preview-content"></pre>
+        </details>
       </div>
     </div>
   </div>

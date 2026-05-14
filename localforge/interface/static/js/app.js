@@ -1268,6 +1268,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Ollamaライブ出力パネル初期化
   OllamaPanel.init();
+  ProcessLog.init();
 
   // 初期化: モデル一覧とCPU情報を読み込む
   await loadModels();
@@ -1276,9 +1277,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 起動時Ollamaヘルスチェック
   await checkOllamaHealth();
 
-  // VRAM情報の定期更新（30秒おき）
-  setInterval(refreshVramInfo, 30000);
-  refreshVramInfo();
+  // システム情報（GPU/RAM）の定期更新 — 初回は5秒後に遅延起動してサーバー負荷を下げる
+  setTimeout(() => {
+    refreshSysInfo();
+    // GPU未検出時はポーリングを停止するため、_sysInfoIntervalIdで管理する
+    window._sysInfoIntervalId = setInterval(refreshSysInfo, 60000);
+  }, 5000);
 
   // リサイズ機能の初期化
   initResizers();
@@ -1330,20 +1334,36 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 /**
- * VRAM情報を取得してステータスバーを更新する。
+ * GPU/RAM情報を取得してステータスバーを更新する。
+ * GPUがない場合はシステムRAMを表示してポーリングを継続する（RAMは常に有用）。
  */
-async function refreshVramInfo() {
+async function refreshSysInfo() {
   const vramEl = document.getElementById("status-vram");
   if (!vramEl) return;
 
   try {
-    const data = await apiRequest("/api/project/vram");
-    if (data && data.total) {
-      const usedGb = (data.used / 1024).toFixed(1);
-      const totalGb = (data.total / 1024).toFixed(1);
-      const pct = Math.round((data.used / data.total) * 100);
+    const data = await apiRequest("/api/project/sysinfo");
+
+    if (data && data.gpu) {
+      // GPU搭載デバイス: VRAMを表示
+      const usedGb = (data.gpu.used / 1024).toFixed(1);
+      const totalGb = (data.gpu.total / 1024).toFixed(1);
+      const pct = Math.round((data.gpu.used / data.gpu.total) * 100);
       vramEl.textContent = `VRAM: ${usedGb} / ${totalGb} GB (${pct}%)`;
       vramEl.style.display = "inline";
+    } else if (data && data.ram && data.ram.total > 0) {
+      // CPU専用デバイス: システムRAMを表示
+      const usedGb = (data.ram.used / 1024).toFixed(1);
+      const totalGb = (data.ram.total / 1024).toFixed(1);
+      const pct = Math.round((data.ram.used / data.ram.total) * 100);
+      vramEl.textContent = `RAM: ${usedGb} / ${totalGb} GB (${pct}%)`;
+      vramEl.style.display = "inline";
+
+      // GPU未検出が確定したらVRAMポーリングを60秒から120秒に緩める
+      if (data.cuda_available === false && window._sysInfoIntervalId) {
+        clearInterval(window._sysInfoIntervalId);
+        window._sysInfoIntervalId = setInterval(refreshSysInfo, 120000);
+      }
     } else {
       vramEl.style.display = "none";
     }

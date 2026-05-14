@@ -50,6 +50,8 @@ async function sendChatMessage(question) {
   _chatSending = true;
   disableChat();
   _lockUI(null);
+  // プロセスログをリセットして今回のQ&Aを追跡
+  ProcessLog.clear();
 
   // 会話ターンのDOM要素を作成
   const historyEl = document.getElementById("chat-history");
