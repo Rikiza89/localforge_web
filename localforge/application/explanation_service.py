@@ -117,8 +117,8 @@ class ExplanationService:
         completed_sections: List[tuple[str, str]] = []  # (name, content)
 
         _is_cpu = not getattr(self._llm, "cuda_available", False)
-        _r_num_ctx: Optional[int] = 8192 if _is_cpu else None
-        _r_num_predict: Optional[int] = 1200 if _is_cpu else None
+        _r_num_ctx: Optional[int] = 16384 if _is_cpu else None
+        _r_num_predict: Optional[int] = -1 if _is_cpu else None
 
         for sec_idx, section_name in enumerate(REPORT_SECTIONS):
             # セクションヘッダーを送信（インデックスと合計数も含める）
@@ -435,12 +435,12 @@ class ExplanationService:
         # CPU 用 Ollama パラメータ (Q&A / レポート共通で固定値を使用)
         # num_ctx を呼び出しごとに変えると Ollama がモデルを再ロードしてしまうため
         # 固定値 4096 に統一する。レポートセクション (1500 tok 以下) にも充分な余裕がある。
-        _CPU_NUM_CTX = 8192
+        _CPU_NUM_CTX = 16384
         _num_ctx: Optional[int] = None
         _num_predict: Optional[int] = None
         if _is_cpu:
             _num_ctx = _CPU_NUM_CTX
-            _num_predict = 2000
+            _num_predict = -1
 
         # モデルがすでに RAM にロードされているか確認する
         model_loaded = getattr(self._llm, "is_model_loaded", lambda m: None)(model)
