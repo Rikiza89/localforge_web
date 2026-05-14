@@ -116,6 +116,10 @@ class ExplanationService:
         total_sections = len(REPORT_SECTIONS)
         completed_sections: List[tuple[str, str]] = []  # (name, content)
 
+        _is_cpu = not getattr(self._llm, "cuda_available", False)
+        _r_num_ctx: Optional[int] = 8192 if _is_cpu else None
+        _r_num_predict: Optional[int] = 1200 if _is_cpu else None
+
         for sec_idx, section_name in enumerate(REPORT_SECTIONS):
             # セクションヘッダーを送信（インデックスと合計数も含める）
             yield {
@@ -428,16 +432,15 @@ class ExplanationService:
         preview = preview_head + ("\n...[中略]...\n" + preview_tail if preview_tail else "")
         yield {"prompt_preview": preview, "prompt_tokens": tokens}
 
-        # CPU 用 Ollama パラメータ調整:
-        #   num_ctx  = 実際のプロンプト + 512 の余裕 (最大 4096, 最小 1024)
-        #             → KV キャッシュが小さくなりモデルロードと prefill が大幅に速くなる
-        #   num_predict = 600  → 応答を適切な長さに制限して生成時間を短縮
-        #   keep_alive  = "2h" → Q&A 間でモデルを RAM に保持してコールドスタートを防ぐ
+        # CPU 用 Ollama パラメータ (Q&A / レポート共通で固定値を使用)
+        # num_ctx を呼び出しごとに変えると Ollama がモデルを再ロードしてしまうため
+        # 固定値 4096 に統一する。レポートセクション (1500 tok 以下) にも充分な余裕がある。
+        _CPU_NUM_CTX = 8192
         _num_ctx: Optional[int] = None
         _num_predict: Optional[int] = None
         if _is_cpu:
-            _num_ctx = min(max(tokens + 512, 1024), 4096)
-            _num_predict = 600
+            _num_ctx = _CPU_NUM_CTX
+            _num_predict = 2000
 
         # モデルがすでに RAM にロードされているか確認する
         model_loaded = getattr(self._llm, "is_model_loaded", lambda m: None)(model)
