@@ -15,6 +15,27 @@ let _currentPlanText = "";
 let _cancelGenStream = null;
 // インデックス構築済みフラグ
 let _indexBuilt = false;
+// 最後のチェックポイントハッシュ
+let _lastCheckpointHash = null;
+
+/**
+ * LLM がセクション先頭に出力したマークダウン見出し行を除去する。
+ * h3 要素で既に表示されているタイトルと重複するため。
+ * @param {string} buf - 累積トークンバッファ
+ * @param {string} sectionName - 現在のセクション名
+ * @returns {string} 見出し除去後のバッファ
+ */
+function _stripLeadingMdHeading(buf, sectionName) {
+  const firstNewline = buf.indexOf("\n");
+  const firstLine = firstNewline === -1 ? buf : buf.slice(0, firstNewline);
+  if (!/^#{1,3}\s/.test(firstLine)) return buf;
+  const title = firstLine.replace(/^#{1,3}\s+/, "").trim().toLowerCase();
+  const sec = sectionName.toLowerCase();
+  if (title.includes(sec) || sec.includes(title)) {
+    return firstNewline === -1 ? "" : buf.slice(firstNewline + 1);
+  }
+  return buf;
+}
 
 /**
  * RAGインデックスの有無に応じてExplainタブのボタン状態を切り替える。
@@ -90,6 +111,63 @@ function _unlockUI() {
 }
 
 // =========================================================================
+// チェックポイント管理
+// =========================================================================
+
+function _setCheckpoint(hash) {
+  _lastCheckpointHash = hash;
+  const badge = document.getElementById("checkpoint-badge");
+  const rollbackBtn = document.getElementById("rollback-btn");
+  if (badge) {
+    badge.textContent = hash;
+    badge.style.display = "";
+    badge.title = `チェックポイント: ${hash} — ロールバック可能`;
+  }
+  if (rollbackBtn) rollbackBtn.style.display = "";
+}
+
+function _clearCheckpoint() {
+  _lastCheckpointHash = null;
+  const badge = document.getElementById("checkpoint-badge");
+  const rollbackBtn = document.getElementById("rollback-btn");
+  if (badge) badge.style.display = "none";
+  if (rollbackBtn) rollbackBtn.style.display = "none";
+}
+
+async function _loadCheckpointFromServer() {
+  if (!_currentProjectRoot) return;
+  try {
+    const data = await apiRequest("/api/git/checkpoint", "GET");
+    if (data.checkpoint && data.checkpoint.hash) {
+      _setCheckpoint(data.checkpoint.hash);
+    } else {
+      _clearCheckpoint();
+    }
+  } catch (e) {
+    _clearCheckpoint();
+  }
+}
+
+async function _doRollback() {
+  if (!_lastCheckpointHash) return;
+  if (!confirm(`チェックポイント ${_lastCheckpointHash} にロールバックしますか？\n⚠ この操作は元に戻せません。`)) return;
+  try {
+    const res = await apiRequest("/api/git/rollback", "POST", { hash: _lastCheckpointHash });
+    if (res.ok) {
+      showAlert(`ロールバック完了: ${_lastCheckpointHash}`, "success");
+      _clearCheckpoint();
+      refreshFileTree();
+      refreshContextPanel();
+      refreshGitLog();
+    } else {
+      showAlert(`ロールバック失敗: ${res.message}`, "error");
+    }
+  } catch (err) {
+    showAlert(`ロールバックエラー: ${err.message}`, "error");
+  }
+}
+
+// =========================================================================
 // タブ切替
 // =========================================================================
 
@@ -160,6 +238,13 @@ async function openProject(pathOverride = null) {
     if (data.mode === "resume") {
       await loadResumeState();
     }
+
+    // ワークスペースとピン留め状態を読み込む
+    if (typeof loadWorkspace === "function") await loadWorkspace();
+    if (typeof loadPinnedFromServer === "function") await loadPinnedFromServer();
+
+    // チェックポイント状態を復元
+    await _loadCheckpointFromServer();
 
     // ステータスバーを更新
     await refreshProjectStatus();
@@ -508,6 +593,19 @@ async function approvePlanAndGenerate() {
     catch (e) { console.warn("モデル同期エラー:", e.message); }
   }
 
+  // 新ブランチで生成するか確認
+  const branchToggle = document.getElementById("gen-branch-toggle");
+  if (branchToggle && branchToggle.checked) {
+    try {
+      const branchRes = await apiRequest("/api/git/branch", "POST", {});
+      if (branchRes.branch) {
+        showAlert(`新ブランチ「${branchRes.branch}」で生成します`, "success", 3000);
+      }
+    } catch (e) {
+      console.warn("ブランチ作成エラー:", e.message);
+    }
+  }
+
   const _es = startStream("/api/generate/start", genStream, {
     onProgress: (done, total, currentFile) => {
       if (genProgress) {
@@ -521,6 +619,19 @@ async function approvePlanAndGenerate() {
     },
     onFileWritten: (path) => {
       refreshFileTree();
+    },
+    onCheckpoint: (hash) => {
+      _setCheckpoint(hash);
+    },
+    onWarning: (msg) => {
+      if (genStream) {
+        const div = document.createElement("div");
+        div.className = "stream-warning";
+        div.textContent = msg;
+        genStream.appendChild(div);
+        div.scrollIntoView({ block: "end" });
+      }
+      showAlert(msg, "warning", 8000);
     },
     onDone: () => {
       _unlockUI();
@@ -584,6 +695,9 @@ async function buildIndex() {
           ? `${done} / ${total}: ${currentFile}`
           : "インデックス構築中...";
       }
+      if (total > 0 && currentFile) {
+        updateStatusBar(`インデックス構築中: ${currentFile} (${done}/${total})`);
+      }
     },
     onDone: async () => {
       _unlockUI();
@@ -642,6 +756,9 @@ async function migrateVectorIndex() {
           ? `RAG移行: ${done} / ${total}: ${currentFile}`
           : "RAGベクトルインデックス移行中...";
       }
+      if (total > 0 && currentFile) {
+        updateStatusBar(`RAG移行中: ${currentFile} (${done}/${total})`);
+      }
     },
     onDone: () => {
       _unlockUI();
@@ -697,17 +814,16 @@ function generateReport() {
   updateStatusBar("レポートを生成中...");
 
   const _es = startStream("/api/explain/report", null, {
-    onSection: (name) => {
+    onSection: (name, idx, total) => {
       if (!reportOutput) return;
-      // 同じセクションが再度来た場合（SSE再接続によるリスタート）はスキップ
+
+      // ステータスバーをセクション開始と同時に更新（バナーとh3の不一致を防ぐ）
+      const countStr = (idx && total) ? ` (${idx}/${total})` : "";
+      updateStatusBar(`レポート生成中: ${name}${countStr}`);
+
+      // 同じセクションが再度来た場合 = SSE再接続によるリスタート。ストリームを閉じて中断する。
       if (_renderedSections.has(name)) {
-        // 既存のセクション要素を currentSectionEl として再利用してトークンを追記する
-        const existing = reportOutput.querySelector(`h3[data-section="${CSS.escape(name)}"]`);
-        if (existing) {
-          currentSectionEl = existing.nextElementSibling
-            ? existing.nextElementSibling.nextElementSibling
-            : null;
-        }
+        _es.close();
         return;
       }
       _renderedSections.add(name);
@@ -721,19 +837,23 @@ function generateReport() {
 
       currentSectionEl = document.createElement("div");
       currentSectionEl.className = "md-body";
+      currentSectionEl._sectionName = name;
       reportOutput.appendChild(currentSectionEl);
     },
     onToken: (token) => {
       if (currentSectionEl) {
         currentSectionEl._mdBuf = (currentSectionEl._mdBuf || "") + token;
-        currentSectionEl.innerHTML = _renderMd(currentSectionEl._mdBuf);
+        // LLM がセクション見出しを先頭に出力した場合に除去（h3 と重複するため）
+        const buf = _stripLeadingMdHeading(currentSectionEl._mdBuf, currentSectionEl._sectionName || "");
+        currentSectionEl.innerHTML = _renderMd(buf);
         if (reportOutput) {
           _autoScroll(reportOutput);
         }
       }
     },
     onProgress: (done, total, currentFile) => {
-      updateStatusBar(`レポート生成中: ${currentFile} (${done}/${total}セクション)`);
+      // セクション完了時に呼ばれる（done = 完了済みセクション数）
+      updateStatusBar(`レポート生成中: ${currentFile} ✓ (${done}/${total})`);
     },
     onDone: () => {
       _unlockUI();
@@ -840,6 +960,7 @@ async function continueGeneration() {
       if (progressLabel) {
         progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
       }
+      updateStatusBar(`再開中: ${currentFile} (${done}/${total})`);
     },
     onFileWritten: () => refreshFileTree(),
     onDone: () => {
@@ -1039,6 +1160,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       updateStatusBar("生成を停止しました");
     });
   }
+
+  // ロールバックボタン
+  const rollbackBtn = document.getElementById("rollback-btn");
+  if (rollbackBtn) rollbackBtn.addEventListener("click", _doRollback);
 
   // Explainタブのボタン
   const buildIndexBtn = document.getElementById("build-index-btn");

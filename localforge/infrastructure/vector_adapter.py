@@ -1,38 +1,177 @@
 """
-VectorAdapter — ChromaDB + Ollama埋め込みを使ったセマンティック検索アダプター。
-.localforge/chroma/ に永続化する組み込みChromaDBコレクションを管理する。
-増分更新をサポート: mtime+sizeが変化したファイルのみ再埋め込みする。
+VectorAdapter — ChromaDB + sentence-transformers を使ったセマンティック検索アダプター。
+.localforge/chroma/ に永続化する組み込み ChromaDB コレクションを管理する。
+
+埋め込みモデルは sentence-transformers の all-MiniLM-L6-v2 (384 次元, ~25 MB) を
+プロセス内で実行する。Ollama への HTTP 呼び出しは不要。
+インクリメンタル更新をサポート: mtime+size が変化したファイルのみ再埋め込みする。
+
+モデルのキャッシュ戦略:
+  1. LOCALFORGE_ST_MODEL_PATH が設定されている → そのパスから直接ロード
+  2. プロジェクトルートの models/all-MiniLM-L6-v2/ が存在する → そこからロード
+     （main.py が自動検出して LOCALFORGE_ST_MODEL_PATH を設定する）
+  3. 上記いずれもない → HuggingFace からダウンロードして models/ に保存
+     → 次回起動から models/ を参照（ダウンロードは一度だけ）
+
+SSL 証明書エラー（自己署名 CA / 企業プロキシ環境）への対処:
+  LOCALFORGE_DISABLE_SSL=1 python main.py  （初回ダウンロード時のみ必要）
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import ssl
 from pathlib import Path
 from typing import List, Optional
-
-import requests
 
 from localforge.domain.models import FileChunk
 
 logger = logging.getLogger(__name__)
 
-_EMBED_MODEL = "nomic-embed-text:latest"
-_COLLECTION_NAME = "localforge_index"
+_ST_MODEL_NAME = "all-MiniLM-L6-v2"
+_COLLECTION_NAME = "localforge_minilm"
 _CHROMA_DIR = "chroma"
-# CPU推論では埋め込み生成に数分かかる場合があるため長めに設定する
-_CONNECT_TIMEOUT = 30
-_EMBED_TIMEOUT = 300
+
+# プロジェクトルートの models/ フォルダ（main.py と同じ階層）
+# localforge/infrastructure/vector_adapter.py → ../../ = プロジェクトルート
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_LOCAL_MODEL_DIR = _PROJECT_ROOT / "models" / _ST_MODEL_NAME
+
+# モジュールレベルのモデルキャッシュ（プロセス内で一度だけロードする）
+_st_model_instance = None
+_st_model_load_attempted = False
+
+
+def _is_ssl_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in ("ssl", "certificate", "cert", "client has been closed"))
+
+
+def _load_st_model():
+    """
+    sentence-transformers モデルをロードしてキャッシュする。
+
+    優先順位:
+      1. LOCALFORGE_ST_MODEL_PATH 環境変数が指すローカルパス
+      2. プロジェクトルートの models/all-MiniLM-L6-v2/ フォルダ
+      3. HuggingFace からダウンロード → models/ に保存（以降は 2 が適用される）
+      4. SSL エラー時: LOCALFORGE_DISABLE_SSL=1 でリトライ後に保存
+
+    インストールされていない場合は None を返す（警告のみ、クラッシュしない）。
+    """
+    global _st_model_instance, _st_model_load_attempted
+    if _st_model_load_attempted:
+        return _st_model_instance
+    _st_model_load_attempted = True
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        logger.warning(
+            "sentence-transformers がインストールされていません。"
+            " ベクトル埋め込みは無効になり、BM25 検索のみ使用されます。"
+            " 有効にするには: pip install sentence-transformers"
+        )
+        return None
+
+    # --- ロードするパスを決定 ---
+    env_path = os.environ.get("LOCALFORGE_ST_MODEL_PATH", "").strip()
+    if env_path and Path(env_path).is_dir():
+        # 環境変数が有効なローカルディレクトリを指している
+        load_from = env_path
+        save_after_load = False
+    elif _LOCAL_MODEL_DIR.is_dir():
+        # プロジェクト内の models/ フォルダに既にある
+        load_from = str(_LOCAL_MODEL_DIR)
+        save_after_load = False
+    else:
+        # ローカルになし → HuggingFace からダウンロードして models/ に保存する
+        load_from = _ST_MODEL_NAME
+        save_after_load = True
+
+    logger.info("sentence-transformers モデルをロード中: %s", load_from)
+
+    model = _try_load(SentenceTransformer, load_from)
+    if model is None:
+        _log_st_help()
+        return None
+
+    if save_after_load:
+        _save_model_locally(model)
+
+    _st_model_instance = model
+    return _st_model_instance
+
+
+def _try_load(SentenceTransformer, load_from: str):
+    """モデルのロードを試みる。SSL エラー時は LOCALFORGE_DISABLE_SSL=1 でリトライ。"""
+    try:
+        model = SentenceTransformer(load_from)
+        logger.info("sentence-transformers モデルのロード完了: %s", load_from)
+        return model
+    except Exception as exc:
+        if not _is_ssl_error(exc):
+            logger.warning("sentence-transformers モデルのロードに失敗しました: %s", exc)
+            return None
+        logger.warning("SSL エラーでモデルのロードに失敗しました: %s", exc)
+
+    disable_ssl = os.environ.get("LOCALFORGE_DISABLE_SSL", "").lower() in ("1", "true", "yes")
+    if not disable_ssl:
+        logger.warning(
+            "SSL 証明書エラーが発生しました。LOCALFORGE_DISABLE_SSL=1 を設定して"
+            " 再起動するか、モデルをローカルに配置してください。"
+        )
+        return None
+
+    logger.info("LOCALFORGE_DISABLE_SSL=1: SSL 検証を無効化してリトライします")
+    _orig_ctx = ssl._create_default_https_context
+    ssl._create_default_https_context = ssl._create_unverified_context  # type: ignore[attr-defined]
+    try:
+        model = SentenceTransformer(load_from)
+        logger.info("sentence-transformers モデルのロード完了 (SSL バイパス): %s", load_from)
+        return model
+    except Exception as exc2:
+        logger.warning("SSL バイパス後もモデルのロードに失敗しました: %s", exc2)
+        return None
+    finally:
+        ssl._create_default_https_context = _orig_ctx  # type: ignore[attr-defined]
+
+
+def _save_model_locally(model) -> None:
+    """ダウンロード済みモデルをプロジェクトの models/ フォルダに保存する。"""
+    try:
+        _LOCAL_MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
+        model.save(str(_LOCAL_MODEL_DIR))
+        # 次回起動時に main.py が検出できるよう環境変数も更新する
+        os.environ["LOCALFORGE_ST_MODEL_PATH"] = str(_LOCAL_MODEL_DIR)
+        logger.info(
+            "sentence-transformers モデルを保存しました: %s"
+            " — 次回起動からローカルファイルを使用します", _LOCAL_MODEL_DIR
+        )
+    except Exception as exc:
+        logger.warning("モデルのローカル保存に失敗しました（動作には影響なし）: %s", exc)
+
+
+def _log_st_help() -> None:
+    logger.warning(
+        "sentence-transformers が利用不可のため BM25 検索にフォールバックします。\n"
+        "解決方法:\n"
+        "  [A] 通常起動でモデルを自動ダウンロード（models/ に保存、以降は再ダウンロード不要）:\n"
+        "        python main.py\n"
+        "  [B] SSL エラーがある場合はスキップしてダウンロード（初回のみ）:\n"
+        "        LOCALFORGE_DISABLE_SSL=1 python main.py\n"
+        "  [C] BM25 のみを使用する（設定不要 — 現在このモードで動作中）"
+    )
+
 
 class VectorAdapter:
     """
-    ChromaDBを使ったベクトルインデックスの永続化・検索を担うアダプター。
-    Ollamaの /api/embeddings エンドポイントで埋め込みを生成する。
+    ChromaDB を使ったベクトルインデックスの永続化・検索を担うアダプター。
+    sentence-transformers の all-MiniLM-L6-v2 でプロセス内埋め込みを生成する。
     """
 
-    def __init__(self, base_url: str = "http://localhost:11434") -> None:
-        self._base_url = base_url.rstrip("/")
-        self._session = requests.Session()
-        self._session.headers.update({"Content-Type": "application/json"})
+    def __init__(self) -> None:
         self._client = None
         self._collection = None
         self._chroma_path: Optional[Path] = None
@@ -43,11 +182,8 @@ class VectorAdapter:
 
     def init_collection(self, project_root: Path) -> None:
         """
-        プロジェクトルートに対応するChromaDBコレクションを初期化する。
+        プロジェクトルートに対応する ChromaDB コレクションを初期化する。
         .localforge/chroma/ に永続化される。
-
-        Args:
-            project_root: プロジェクトのルートディレクトリ
         """
         import chromadb
         from chromadb.config import Settings
@@ -67,43 +203,30 @@ class VectorAdapter:
             name=_COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
         )
-        logger.info("ChromaDBコレクション初期化完了: %s", chroma_path)
+        logger.info("ChromaDB コレクション初期化完了: %s", chroma_path)
 
     def is_initialized(self) -> bool:
         return self._collection is not None
 
     def collection_exists(self, project_root: Path) -> bool:
-        """ChromaDBコレクションがすでにディスク上に存在するかを確認する。"""
         return (project_root / ".localforge" / _CHROMA_DIR).exists()
 
     # ------------------------------------------------------------------
-    # 埋め込み生成
+    # 埋め込み生成（sentence-transformers プロセス内実行）
     # ------------------------------------------------------------------
 
     def _embed(self, text: str) -> Optional[List[float]]:
-        """
-        Ollama /api/embeddings エンドポイントで埋め込みベクトルを生成する。
-
-        Args:
-            text: 埋め込む文字列
-
-        Returns:
-            埋め込みベクトル（失敗時はNone）
-        """
+        model = _load_st_model()
+        if model is None:
+            return None
         try:
-            resp = self._session.post(
-                f"{self._base_url}/api/embeddings",
-                json={"model": _EMBED_MODEL, "prompt": text},
-                timeout=(_CONNECT_TIMEOUT, _EMBED_TIMEOUT),
-            )
-            resp.raise_for_status()
-            return resp.json().get("embedding")
+            embedding = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
+            return embedding.tolist()
         except Exception as exc:
             logger.warning("埋め込み生成エラー: %s", exc)
             return None
 
     def _chunk_to_embed_text(self, chunk: FileChunk) -> str:
-        """ファイルパスとサマリーを結合した埋め込み用テキストを生成する。"""
         parts = [chunk.path]
         if chunk.summary:
             parts.append(chunk.summary)
@@ -114,16 +237,6 @@ class VectorAdapter:
     # ------------------------------------------------------------------
 
     def upsert_chunk(self, chunk: FileChunk) -> bool:
-        """
-        単一FileChunkをベクトルインデックスに追加または更新する。
-        summaryが空の場合はスキップする。
-
-        Args:
-            chunk: 追加・更新するFileChunk
-
-        Returns:
-            成功した場合True
-        """
         if not self._collection:
             logger.warning("コレクションが初期化されていません")
             return False
@@ -150,26 +263,14 @@ class VectorAdapter:
             )
             return True
         except Exception as exc:
-            logger.warning("ChromaDB upsertエラー: %s — %s", chunk.path, exc)
+            logger.warning("ChromaDB upsert エラー: %s — %s", chunk.path, exc)
             return False
 
     def needs_reembedding(self, chunk: FileChunk) -> bool:
-        """
-        指定チャンクがChromaDBに存在しない、またはmtime/sizeが変化している場合Trueを返す。
-
-        Args:
-            chunk: チェックするFileChunk
-
-        Returns:
-            再埋め込みが必要な場合True
-        """
         if not self._collection:
             return True
         try:
-            result = self._collection.get(
-                ids=[chunk.path],
-                include=["metadatas"],
-            )
+            result = self._collection.get(ids=[chunk.path], include=["metadatas"])
             if not result["ids"]:
                 return True
             meta = result["metadatas"][0]
@@ -177,20 +278,10 @@ class VectorAdapter:
             stored_size = meta.get("size", -1)
             return abs(stored_mtime - chunk.mtime) >= 0.001 or stored_size != chunk.size
         except Exception as exc:
-            logger.warning("ChromaDB getエラー: %s — %s", chunk.path, exc)
+            logger.warning("ChromaDB get エラー: %s — %s", chunk.path, exc)
             return True
 
     def migrate_from_chunks(self, chunks: List[FileChunk]) -> int:
-        """
-        既存のJSONLインデックスからChromaDBへ一括移行する。
-        summaryが存在し、まだ埋め込まれていないチャンクのみ処理する。
-
-        Args:
-            chunks: 移行するFileChunkのリスト
-
-        Returns:
-            埋め込みを生成したファイル数
-        """
         embedded = 0
         for chunk in chunks:
             if not chunk.summary:
@@ -198,22 +289,16 @@ class VectorAdapter:
             if self.needs_reembedding(chunk):
                 if self.upsert_chunk(chunk):
                     embedded += 1
-        logger.info("ChromaDB移行完了: %d件を埋め込みました", embedded)
+        logger.info("ChromaDB 移行完了: %d 件を埋め込みました", embedded)
         return embedded
 
     def delete_chunk(self, path: str) -> None:
-        """
-        指定パスのチャンクをコレクションから削除する。
-
-        Args:
-            path: 削除するファイルの相対パス
-        """
         if not self._collection:
             return
         try:
             self._collection.delete(ids=[path])
         except Exception as exc:
-            logger.warning("ChromaDB deleteエラー: %s — %s", path, exc)
+            logger.warning("ChromaDB delete エラー: %s — %s", path, exc)
 
     # ------------------------------------------------------------------
     # セマンティック検索
@@ -226,19 +311,12 @@ class VectorAdapter:
         top_n: int = 5,
     ) -> List[FileChunk]:
         """
-        クエリに意味的に近いFileChunkを返す。
-        ChromaDBが初期化されていない場合はキーワード検索にフォールバックする。
-
-        Args:
-            all_chunks: 全FileChunkのリスト（フォールバック用・パス解決用）
-            query: 検索クエリ
-            top_n: 返す件数
-
-        Returns:
-            上位N件のFileChunkリスト
+        クエリに意味的に近い FileChunk を返す。
+        ChromaDB が初期化されていない、または sentence-transformers が利用不可の場合は
+        BM25 にフォールバックする。
         """
         if not self._collection:
-            return _keyword_fallback(all_chunks, query, top_n)
+            return _bm25_fallback(all_chunks, query, top_n)
 
         try:
             count = self._collection.count()
@@ -246,11 +324,11 @@ class VectorAdapter:
             count = 0
 
         if count == 0:
-            return _keyword_fallback(all_chunks, query, top_n)
+            return _bm25_fallback(all_chunks, query, top_n)
 
         embedding = self._embed(query)
         if embedding is None:
-            return _keyword_fallback(all_chunks, query, top_n)
+            return _bm25_fallback(all_chunks, query, top_n)
 
         try:
             results = self._collection.query(
@@ -259,8 +337,8 @@ class VectorAdapter:
                 include=["metadatas"],
             )
         except Exception as exc:
-            logger.warning("ChromaDBクエリエラー: %s", exc)
-            return _keyword_fallback(all_chunks, query, top_n)
+            logger.warning("ChromaDB クエリエラー: %s", exc)
+            return _bm25_fallback(all_chunks, query, top_n)
 
         chunk_map = {c.path: c for c in all_chunks}
         found: List[FileChunk] = []
@@ -269,18 +347,9 @@ class VectorAdapter:
             if path in chunk_map:
                 found.append(chunk_map[path])
 
-        if not found:
-            return _keyword_fallback(all_chunks, query, top_n)
-
-        return found
+        return found if found else _bm25_fallback(all_chunks, query, top_n)
 
 
-def _keyword_fallback(chunks: List[FileChunk], query: str, top_n: int) -> List[FileChunk]:
-    """ChromaDB未使用時のキーワードベースフォールバック検索。"""
-    query_words = set(query.lower().split())
-
-    def score(chunk: FileChunk) -> int:
-        text = f"{chunk.path} {chunk.summary or ''} {chunk.content[:200]}".lower()
-        return sum(1 for w in query_words if w in text)
-
-    return sorted(chunks, key=score, reverse=True)[:top_n]
+def _bm25_fallback(chunks: List[FileChunk], query: str, top_n: int) -> List[FileChunk]:
+    from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25
+    return get_top_chunks_bm25(chunks, query, top_n)

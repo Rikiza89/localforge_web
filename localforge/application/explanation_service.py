@@ -37,6 +37,27 @@ REPORT_SECTIONS = [
 
 _LOCALFORGE_DIR = ".localforge"
 
+import re as _re
+_HEADING_RE = _re.compile(r"^#{1,3}\s+", _re.MULTILINE)
+
+
+def _strip_leading_heading(content: str, section_name: str) -> str:
+    """
+    LLM がセクションタイトルを先頭に出力した場合に除去する。
+    section_name に一致する最初の見出し行、または単なる先頭見出しを削除する。
+    """
+    text = content.strip()
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return text
+    first = lines[0].strip()
+    # 先頭行が # 見出しであり、かつセクション名を含む場合に除去
+    if _HEADING_RE.match(first):
+        stripped_title = _HEADING_RE.sub("", first).strip()
+        if stripped_title.lower() in section_name.lower() or section_name.lower() in stripped_title.lower():
+            return "".join(lines[1:]).strip()
+    return text
+
 
 class ExplanationService:
     """
@@ -84,31 +105,33 @@ class ExplanationService:
             yield {"error": "ProjectIndexが見つかりません。先にインデックスを構築してください。"}
             return
 
-        index_json = project_index.model_dump_json(
+        chunks = project_index.file_chunks
+        # レポートセクションには summary（構造化テキスト）のみ渡す。
+        # ファイルパス一覧は Q&A フェーズ1専用で、レポートでは不要かつ巨大なので除外する。
+        index_dict = project_index.model_dump(
             include={"project_name", "summary", "total_files", "indexed_files"}
         )
-        chunks = project_index.file_chunks
+        index_json = json.dumps(index_dict, ensure_ascii=False)
 
         total_sections = len(REPORT_SECTIONS)
         completed_sections: List[tuple[str, str]] = []  # (name, content)
 
         for sec_idx, section_name in enumerate(REPORT_SECTIONS):
-            # セクションヘッダーを送信
-            yield {"section": section_name}
+            # セクションヘッダーを送信（インデックスと合計数も含める）
             yield {
-                "progress": {
-                    "done": sec_idx,
-                    "total": total_sections,
-                    "current_file": section_name,
-                }
+                "section": section_name,
+                "section_idx": sec_idx + 1,
+                "section_total": total_sections,
             }
 
-            # セクションに関連するチャンクを選択（セマンティック検索 → キーワードフォールバック）
+            # セクションに関連するチャンクを選択（top_n=6 でプロンプトを抑制）
             relevant_chunks = self._analysis.get_top_chunks_semantic(
-                chunks, section_name, top_n=10
+                chunks, section_name, top_n=6
             )
+            # 各サマリーを1行目のみに絞ってトークンを節約する
             relevant_summaries = [
-                (c.path, c.summary or "") for c in relevant_chunks if c.summary
+                (c.path, (c.summary or "").split("\n")[0][:120])
+                for c in relevant_chunks if c.summary
             ]
 
             # プロンプトを構築してストリーミング生成
@@ -142,6 +165,15 @@ class ExplanationService:
 
             completed_sections.append((section_name, "".join(section_tokens)))
 
+            # セクション完了後に進捗を送信（done = 完了済みセクション数）
+            yield {
+                "progress": {
+                    "done": sec_idx + 1,
+                    "total": total_sections,
+                    "current_file": section_name,
+                }
+            }
+
         # レポートをディスクに保存
         self._save_report(root, completed_sections, project_index.project_name)
 
@@ -174,7 +206,7 @@ class ExplanationService:
         lines: List[str] = [f"# {project_name} — Codebase Report\n\n"]
         for name, content in sections:
             lines.append(f"## {name}\n\n")
-            lines.append(content.strip())
+            lines.append(_strip_leading_heading(content, name))
             lines.append("\n\n---\n\n")
 
         report_path.write_text("".join(lines), encoding="utf-8")
@@ -186,6 +218,8 @@ class ExplanationService:
         model: str,
         question: str,
         history: List[Message],
+        workspace_roots: Optional[List[tuple[Path, str]]] = None,
+        pinned_paths: Optional[List[str]] = None,
     ) -> Generator[dict, None, None]:
         """
         Q&A質問への回答をSSEイベントとしてストリーミング生成する。
@@ -213,11 +247,69 @@ class ExplanationService:
         index_dict["files"] = [c.path for c in chunks]
         index_json = json.dumps(index_dict, ensure_ascii=False)
 
+        # ── ピン留めコンテキスト解決 ──
+        pinned_chunk_contents: List[tuple[str, str]] = []
+        if pinned_paths:
+            yield {"status": "ピン留めコンテキストを展開中..."}
+            try:
+                pinned_chunks, _ = self._analysis.resolve_pinned_chunks(
+                    root, pinned_paths, chunks, max_total=25
+                )
+                _max_pin_chars = self._context.max_qa_file_chars()
+                for pc in pinned_chunks:
+                    fp = root / pc.path
+                    if fp.exists():
+                        try:
+                            content = fp.read_text(encoding="utf-8", errors="replace")
+                            pinned_chunk_contents.append((pc.path, content[:_max_pin_chars]))
+                        except OSError:
+                            pass
+            except Exception as exc:
+                logger.warning("ピン留めコンテキスト解決エラー: %s", exc)
+
+        # ── ワークスペース他プロジェクトのコンテキスト ──
+        workspace_project_data: List[dict] = []
+        if workspace_roots:
+            yield {"status": "ワークスペースプロジェクトを検索中..."}
+            for ws_root, ws_name in workspace_roots[:3]:
+                try:
+                    ws_idx = self._analysis.load_project_index(ws_root)
+                    if not ws_idx:
+                        continue
+                    ws_chunks = ws_idx.file_chunks
+                    ws_top = self._analysis.get_top_chunks_semantic(ws_chunks, question, top_n=5)
+                    ws_exp_chunks, _ = self._analysis.expand_with_dependencies(
+                        ws_chunks, [c.path for c in ws_top], max_total=8
+                    )
+                    ws_summaries = [(c.path, c.summary or "") for c in ws_exp_chunks if c.summary]
+                    ws_contents: List[tuple[str, str]] = []
+                    _max_ws_chars = self._context.max_qa_file_chars() // 2
+                    for wc in ws_exp_chunks[:3]:
+                        fp = ws_root / wc.path
+                        if fp.exists():
+                            try:
+                                content = fp.read_text(encoding="utf-8", errors="replace")
+                                ws_contents.append((wc.path, content[:_max_ws_chars]))
+                            except OSError:
+                                pass
+                    workspace_project_data.append({
+                        "name": ws_name,
+                        "root": str(ws_root),
+                        "summaries": ws_summaries,
+                        "contents": ws_contents,
+                    })
+                except Exception as exc:
+                    logger.warning("ワークスペース [%s] Q&Aエラー: %s", ws_name, exc)
+
         # A6 フェーズ 1: LLM にどのファイルが必要か選ばせる
+        # dep_hints は全チャンクの imports_resolved からプリビルドする（上位200件以内）
+        dep_hints = {c.path: c.imports_resolved for c in chunks if c.imports_resolved}
         yield {"status": "関連ファイルを分析中..."}
         selected_paths: List[str] = []
         try:
-            sel_prompt = self._context.build_qa_file_selection_prompt(question, all_summaries)
+            sel_prompt = self._context.build_qa_file_selection_prompt(
+                question, all_summaries, dep_hints=dep_hints
+            )
             sel_response = self._llm.generate_sync(model, sel_prompt)
             # JSON 配列を抽出（余計なテキストが混入しても壊れないようにする）
             _start = sel_response.find("[")
@@ -232,35 +324,38 @@ class ExplanationService:
 
         # フォールバック: フェーズ 1 が失敗または空の場合はセマンティック検索 top-10 を使用
         if not selected_paths:
-            top_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
+            base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=10)
         else:
-            # 選択されたパス + セマンティック top-5 をマージして重複排除
-            semantic_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=5)
-            seen: set[str] = set(selected_paths)
-            merged = [chunk_map[p] for p in selected_paths if p in chunk_map]
-            for c in semantic_chunks:
-                if c.path not in seen:
-                    merged.append(c)
-                    seen.add(c.path)
-            top_chunks = merged[:10]
+            # フェーズ 1 の選択を優先する。不足分(10件未満)のみセマンティック検索で補完する
+            base_chunks = [chunk_map[p] for p in selected_paths if p in chunk_map]
+            if len(base_chunks) < 10:
+                seen: set[str] = {c.path for c in base_chunks}
+                for c in self._analysis.get_top_chunks_semantic(chunks, question, top_n=10):
+                    if c.path not in seen:
+                        base_chunks.append(c)
+                        seen.add(c.path)
+                        if len(base_chunks) >= 10:
+                            break
 
-        # A1 + B8: フルコンテンツ注入
-        # - FULL 戦略チャンク（≤200 行）: chunk.content をそのまま使う（ディスク再読み不要）
-        # - HYBRID 戦略チャンク（>200 行）: ファイルを再読みして上限文字数まで注入
+        # 依存関係展開: 選択ファイルのimport先/被import元を自動追加してコンテキスト精度を向上させる
+        top_chunks, dep_map = self._analysis.expand_with_dependencies(
+            chunks,
+            [c.path for c in base_chunks],
+            max_total=20,
+        )
+
+        # フルコンテンツ注入: project_index.json は content="" で保存されるため
+        # 常にディスクから再読みする（FULL/HYBRID 問わず）。
         _max_chars = self._context.max_qa_file_chars()
         full_contents: List[tuple[str, str]] = []
         for chunk in top_chunks:
-            if chunk.strategy.value == "full":
-                if chunk.content:
-                    full_contents.append((chunk.path, chunk.content[:_max_chars]))
-            else:  # hybrid
-                file_path = root / chunk.path
-                if file_path.exists():
-                    try:
-                        content = file_path.read_text(encoding="utf-8", errors="replace")
-                        full_contents.append((chunk.path, content[:_max_chars]))
-                    except OSError:
-                        pass
+            file_path = root / chunk.path
+            if file_path.exists():
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="replace")
+                    full_contents.append((chunk.path, content[:_max_chars]))
+                except OSError:
+                    pass
 
         top_summaries = [(c.path, c.summary or "") for c in top_chunks]
 
@@ -270,6 +365,9 @@ class ExplanationService:
             top_summaries=top_summaries,
             full_contents=full_contents,
             conversation_history=history[-10:],
+            dep_map=dep_map,
+            pinned_contents=pinned_chunk_contents or None,
+            workspace_projects=workspace_project_data or None,
         )
 
         start_time = time.time()

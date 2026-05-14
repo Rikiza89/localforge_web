@@ -1,5 +1,5 @@
 /**
- * filetree.js — ファイルツリー展開・右クリックメニューの管理
+ * filetree.js — ファイルツリー展開・右クリックメニュー・ピン留めモードの管理
  * バニラJSのみ使用。外部ライブラリ不使用。
  */
 
@@ -10,6 +10,125 @@ let _selectedFilePath = null;
 
 // 右クリックメニューの対象ファイルパス
 let _contextMenuTarget = null;
+
+// ── ピン留め状態 ──
+let _pinModeActive = false;
+const _pinnedPaths = new Set();    // プロジェクト相対パス（ファイルまたはフォルダ）
+
+/**
+ * ピン留めモードの状態を返す。
+ */
+function isPinModeActive() { return _pinModeActive; }
+
+/**
+ * ピン留めされたパスのリストを返す。
+ */
+function getPinnedPaths() { return [..._pinnedPaths]; }
+
+/**
+ * ピン留めモードを切り替える。
+ */
+function togglePinMode() {
+  _pinModeActive = !_pinModeActive;
+  const btn = document.getElementById("pin-mode-btn");
+  if (btn) btn.classList.toggle("active", _pinModeActive);
+  refreshFileTree();
+  _updatePinStatusBar();
+}
+
+/**
+ * ピン留めをすべてクリアする。
+ */
+function clearPinnedPaths() {
+  _pinnedPaths.clear();
+  _savePinnedToServer();
+  refreshFileTree();
+  _updatePinStatusBar();
+}
+
+/**
+ * ピン留めステータスバーを更新する。
+ */
+function _updatePinStatusBar() {
+  const bar = document.getElementById("pin-status-bar");
+  const txt = document.getElementById("pin-status-text");
+  if (!bar || !txt) return;
+  if (_pinnedPaths.size > 0) {
+    bar.style.display = "flex";
+    txt.textContent = `📎 ${_pinnedPaths.size}件ピン留め`;
+  } else {
+    bar.style.display = "none";
+  }
+}
+
+/**
+ * ピン留め状態をサーバーに保存する。
+ */
+async function _savePinnedToServer() {
+  try {
+    await apiRequest("/api/project/pinned", "POST", { paths: [..._pinnedPaths] });
+  } catch (e) {
+    console.warn("ピン留め保存エラー:", e.message);
+  }
+}
+
+/**
+ * サーバーからピン留め状態を読み込む。
+ */
+async function loadPinnedFromServer() {
+  try {
+    const data = await apiRequest("/api/project/pinned");
+    _pinnedPaths.clear();
+    (data.pinned || []).forEach(p => _pinnedPaths.add(p));
+    _updatePinStatusBar();
+    if (_pinModeActive) refreshFileTree();
+  } catch (e) {
+    console.warn("ピン留め読み込みエラー:", e.message);
+  }
+}
+
+/**
+ * パスがピン留めされているかチェックする。
+ */
+function _isPinned(path) { return _pinnedPaths.has(path); }
+
+/**
+ * パスのピン留め状態をトグルし、フォルダなら子ファイルも一括操作する。
+ * @param {string} path - トグルするパス
+ * @param {boolean} isDir - ディレクトリかどうか
+ * @param {Array} childPaths - ディレクトリの場合の子パスリスト
+ */
+function _togglePin(path, isDir, childPaths) {
+  if (isDir) {
+    const allPinned = childPaths.every(cp => _pinnedPaths.has(cp));
+    if (allPinned) {
+      childPaths.forEach(cp => _pinnedPaths.delete(cp));
+      _pinnedPaths.delete(path);
+    } else {
+      _pinnedPaths.add(path);
+      childPaths.forEach(cp => _pinnedPaths.add(cp));
+    }
+  } else {
+    if (_pinnedPaths.has(path)) {
+      _pinnedPaths.delete(path);
+    } else {
+      _pinnedPaths.add(path);
+    }
+  }
+  _savePinnedToServer();
+  _updatePinStatusBar();
+  // チェックボックス状態を再描画せずに更新（軽量）
+  document.querySelectorAll(`.tree-pin-check[data-path="${CSS.escape(path)}"]`).forEach(cb => {
+    cb.checked = _pinnedPaths.has(path);
+  });
+  if (isDir) {
+    childPaths.forEach(cp => {
+      document.querySelectorAll(`.tree-pin-check[data-path="${CSS.escape(cp)}"]`).forEach(cb => {
+        cb.checked = _pinnedPaths.has(cp);
+      });
+    });
+  }
+}
 
 /**
  * ファイルツリーをレンダリングする。
@@ -27,6 +146,22 @@ function renderFileTree(nodes, container) {
 }
 
 /**
+ * ノード以下のすべてのファイルパスを再帰的に収集する。
+ * @param {Object} node - FileNode
+ * @returns {Array<string>} ファイルパスのリスト
+ */
+function _collectFilePaths(node) {
+  if (!node.is_dir) return [node.path];
+  const paths = [];
+  if (node.children) {
+    for (const child of node.children) {
+      paths.push(..._collectFilePaths(child));
+    }
+  }
+  return paths;
+}
+
+/**
  * 再帰的にツリーのUL要素を構築する。
  * @param {Array} nodes - FileNodeの配列
  * @param {number} depth - ネストの深さ
@@ -40,8 +175,9 @@ function buildTreeList(nodes, depth) {
   for (const node of nodes) {
     const li = document.createElement("li");
 
+    const isPinned = _isPinned(node.path);
     const nodeEl = document.createElement("div");
-    nodeEl.className = `tree-node ${node.status || "unindexed"}`;
+    nodeEl.className = `tree-node ${node.status || "unindexed"}${isPinned ? " pinned" : ""}`;
     nodeEl.dataset.path = node.path;
     nodeEl.dataset.isDir = node.is_dir ? "true" : "false";
 
@@ -51,6 +187,27 @@ function buildTreeList(nodes, depth) {
       spacer.style.width = "12px";
       spacer.style.display = "inline-block";
       nodeEl.appendChild(spacer);
+    }
+
+    // ピン留めモード: チェックボックスを追加
+    if (_pinModeActive) {
+      const childFilePaths = _collectFilePaths(node);
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "tree-pin-check";
+      cb.dataset.path = node.path;
+      // フォルダは子ファイルがすべてピン留めされている場合にチェック
+      cb.checked = node.is_dir
+        ? (childFilePaths.length > 0 && childFilePaths.every(p => _pinnedPaths.has(p)))
+        : isPinned;
+      cb.addEventListener("change", (e) => {
+        e.stopPropagation();
+        _togglePin(node.path, node.is_dir, childFilePaths);
+        // ノードのpinnedクラスを更新
+        nodeEl.classList.toggle("pinned", _pinnedPaths.has(node.path));
+      });
+      cb.addEventListener("click", (e) => e.stopPropagation());
+      nodeEl.appendChild(cb);
     }
 
     // アイコン
@@ -87,7 +244,7 @@ function buildTreeList(nodes, depth) {
         icon.textContent = isExpanded ? "▶" : "▼";
       });
     } else if (!node.is_dir) {
-      // ファイルクリックで選択
+      // ファイルクリックで選択（ピン留めモード中も選択は維持）
       nodeEl.addEventListener("click", () => {
         document.querySelectorAll(".tree-node.selected").forEach(el =>
           el.classList.remove("selected")
@@ -334,6 +491,9 @@ async function triggerRegenerateFile(filePath) {
       onFileWritten: (path) => {
         showAlert(`ファイルを再生成しました: ${path}`, "success");
         refreshFileTree();
+      },
+      onWarning: (msg) => {
+        showAlert(msg, "warning", 8000);
       },
       onDone: () => { updateStatusBar("再生成完了"); },
       onError: (err) => {

@@ -27,8 +27,9 @@ CODE_EXTENSIONS = frozenset({
     ".html", ".css", ".scss", ".sass", ".vue", ".svelte",
     ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php",
     ".sh", ".bash", ".zsh", ".yaml", ".yml", ".toml", ".json",
-    ".md", ".rst", ".txt", ".sql", ".graphql", ".proto",
+    ".md", ".rst", ".txt", ".sql", ".ddl", ".dml", ".graphql", ".proto",
     ".dockerfile", ".tf", ".hcl",
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".odt", ".ods", ".odp",
 })
 
 

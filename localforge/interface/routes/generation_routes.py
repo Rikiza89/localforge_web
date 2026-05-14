@@ -155,18 +155,61 @@ def stream_plan():
         f"- {e['hash']} {e['message']}" for e in git_log_entries
     )
 
-    # E: RAGで既存ファイルの関連サマリーを取得してプランプロンプトに注入する
+    # ProjectIndex（プロジェクト全体概要）を取得してプランプロンプトに注入する
+    project_index_json = None
     file_summaries = []
     try:
-        index_path = root / ".localforge" / "index.jsonl"
-        chunks = _get_index_adapter().load_chunks(index_path)
-        if chunks:
-            top_chunks = _get_analysis_svc().get_top_chunks_semantic(
-                chunks, user_prompt, top_n=15
+        analysis_svc = _get_analysis_svc()
+        pi_path = root / ".localforge" / "project_index.json"
+        index_adapter = _get_index_adapter()
+        project_index = index_adapter.load_index(pi_path)
+        if project_index:
+            import json as _json
+            index_dict = project_index.model_dump(
+                include={"project_name", "summary", "total_files", "indexed_files"}
+            )
+            index_dict["files"] = [c.path for c in project_index.file_chunks]
+            project_index_json = _json.dumps(index_dict, ensure_ascii=False)
+            # RAG: クエリに関連するファイルサマリーを追加
+            top_chunks = analysis_svc.get_top_chunks_semantic(
+                project_index.file_chunks, user_prompt, top_n=15
             )
             file_summaries = [(c.path, c.summary) for c in top_chunks if c.summary]
     except Exception as exc:
-        logger.warning("RAGファイルサマリー取得エラー: %s", exc)
+        logger.warning("ProjectIndex/RAGファイルサマリー取得エラー: %s", exc)
+
+    # ── ピン留めコンテキスト ──
+    pinned_contents: list = []
+    try:
+        pinned_paths = project_svc.get_pinned_context(root)
+        if pinned_paths:
+            pi_path = root / ".localforge" / "project_index.json"
+            pi = _get_index_adapter().load_index(pi_path)
+            if pi:
+                pin_chunks, _ = analysis_svc.resolve_pinned_chunks(
+                    root, pinned_paths, pi.file_chunks, max_total=15
+                )
+                _max_pin = 4000
+                for pc in pin_chunks:
+                    fp = root / pc.path
+                    if fp.exists():
+                        try:
+                            pinned_contents.append((pc.path, fp.read_text(encoding="utf-8", errors="replace")[:_max_pin]))
+                        except OSError:
+                            pass
+    except Exception as exc:
+        logger.warning("プランピン留めコンテキスト解決エラー: %s", exc)
+
+    # ── ワークスペースプロジェクトのサマリー ──
+    workspace_summaries: list = []
+    try:
+        ws_roots = project_svc.get_workspace_roots(root)
+        for ws_root, ws_name in ws_roots[:3]:
+            ws_idx = _get_index_adapter().load_index(ws_root / ".localforge" / "project_index.json")
+            if ws_idx:
+                workspace_summaries.append((ws_name, ws_idx.summary[:300]))
+    except Exception as exc:
+        logger.warning("ワークスペースサマリー取得エラー: %s", exc)
 
     gen = generation_svc.stream_plan(
         root=root,
@@ -177,6 +220,9 @@ def stream_plan():
         context_md=context_md,
         git_log=git_log,
         file_summaries=file_summaries,
+        project_index_json=project_index_json,
+        pinned_contents=pinned_contents or None,
+        workspace_summaries=workspace_summaries or None,
     )
     return _sse_response(gen)
 
@@ -365,22 +411,28 @@ def _synthesize_plan_for_file(root: Path, file_path: str) -> GenerationPlan:
     project_description = project_index.summary if project_index else ""
 
     # 各ファイルの最初のチャンクのサマリーを使ってPlannedFileを合成
+    # 既存ファイルは action="modify" に設定して誤上書きを防ぐ
     file_map: dict[str, str] = {}
     for chunk in chunks:
         if chunk.path not in file_map:
             file_map[chunk.path] = chunk.summary or chunk.path
 
     planned_files = [
-        PlannedFile(path=p, description=s, action="create")
+        PlannedFile(
+            path=p,
+            description=s,
+            action="modify" if (root / p).exists() else "create",
+        )
         for p, s in file_map.items()
     ]
 
     # 対象ファイルがインデックスにない場合でも必ずリストに含める
     if not any(f.path == file_path for f in planned_files):
+        action = "modify" if (root / file_path).exists() else "create"
         planned_files.append(PlannedFile(
             path=file_path,
             description=f"{file_path} を再生成する",
-            action="create",
+            action=action,
         ))
 
     return GenerationPlan(

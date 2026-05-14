@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from localforge.domain.exceptions import TokenBudgetExceededWarning
 from localforge.domain.models import FileChunk, GenerationPlan, Message, ProjectIndex
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # トークン推定係数（単語数 × この係数でトークン数を推定）
 _WORDS_TO_TOKENS = 1.3
 # デフォルトトークン上限（現代的なローカルモデルの文脈長に合わせて引き上げ）
-_DEFAULT_TOKEN_LIMIT = 12000
+_DEFAULT_TOKEN_LIMIT = 131072
 
 
 def _estimate_tokens(text: str) -> int:
@@ -67,11 +67,9 @@ class ContextService:
         """
         estimated = _estimate_tokens(prompt)
         if estimated > self._token_limit:
-            msg = (
-                f"トークン予算超過 [{label}]: 推定={estimated}, 上限={self._token_limit}"
+            logger.debug(
+                "トークン予算超過 [%s]: 推定=%d, 上限=%d", label, estimated, self._token_limit
             )
-            logger.warning(msg)
-            # 警告例外はログのみ（処理継続）
         return prompt
 
     # ------------------------------------------------------------------
@@ -87,6 +85,9 @@ class ContextService:
         git_log: str,
         file_summaries: Optional[List[tuple[str, str]]] = None,
         model_name: str = "",
+        project_index_json: Optional[str] = None,
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+        workspace_summaries: Optional[List[tuple[str, str]]] = None,
     ) -> str:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
@@ -99,6 +100,7 @@ class ContextService:
             context_md: context.mdの内容
             git_log: gitログ（直近5コミット）
             file_summaries: RAG検索で選出した既存ファイルサマリーのリスト（任意）
+            project_index_json: ProjectIndexのJSON文字列（プロジェクト全体の概要、任意）
 
         Returns:
             組み立てたプロンプト文字列
@@ -106,6 +108,11 @@ class ContextService:
         parts = [
             f"プロジェクト名: {folder_name}",
         ]
+
+        # プロジェクト全体の概要を最優先で注入（Resume/Generateの精度向上）
+        if project_index_json:
+            parts.append(f"プロジェクト全体の概要:\n{project_index_json}")
+
         if file_tree_text.strip():
             parts.append(f"現在のファイル構成:\n{file_tree_text}")
 
@@ -120,6 +127,16 @@ class ContextService:
             parts.append(f"プロジェクトコンテキスト:\n{context_md}")
         if git_log.strip():
             parts.append(f"最近のgitコミット:\n{git_log}")
+
+        # ピン留めファイル（ユーザーが選択した既存コード）
+        if pinned_contents:
+            pin_texts = "\n".join(f"--- {p} ---\n{c[:4000]}" for p, c in pinned_contents[:10])
+            parts.append(f"[ピン留めされた既存コード — 必ず参照・統合すること]\n{pin_texts}")
+
+        # ワークスペースプロジェクトのサマリー（外部モジュール情報）
+        if workspace_summaries:
+            ws_lines = "\n".join(f"- [{name}] {summary}" for name, summary in workspace_summaries[:5])
+            parts.append(f"ワークスペース内の他プロジェクト（外部モジュールとして参照可能）:\n{ws_lines}")
 
         # モデル特有の指示の追加
         if "deepseek-r1" in model_name.lower():
@@ -402,50 +419,6 @@ class ContextService:
         # )
         return self._guard_budget(prompt, f"file_summary:{file_path}")
 
-    def build_project_index_prompt(
-        self,
-        file_summaries: List[tuple[str, str]],
-        folder_tree: str,
-        root_configs: str,
-    ) -> str:
-        """
-        ProjectIndexマスタードキュメント生成のプロンプトを組み立てる。
-
-        Args:
-            file_summaries: [(ファイルパス, サマリー)] のリスト
-            folder_tree: ディレクトリツリーのテキスト表現
-            root_configs: ルート設定ファイルの内容
-
-        Returns:
-            組み立てたプロンプト文字列
-        """
-        summaries_text = "\n".join(
-            f"- {path}: {summary}" for path, summary in file_summaries
-        )
-
-        # トークン予算管理：サマリーが多すぎる場合は切り詰め
-        if _estimate_tokens(summaries_text) > self._token_limit * 0.6:
-            truncated_summaries = file_summaries[: int(len(file_summaries) * 0.6)]
-            summaries_text = "\n".join(
-                f"- {path}: {summary}" for path, summary in truncated_summaries
-            )
-            logger.warning("ProjectIndexプロンプト: サマリー数を削減しました")
-
-        parts = [
-            f"ディレクトリ構成:\n{folder_tree}",
-        ]
-        if root_configs.strip():
-            parts.append(f"ルート設定ファイル:\n{root_configs}")
-        parts.append(f"ファイルサマリー:\n{summaries_text}")
-        parts.append(
-            "上記の情報を基に、プロジェクト全体の概要を3〜5文の日本語で作成してください。"
-            " プロジェクトの目的、主要コンポーネント、技術スタックを含めてください。"
-            " 概要のみを出力してください。"
-        )
-
-        prompt = "\n\n".join(parts)
-        return self._guard_budget(prompt, "project_index")
-
     def build_report_section_prompt(
         self,
         section_name: str,
@@ -472,7 +445,10 @@ class ContextService:
             f"関連ファイルサマリー:\n{summaries_text}\n\n"
             f"上記の情報を基に、以下のセクションについて詳細な分析を日本語で記述してください。\n"
             f"セクション: {section_name}\n\n"
-            f"このセクションの内容のみを出力してください。マークダウン形式で記述してください。"
+            f"出力ルール:\n"
+            f"- セクションタイトル（見出し行）は出力しないでください。内容のみを出力してください。\n"
+            f"- マークダウン形式で記述してください（本文中の小見出しは ## / ### を使用可）。\n"
+            f"- このセクションの内容のみを出力してください。"
         )
         return self._guard_budget(prompt, f"report_section:{section_name}"), _estimate_tokens(prompt)
 
@@ -480,25 +456,34 @@ class ContextService:
         self,
         question: str,
         all_summaries: List[tuple[str, str]],
+        dep_hints: Optional[Dict[str, List[str]]] = None,
     ) -> str:
         """
         Q&A フェーズ 1: 質問に答えるために必要なファイルを LLM に選ばせるプロンプト。
         LLM はファイルパスの JSON 配列のみを返す。
+        dep_hints が指定された場合、各ファイルのインポート先を併記して選択精度を高める。
 
         Args:
             question: ユーザーの質問
             all_summaries: 全ファイルの (パス, サマリー) リスト
+            dep_hints: ファイルパス → インポート先パスのリスト（省略可）
 
         Returns:
             プロンプト文字列
         """
-        # 長すぎる場合は先頭 200 件に絞る（プロンプト爆発防止）
         shown = all_summaries[:200]
-        file_list = "\n".join(f"- {p}: {s}" for p, s in shown)
+        lines: List[str] = []
+        for p, s in shown:
+            line = f"- {p}: {s}"
+            if dep_hints and p in dep_hints:
+                deps_str = ", ".join(dep_hints[p][:5])
+                line += f" [imports: {deps_str}]"
+            lines.append(line)
+        file_list = "\n".join(lines)
         prompt = (
             "以下のファイル一覧から、この質問に答えるために読む必要があるファイルを選んでください。\n"
             "JSONの配列形式でファイルパスのみを出力してください。例: [\"src/foo.py\", \"lib/bar.py\"]\n"
-            "最大10件まで選択できます。不要なファイルは含めないでください。\n\n"
+            "最大10件まで選択できます。[imports: ...] はそのファイルが依存するプロジェクト内ファイルを示します。\n\n"
             f"質問: {question}\n\n"
             f"ファイル一覧:\n{file_list}\n\n"
             "選択したファイルのパスをJSONの配列として出力してください:"
@@ -512,6 +497,9 @@ class ContextService:
         top_summaries: List[tuple[str, str]],
         full_contents: List[tuple[str, str]],
         conversation_history: List[Message],
+        dep_map: Optional[Dict[str, List[str]]] = None,
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+        workspace_projects: Optional[List[Dict[str, object]]] = None,
     ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
@@ -519,14 +507,65 @@ class ContextService:
         Args:
             question: ユーザーの質問
             project_index_json: ProjectIndexのJSON文字列
-            top_summaries: 上位5件のファイルサマリー
-            full_contents: ハイブリッドファイルの全内容
+            top_summaries: 上位ファイルのサマリー
+            full_contents: ファイルの全内容
             conversation_history: 最近10件の会話履歴
+            dep_map: ファイルパス → インポート先パスのリスト（依存関係マップ）
 
         Returns:
-            組み立てたプロンプト文字列
+            (プロンプト文字列, 推定トークン数)
         """
         parts = [f"プロジェクト概要:\n{project_index_json}"]
+
+        # 依存関係マップ（存在する場合）— ファイル間の実際のインポート関係をLLMに提示する
+        if dep_map:
+            # 逆引きマップを構築: 誰がこのファイルをインポートしているか
+            imported_by: Dict[str, List[str]] = {}
+            for path, deps in dep_map.items():
+                for dep in deps:
+                    if dep not in imported_by:
+                        imported_by[dep] = []
+                    if path not in imported_by[dep]:
+                        imported_by[dep].append(path)
+
+            dep_lines: List[str] = []
+            all_dep_paths = set(dep_map.keys()) | set(imported_by.keys())
+            for path in sorted(all_dep_paths):
+                fwd = dep_map.get(path, [])
+                rev = imported_by.get(path, [])
+                parts_line: List[str] = []
+                if fwd:
+                    parts_line.append(f"imports → {', '.join(fwd)}")
+                if rev:
+                    parts_line.append(f"imported by ← {', '.join(rev)}")
+                if parts_line:
+                    dep_lines.append(f"  {path}: {' | '.join(parts_line)}")
+
+            if dep_lines:
+                parts.append(
+                    "ファイル依存関係マップ（実際のimport文から解決済み）:\n"
+                    + "\n".join(dep_lines)
+                )
+
+        # ピン留めファイル（ユーザー選択済み・常にフル内容で注入）
+        if pinned_contents:
+            pin_texts = "\n".join(f"--- {p} ---\n{c}" for p, c in pinned_contents[:15])
+            parts.append(f"[ピン留めコンテキスト — ユーザーが選択したファイル]\n{pin_texts}")
+
+        # ワークスペース内の他プロジェクトのコンテキスト
+        if workspace_projects:
+            for wp in workspace_projects[:3]:
+                wp_name = wp.get("name", "")
+                wp_summaries = wp.get("summaries", [])
+                wp_contents = wp.get("contents", [])
+                if wp_summaries or wp_contents:
+                    header = f"[ワークスペース: {wp_name}]"
+                    lines: List[str] = [header]
+                    for p, s in (wp_summaries or [])[:5]:
+                        lines.append(f"  - {p}: {s}")
+                    for p, c in (wp_contents or [])[:3]:
+                        lines.append(f"  --- {p} ---\n  {c[:2000]}")
+                    parts.append("\n".join(lines))
 
         summaries_text = "\n".join(
             f"- {p}: {s}" for p, s in top_summaries
@@ -557,8 +596,8 @@ class ContextService:
                     "あなたはシニアソフトウェアアーキテクトとして、上記のコードベースに基づいて極めて詳細かつ網羅的に回答してください。\n"
                     "以下のルールに厳密に従ってください：\n"
                     "1. 抽象的な説明を避け、具体的なクラス名、関数名、変数名、データ構造を明記すること。\n"
-                    "2. 情報を引用する際は、必ず正確なファイルパス（例: `src/main.py`）を併記すること。\n"
-                    "3. 対象コンポーネントが他のどのファイル・モジュールに依存しているか、また何から依存されているか（依存関係）を追跡して説明すること。\n"
+                    "2. 情報を引用する際は、必ず正確なファイルパス（例: `src/main.py`）を併記すること。上記の依存関係マップに記載されたパスのみを使用し、推測しないこと。\n"
+                    "3. 対象コンポーネントが他のどのファイル・モジュールに依存しているか、また何から依存されているか（依存関係）を依存関係マップに基づいて説明すること。\n"
                     "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
                     "5. 提供されたコンテキスト内に情報が不足している場合は、推測で補わず「〇〇の詳細はコンテキストにありません」と正直に述べること。\n"
                 )
@@ -566,11 +605,6 @@ class ContextService:
 
         prompt = "\n\n".join(parts)
         return self._guard_budget(prompt, "qa"), _estimate_tokens(prompt)
-
-        # parts.append(f"質問: {question}\n\n上記のコードベースに基づいて回答してください。")
-
-        # prompt = "\n\n".join(parts)
-        # return self._guard_budget(prompt, "qa")
 
     # ------------------------------------------------------------------
     # Resumeモード用コンテキスト

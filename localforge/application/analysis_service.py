@@ -14,7 +14,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Generator, List, Optional, Tuple
+from typing import Callable, Dict, Generator, List, Optional, Set, Tuple
 
 from localforge.application.context_service import ContextService
 from localforge.domain.exceptions import IndexBuildError
@@ -49,6 +49,14 @@ _HEURISTIC_EXTENSIONS = frozenset({
     ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
     ".woff", ".woff2", ".ttf", ".eot",
     ".map", ".snap", ".csv", ".xml",
+    # ドキュメント形式
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".odt", ".ods", ".odp",
+})
+# バイナリドキュメント形式（テキスト抽出が必要な拡張子）
+_DOCUMENT_EXTENSIONS = frozenset({
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+    ".odt", ".ods", ".odp",
 })
 # ロックファイル名（依存関係のロックファイル）
 _LOCK_FILE_NAMES = frozenset({
@@ -58,8 +66,6 @@ _LOCK_FILE_NAMES = frozenset({
 })
 # この実質行数以下のファイルはLLMを使わない
 _HEURISTIC_LINE_THRESHOLD = 20
-# 1バッチあたりのトークン予算（適応的バッチサイズ計算に使用）
-_TOKEN_BUDGET_PER_BATCH = 3500
 # ヒューリスティック処理中にN件ごとにディスクへ中間保存する
 _INCREMENTAL_SAVE_INTERVAL = 50
 # .localforgeディレクトリ名
@@ -89,8 +95,12 @@ def _detect_language(path: Path) -> str:
         ".css": "css", ".scss": "css", ".vue": "vue",
         ".rb": "ruby", ".php": "php", ".cs": "csharp",
         ".sh": "bash", ".yaml": "yaml", ".yml": "yaml",
-        ".toml": "toml", ".json": "json", ".sql": "sql",
+        ".toml": "toml", ".json": "json", ".sql": "sql", ".ddl": "sql", ".dml": "sql",
         ".md": "markdown",
+        ".pdf": "pdf", ".docx": "docx", ".doc": "docx",
+        ".xlsx": "xlsx", ".xls": "xlsx",
+        ".pptx": "pptx", ".ppt": "pptx",
+        ".odt": "document", ".ods": "spreadsheet", ".odp": "presentation",
     }
     return ext_map.get(path.suffix.lower(), "text")
 
@@ -159,6 +169,84 @@ def _is_auto_generated(content: str) -> bool:
     return bool(_AUTO_GENERATED_PATTERNS.search(header))
 
 
+def _auto_project_summary(project_name: str, chunks: List[FileChunk]) -> str:
+    """
+    LLM を使わずにファイルメタデータとシンボルから構造化プロジェクトサマリーを生成する。
+    全ファイルをカバーし、トークン制限に依存しない。
+    """
+    from collections import Counter, defaultdict
+
+    total = len(chunks)
+
+    # 言語別ファイル数カウント
+    lang_counter: Counter = Counter()
+    for c in chunks:
+        lang = c.language or "other"
+        lang_counter[lang] += 1
+
+    lang_parts = ", ".join(
+        f"{lang} ({count})"
+        for lang, count in lang_counter.most_common(12)
+    )
+
+    # トップレベルディレクトリ別の集計
+    dir_files: dict = defaultdict(list)
+    for c in chunks:
+        parts = c.path.replace("\\", "/").split("/")
+        top = parts[0] if len(parts) > 1 else "(root)"
+        dir_files[top].append(c)
+
+    dir_lines: List[str] = []
+    for top_dir, dir_chunks in sorted(dir_files.items(), key=lambda x: -len(x[1])):
+        # このディレクトリで見つかったクラス名を最大5件収集
+        class_names: List[str] = []
+        for c in dir_chunks:
+            for sym in (c.symbols or []):
+                if sym.kind == "class" and sym.name not in class_names:
+                    class_names.append(sym.name)
+                if len(class_names) >= 5:
+                    break
+            if len(class_names) >= 5:
+                break
+        class_hint = f" — Classes: {', '.join(class_names)}" if class_names else ""
+        dir_lines.append(f"  {top_dir}/  ({len(dir_chunks)} files){class_hint}")
+
+    # エントリポイント検出
+    entry_names = {
+        "main.py", "app.py", "index.py", "manage.py", "server.py",
+        "index.js", "index.ts", "main.ts", "main.js", "app.js", "app.ts",
+        "index.jsx", "index.tsx", "main.go", "main.rs", "main.java",
+    }
+    entry_points = [
+        c.path for c in chunks
+        if Path(c.path).name.lower() in entry_names
+    ]
+
+    # ドキュメントファイル一覧
+    doc_exts = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".odt"}
+    doc_files = [c.path for c in chunks if Path(c.path).suffix.lower() in doc_exts]
+
+    lines: List[str] = [
+        f"Project: {project_name} ({total} files indexed)",
+        f"Languages: {lang_parts}",
+        "",
+        "Directory breakdown:",
+    ]
+    lines.extend(dir_lines[:25])  # 最大25ディレクトリ
+    if len(dir_files) > 25:
+        lines.append(f"  ... and {len(dir_files) - 25} more directories")
+
+    if entry_points:
+        lines.append("")
+        lines.append(f"Entry points: {', '.join(entry_points[:10])}")
+
+    if doc_files:
+        lines.append("")
+        lines.append(f"Documents: {', '.join(Path(p).name for p in doc_files[:20])}")
+
+    return "\n".join(lines)
+
+
 def _try_heuristic_summary(chunk: FileChunk) -> Optional[str]:
     """
     ファイルが自明な場合にLLMを使わずサマリーを返す。
@@ -176,6 +264,17 @@ def _try_heuristic_summary(chunk: FileChunk) -> Optional[str]:
 
     if path.name in _LOCK_FILE_NAMES:
         return "依存関係のロックファイル"
+
+    if path.suffix.lower() in _DOCUMENT_EXTENSIONS:
+        if not content.strip():
+            return f"{path.suffix.upper()[1:]} document (empty or extraction failed)"
+        preview = content[:500].strip()
+        # word boundary truncation
+        if len(content) > 500:
+            last_space = preview.rfind(" ")
+            if last_space > 200:
+                preview = preview[:last_space]
+        return f"[{path.suffix.upper()[1:]}] {preview}"
 
     if path.suffix.lower() in _HEURISTIC_EXTENSIONS:
         lang = _detect_language(path)
@@ -245,51 +344,6 @@ def _try_path_summary(path: Path, size: int) -> Optional[str]:
     return None
 
 
-def _make_batches(
-    needs_llm: List[Tuple["Path", "FileChunk"]],
-) -> List[List["FileChunk"]]:
-    """
-    トークン予算に基づいてファイルを適応的にバッチ分割する。
-    小さなファイルは1バッチにまとめて詰め込み、大きなファイルは単独バッチにする。
-    推定トークン数 = len(content) // 4（文字ベースの高速ヒューリスティック）
-    """
-    batches: List[List["FileChunk"]] = []
-    current_batch: List["FileChunk"] = []
-    current_tokens = 0
-
-    for _, chunk in needs_llm:
-        estimated = len(chunk.content) // 4
-        if current_batch and current_tokens + estimated > _TOKEN_BUDGET_PER_BATCH:
-            batches.append(current_batch)
-            current_batch = [chunk]
-            current_tokens = estimated
-        else:
-            current_batch.append(chunk)
-            current_tokens += estimated
-
-    if current_batch:
-        batches.append(current_batch)
-
-    return batches
-
-
-def _parse_batch_summaries(response: str) -> Dict[str, str]:
-    """
-    バッチLLM応答から FILE: / SUMMARY: ペアを解析してパス→サマリーの辞書を返す。
-    認識できない行は無視するため、LLMが余計なテキストを出力しても壊れない。
-    """
-    result: Dict[str, str] = {}
-    current_path: Optional[str] = None
-    for raw_line in response.splitlines():
-        line = raw_line.strip()
-        if line.startswith("FILE:"):
-            current_path = line[len("FILE:"):].strip()
-        elif line.startswith("SUMMARY:") and current_path is not None:
-            result[current_path] = line[len("SUMMARY:"):].strip()
-            current_path = None
-    return result
-
-
 class AnalysisService:
     """
     コードベース分析のためのインデックス構築を担当するサービスクラス。
@@ -338,7 +392,11 @@ class AnalysisService:
         """
         mtime, size = self._fs.get_mtime_size(path)
         try:
-            source = self._fs.read_text(path)
+            if path.suffix.lower() in _DOCUMENT_EXTENSIONS:
+                from localforge.infrastructure.document_extractor import extract_text as _extract_doc
+                source = _extract_doc(path)
+            else:
+                source = self._fs.read_text(path)
         except Exception as exc:
             logger.warning("ファイル読み込みエラー: %s — %s", path, exc)
             source = ""
@@ -555,43 +613,61 @@ class AnalysisService:
                 except Exception as exc:
                     logger.warning("中間インデックス保存失敗: %s", exc)
 
-            # Tier-2: LLMバッチ処理（適応的バッチサイズ + 2ワーカー並列）
-            batches = _make_batches(needs_llm)
-
-            def _run_batch(
-                batch_chunks: List[FileChunk],
-            ) -> Tuple[List[FileChunk], Dict[str, str]]:
+            # Tier-2: tree-sitter シンボル抽出（LLM呼び出しなし）
+            from localforge.infrastructure.symbol_extractor import extract_symbols, symbols_to_summary
+            t2_since_flush = 0
+            for _f, chunk in needs_llm:
                 try:
-                    prompt = self._context.build_batch_file_summary_prompt(batch_chunks)
-                    response = self._llm.generate_sync(model, prompt)
-                    return batch_chunks, _parse_batch_summaries(response)
+                    syms = extract_symbols(chunk.path, chunk.content, chunk.language)
+                    chunk.symbols = syms
+                    summary = symbols_to_summary(chunk.path, chunk.language, syms)
+                    chunk.summary = summary if summary else f"{chunk.path} ({chunk.language or 'unknown'})"
                 except Exception as exc:
-                    logger.warning("バッチサマリー生成エラー: %s", exc)
-                    return batch_chunks, {}
-
-            # CPU推論では並列LLMバッチはコンテキストスイッチのオーバーヘッドが勝るため直列化する
-            _llm_workers = 2 if self._llm.cuda_available else 1
-            with ThreadPoolExecutor(max_workers=_llm_workers) as llm_executor:
-                future_to_batch = {
-                    llm_executor.submit(_run_batch, batch): batch
-                    for batch in batches
-                }
-                for future in as_completed(future_to_batch):
-                    batch_chunks, summaries = future.result()
-                    for chunk in batch_chunks:
-                        summary = summaries.get(chunk.path, "").strip()
-                        chunk.summary = summary if summary else "サマリー生成に失敗しました"
-                        chunk.indexed_at = datetime.utcnow()
-                        all_chunks.append(chunk)
-                        done_count += 1
-                        if self._vector is not None:
-                            embed_queue.append(chunk)
-                        yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
-                    # LLMバッチ完了ごとにディスクへフラッシュ（再起動時の復元ポイント）
+                    logger.warning("シンボル抽出エラー: %s — %s", chunk.path, exc)
+                    chunk.summary = f"{chunk.path} ({chunk.language or 'unknown'})"
+                chunk.indexed_at = datetime.utcnow()
+                all_chunks.append(chunk)
+                done_count += 1
+                t2_since_flush += 1
+                if self._vector is not None:
+                    embed_queue.append(chunk)
+                yield {"progress": {"done": done_count, "total": total, "current_file": chunk.path}}
+                if t2_since_flush >= _INCREMENTAL_SAVE_INTERVAL:
                     try:
                         self._index_adapter.save_chunks(index_path, all_chunks)
                     except Exception as exc:
                         logger.warning("中間インデックス保存失敗: %s", exc)
+                    t2_since_flush = 0
+
+            if t2_since_flush > 0:
+                try:
+                    self._index_adapter.save_chunks(index_path, all_chunks)
+                except Exception as exc:
+                    logger.warning("中間インデックス保存失敗: %s", exc)
+
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        # 依存関係解決フェーズ: インポート文を実際のプロジェクト内ファイルパスに解決する
+        # キャッシュ済みで imports_resolved が空のチャンクも移行対象にする
+        # ――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+        from localforge.infrastructure.dependency_resolver import resolve_imports as _resolve_imports
+        _all_project_paths = {c.path.replace("\\", "/") for c in all_chunks}
+        _resolvable_langs = {"python", "javascript", "typescript", "tsx", "jsx"}
+        for _chunk in all_chunks:
+            if _chunk.imports_resolved:
+                continue  # already resolved (cached from a previous run)
+            if not _chunk.content:
+                continue  # Tier-0 stubs have no content to parse
+            if (_chunk.language or "").lower() not in _resolvable_langs:
+                continue
+            try:
+                _chunk.imports_resolved = _resolve_imports(
+                    _chunk.path.replace("\\", "/"),
+                    _chunk.content,
+                    _chunk.language,
+                    _all_project_paths,
+                )
+            except Exception as _exc:
+                logger.debug("依存関係解決エラー (%s): %s", _chunk.path, _exc)
 
         # インデックスを保存
         try:
@@ -678,45 +754,42 @@ class AnalysisService:
     ) -> ProjectIndex:
         """
         ファイルチャンクからProjectIndexを構築する内部メソッド。
+        LLMを使わず _auto_project_summary() でサマリーを生成する。
 
         Args:
             root: プロジェクトルート
-            model: 使用するモデル名
+            model: 使用するモデル名（後方互換性のため残すが使用しない）
             chunks: FileChunkのリスト
 
         Returns:
             ProjectIndex
         """
-        # ファイルツリーのテキスト表現
-        folder_tree = self._build_tree_text(root)
-
-        # ルート設定ファイルの内容
-        root_config_content = self._read_root_configs(root)
-
-        # サマリーリスト
-        file_summaries = [
-            (c.path, c.summary or "") for c in chunks if c.summary
+        summary = _auto_project_summary(root.name, chunks)
+        # content と symbols は project_index.json に保存しない。
+        # content は index.jsonl またはディスクから取得でき、
+        # symbols はすでに summary に反映済み。
+        # これにより project_index.json が数MB以下に収まり高速ロードが実現する。
+        slim_chunks = [
+            FileChunk(
+                path=c.path,
+                content="",
+                strategy=c.strategy,
+                size=c.size,
+                mtime=c.mtime,
+                summary=c.summary,
+                language=c.language,
+                indexed_at=c.indexed_at,
+                imports_resolved=c.imports_resolved,
+            )
+            for c in chunks
         ]
-
-        # ProjectIndex概要をLLMで生成
-        prompt = self._context.build_project_index_prompt(
-            file_summaries=file_summaries,
-            folder_tree=folder_tree,
-            root_configs=root_config_content,
-        )
-        try:
-            summary = self._llm.generate_sync(model, prompt).strip()
-        except Exception as exc:
-            logger.error("ProjectIndex概要生成エラー: %s", exc)
-            summary = f"プロジェクト概要の生成に失敗しました: {exc}"
-
         return ProjectIndex(
             project_root=str(root),
             project_name=root.name,
             summary=summary,
-            file_chunks=chunks,
-            total_files=len(chunks),
-            indexed_files=len(chunks),
+            file_chunks=slim_chunks,
+            total_files=len(slim_chunks),
+            indexed_files=len(slim_chunks),
             updated_at=datetime.utcnow(),
         )
 
@@ -881,7 +954,151 @@ class AnalysisService:
         """
         if self._vector is not None and self._vector.is_initialized():
             return self._vector.get_top_chunks_semantic(chunks, query, top_n)
-        return self.get_top_chunks_by_keywords(chunks, query, top_n)
+        # ChromaDB 未使用時は BM25 にフォールバック（旧キーワードカウントより高精度）
+        from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25
+        return get_top_chunks_bm25(chunks, query, top_n)
+
+    def expand_with_dependencies(
+        self,
+        chunks: List[FileChunk],
+        selected_paths: List[str],
+        max_total: int = 20,
+        max_depth: int = 5,
+    ) -> tuple[List[FileChunk], Dict[str, List[str]]]:
+        """
+        Expand a set of selected file chunks with their transitive import dependencies
+        up to max_depth levels deep (BFS).
+
+        For each file at each level, adds:
+          - Files it imports (forward deps)
+          - Files that import it (reverse deps)
+
+        Results are capped at max_total to stay within token budget.
+
+        Args:
+            chunks: all FileChunks from the project index
+            selected_paths: initially selected file paths
+            max_total: maximum number of chunks to return
+            max_depth: how many import hops to follow (default 5)
+
+        Returns:
+            (expanded_chunks, dep_map) where dep_map maps each path to the list
+            of project files it imports (for display in the Q&A prompt).
+        """
+        from localforge.infrastructure.dependency_resolver import build_imported_by
+
+        chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
+        imported_by: Dict[str, List[str]] = build_imported_by(chunks)
+
+        seen: Set[str] = set(selected_paths)
+        ordered: List[str] = [p for p in selected_paths if p in chunk_map]
+
+        # BFS frontier: paths added at the previous depth level
+        frontier: List[str] = list(ordered)
+
+        for _depth in range(max_depth):
+            if not frontier or len(ordered) >= max_total:
+                break
+            next_frontier: List[str] = []
+            for path in frontier:
+                if len(ordered) >= max_total:
+                    break
+                chunk = chunk_map.get(path)
+                if chunk is None:
+                    continue
+                for dep in chunk.imports_resolved:
+                    if dep not in seen and dep in chunk_map and len(ordered) < max_total:
+                        seen.add(dep)
+                        ordered.append(dep)
+                        next_frontier.append(dep)
+                for rev in imported_by.get(path, []):
+                    if rev not in seen and rev in chunk_map and len(ordered) < max_total:
+                        seen.add(rev)
+                        ordered.append(rev)
+                        next_frontier.append(rev)
+            frontier = next_frontier
+
+        result_chunks = [chunk_map[p] for p in ordered if p in chunk_map]
+
+        # Build dep_map for prompt display — only non-empty resolved deps
+        dep_map: Dict[str, List[str]] = {}
+        for chunk in result_chunks:
+            if chunk.imports_resolved:
+                dep_map[chunk.path] = chunk.imports_resolved
+
+        return result_chunks, dep_map
+
+    def load_chunks_for_roots(
+        self,
+        roots: List[Tuple[Path, str]],
+    ) -> List[Tuple[str, str, "FileChunk"]]:
+        """
+        複数プロジェクトルートからチャンクをロードして (project_name, root_str, chunk) タプルとして返す。
+
+        Args:
+            roots: (project_root_path, project_name) のリスト
+
+        Returns:
+            (project_name, root_str, FileChunk) のリスト
+        """
+        result: List[Tuple[str, str, FileChunk]] = []
+        for proj_root, proj_name in roots:
+            idx = self.load_project_index(proj_root)
+            if idx:
+                for chunk in idx.file_chunks:
+                    result.append((proj_name, str(proj_root), chunk))
+        return result
+
+    def resolve_pinned_chunks(
+        self,
+        root: Path,
+        pinned_paths: List[str],
+        chunks: List[FileChunk],
+        max_total: int = 30,
+    ) -> Tuple[List[FileChunk], Dict[str, List[str]]]:
+        """
+        ピン留めパス（ファイルまたはフォルダ）をチャンクに解決し、
+        import依存関係を自動展開して返す。
+
+        フォルダが指定された場合、そのフォルダ以下の全ファイルを選択する。
+        各ファイルのimport先・被import元を自動追加する。
+
+        Args:
+            root: プロジェクトルート
+            pinned_paths: ピン留めされたパスのリスト（プロジェクト相対）
+            chunks: 全 FileChunk のリスト
+            max_total: 最大返却チャンク数
+
+        Returns:
+            (expanded_chunks, dep_map)
+        """
+        chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
+        resolved_files: List[str] = []
+        seen: Set[str] = set()
+
+        for pinned in pinned_paths:
+            norm = pinned.replace("\\", "/").rstrip("/")
+            # フォルダの場合: そのプレフィックスを持つ全チャンクを選択
+            is_folder = norm in {
+                c.path.replace("\\", "/").rsplit("/", 1)[0] for c in chunks
+            } or not any(
+                c.path.replace("\\", "/") == norm for c in chunks
+            )
+            if is_folder:
+                prefix = norm + "/"
+                for c in chunks:
+                    cp = c.path.replace("\\", "/")
+                    if cp == norm or cp.startswith(prefix):
+                        if cp not in seen:
+                            seen.add(cp)
+                            resolved_files.append(cp)
+            else:
+                if norm in chunk_map and norm not in seen:
+                    seen.add(norm)
+                    resolved_files.append(norm)
+
+        # import依存関係を展開（expand_with_dependenciesを再利用）
+        return self.expand_with_dependencies(chunks, resolved_files, max_total=max_total)
 
     def get_top_chunks_by_keywords(
         self,
@@ -890,21 +1107,16 @@ class AnalysisService:
         top_n: int = 5,
     ) -> List[FileChunk]:
         """
-        キーワードオーバーラップでファイルチャンクをランキングして上位N件を返す。
+        BM25 でファイルチャンクをランキングして上位 N 件を返す。
+        旧キーワードカウント実装を BM25 に置き換え。
 
         Args:
-            chunks: 全FileChunkのリスト
+            chunks: 全 FileChunk のリスト
             query: 検索クエリ文字列
             top_n: 返す件数
 
         Returns:
-            上位N件のFileChunkリスト
+            上位 N 件の FileChunk リスト
         """
-        query_words = set(query.lower().split())
-
-        def score(chunk: FileChunk) -> int:
-            text = f"{chunk.path} {chunk.summary or ''} {chunk.content[:200]}".lower()
-            return sum(1 for w in query_words if w in text)
-
-        sorted_chunks = sorted(chunks, key=score, reverse=True)
-        return sorted_chunks[:top_n]
+        from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25
+        return get_top_chunks_bm25(chunks, query, top_n)

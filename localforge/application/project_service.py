@@ -18,6 +18,8 @@ from localforge.domain.models import (
     ProjectConfig,
     ProjectMode,
     ResumeState,
+    WorkspaceEntry,
+    WorkspaceState,
 )
 from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
 from localforge.infrastructure.git_adapter import GitAdapter
@@ -33,6 +35,14 @@ _INDEX_JSONL = "index.jsonl"
 _GENERATION_LOG = "generation_log.jsonl"
 _PROJECT_INDEX = "project_index.json"
 _APP_LOG = "app.log"
+_WORKSPACE_FILE = "workspace.json"
+# サブプロジェクト検出の最大探索深さ
+_SUBPROJECT_SCAN_DEPTH = 3
+# スキャン除外ディレクトリ名
+_SCAN_SKIP_DIRS = frozenset({
+    ".git", ".localforge", "__pycache__", "node_modules",
+    ".venv", "venv", ".tox", "dist", "build",
+})
 
 
 class ProjectService:
@@ -373,3 +383,173 @@ class ProjectService:
         if self._current_project:
             self._current_project.config.model = model
             self.save_config(root, self._current_project.config)
+
+    # ------------------------------------------------------------------
+    # ワークスペース管理
+    # ------------------------------------------------------------------
+
+    def _scan_subprojects(self, root: Path, current: Path, depth: int) -> List[Path]:
+        """
+        サブディレクトリを再帰的にスキャンして .localforge を持つパスを返す。
+        rootとcurrentが同じ（トップレベル呼び出し）の場合はrootを除く。
+        """
+        found: List[Path] = []
+        if depth > _SUBPROJECT_SCAN_DEPTH:
+            return found
+        try:
+            for child in sorted(current.iterdir()):
+                if not child.is_dir():
+                    continue
+                if child.name in _SCAN_SKIP_DIRS:
+                    continue
+                lf = child / _LOCALFORGE_DIR
+                if lf.exists() and lf.is_dir():
+                    found.append(child)
+                    # .localforge が見つかったらその中は探索しない
+                else:
+                    found.extend(self._scan_subprojects(root, child, depth + 1))
+        except PermissionError:
+            pass
+        return found
+
+    def load_workspace(self, root: Path) -> WorkspaceState:
+        """
+        workspace.json を読み込む。存在しない場合は空の WorkspaceState を返す。
+
+        Args:
+            root: プロジェクトルート
+
+        Returns:
+            WorkspaceState
+        """
+        ws_path = root / _LOCALFORGE_DIR / _WORKSPACE_FILE
+        if ws_path.exists():
+            try:
+                return WorkspaceState.model_validate_json(ws_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("workspace.json パースエラー: %s", exc)
+        return WorkspaceState()
+
+    def save_workspace(self, root: Path, state: WorkspaceState) -> None:
+        """
+        workspace.json を保存する。
+
+        Args:
+            root: プロジェクトルート
+            state: 保存する WorkspaceState
+        """
+        ws_path = root / _LOCALFORGE_DIR / _WORKSPACE_FILE
+        ws_path.parent.mkdir(parents=True, exist_ok=True)
+        ws_path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
+
+    def get_workspace_roots(self, root: Path) -> List[tuple[Path, str]]:
+        """
+        アクティブプロジェクトのワークスペースに属する全プロジェクトパスを返す。
+        自動検出（サブプロジェクト）+ 手動追加を統合し、ルート自身は除く。
+
+        Args:
+            root: アクティブプロジェクトルート
+
+        Returns:
+            (project_path, project_name) のリスト
+        """
+        result: List[tuple[Path, str]] = []
+        seen: set[str] = {str(root)}
+
+        # 自動検出: ルート配下の .localforge を持つサブディレクトリ
+        for sub in self._scan_subprojects(root, root, 0):
+            key = str(sub)
+            if key not in seen:
+                seen.add(key)
+                result.append((sub, sub.name))
+
+        # 手動追加
+        state = self.load_workspace(root)
+        for entry in state.manual_entries:
+            p = Path(entry.root)
+            key = str(p)
+            if key not in seen and p.is_dir():
+                seen.add(key)
+                result.append((p, entry.name))
+
+        return result
+
+    def add_to_workspace(self, root: Path, project_path: Path) -> WorkspaceState:
+        """
+        外部プロジェクトをワークスペースに手動追加する。
+
+        Args:
+            root: アクティブプロジェクトルート
+            project_path: 追加するプロジェクトパス
+
+        Returns:
+            更新後の WorkspaceState
+        """
+        state = self.load_workspace(root)
+        existing = {e.root for e in state.manual_entries}
+        if str(project_path) not in existing and project_path != root:
+            state.manual_entries.append(
+                WorkspaceEntry(root=str(project_path), name=project_path.name, auto=False)
+            )
+            self.save_workspace(root, state)
+        return state
+
+    def remove_from_workspace(self, root: Path, project_path: Path) -> WorkspaceState:
+        """
+        手動追加されたプロジェクトをワークスペースから削除する。
+
+        Args:
+            root: アクティブプロジェクトルート
+            project_path: 削除するプロジェクトパス
+
+        Returns:
+            更新後の WorkspaceState
+        """
+        state = self.load_workspace(root)
+        state.manual_entries = [
+            e for e in state.manual_entries if e.root != str(project_path)
+        ]
+        self.save_workspace(root, state)
+        return state
+
+    def get_pinned_context(self, root: Path) -> List[str]:
+        """
+        ピン留めされたコンテキストパスを返す。
+
+        Args:
+            root: プロジェクトルート
+
+        Returns:
+            ピン留めパスのリスト
+        """
+        if self._current_project and self._current_project.root == root:
+            return list(self._current_project.config.context_pinned)
+        config_path = root / _LOCALFORGE_DIR / _CONFIG_FILE
+        if config_path.exists():
+            try:
+                cfg = ProjectConfig.model_validate_json(config_path.read_text(encoding="utf-8"))
+                return list(cfg.context_pinned)
+            except Exception:
+                pass
+        return []
+
+    def save_pinned_context(self, root: Path, paths: List[str]) -> None:
+        """
+        ピン留めコンテキストパスを保存する。
+
+        Args:
+            root: プロジェクトルート
+            paths: 保存するパスのリスト
+        """
+        if self._current_project and self._current_project.root == root:
+            self._current_project.config.context_pinned = paths
+            self.save_config(root, self._current_project.config)
+        else:
+            config_path = root / _LOCALFORGE_DIR / _CONFIG_FILE
+            if config_path.exists():
+                try:
+                    cfg = ProjectConfig.model_validate_json(config_path.read_text(encoding="utf-8"))
+                    cfg.context_pinned = paths
+                    config_path.write_text(cfg.model_dump_json(indent=2), encoding="utf-8")
+                except Exception as exc:
+                    logger.warning("ピン留め保存エラー: %s", exc)

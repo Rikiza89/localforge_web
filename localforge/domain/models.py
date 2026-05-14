@@ -40,6 +40,26 @@ class ChunkStrategy(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
+# シンボル（tree-sitter AST 抽出）
+# ---------------------------------------------------------------------------
+
+class Symbol(BaseModel):
+    """ファイルから抽出されたコードシンボル（関数・クラス・インポートなど）。"""
+    kind: Literal[
+        "function", "method", "class", "import",
+        # SQL DDL/DML kinds
+        "table", "view", "procedure", "trigger", "index", "alter",
+        "reference", "insert", "update", "delete", "merge",
+    ]
+    name: str
+    signature: str = ""
+    docstring: str = ""
+    line_start: int = 0
+    line_end: int = 0
+    parent: Optional[str] = None  # メソッドの場合はクラス名
+
+
+# ---------------------------------------------------------------------------
 # ファイルノード（ファイルツリー表示用）
 # ---------------------------------------------------------------------------
 
@@ -79,6 +99,22 @@ class GenerationPlan(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# ワークスペース（複数プロジェクト管理）
+# ---------------------------------------------------------------------------
+
+class WorkspaceEntry(BaseModel):
+    """ワークスペースに属するプロジェクトのエントリ。"""
+    root: str               # 絶対パス
+    name: str               # フォルダ名
+    auto: bool = False      # True = .localforgeスキャンで自動検出
+
+
+class WorkspaceState(BaseModel):
+    """ワークスペースの状態（.localforge/workspace.json に保存）。"""
+    manual_entries: List["WorkspaceEntry"] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # ファイルチャンク（インデックス用）
 # ---------------------------------------------------------------------------
 
@@ -92,6 +128,8 @@ class FileChunk(BaseModel):
     summary: Optional[str] = None
     language: Optional[str] = None
     indexed_at: Optional[datetime] = None
+    symbols: List["Symbol"] = Field(default_factory=list)
+    imports_resolved: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +206,8 @@ class ProjectConfig(BaseModel):
     num_thread: Optional[int] = None
     # False にするとインデックス時の RAG 埋め込みフェーズをスキップする（CPU 専用機向け）
     enable_rag: bool = True
+    # コンテキストピン留めされたパス（プロジェクト相対、ファイルまたはフォルダ）
+    context_pinned: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)

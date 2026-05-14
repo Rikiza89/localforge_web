@@ -164,6 +164,7 @@ function startStream(url, outputEl, handlers) {
   }
 
   function _dispatch(data) {
+    if (_closed) return;
     _resetIdle();
 
     if (data.heartbeat) return;
@@ -201,7 +202,7 @@ function startStream(url, outputEl, handlers) {
     }
 
     if (data.section !== undefined) {
-      if (handlers.onSection) handlers.onSection(data.section);
+      if (handlers.onSection) handlers.onSection(data.section, data.section_idx, data.section_total);
       return;
     }
 
@@ -218,6 +219,16 @@ function startStream(url, outputEl, handlers) {
 
     if (data.status !== undefined) {
       updateStatusBar(data.status);
+      return;
+    }
+
+    if (data.checkpoint !== undefined) {
+      if (handlers.onCheckpoint) handlers.onCheckpoint(data.checkpoint);
+      return;
+    }
+
+    if (data.warning !== undefined) {
+      if (handlers.onWarning) handlers.onWarning(data.warning);
       return;
     }
   }
@@ -326,7 +337,7 @@ async function startPostStream(url, body, outputEl, handlers) {
           if (handlers.onToken) handlers.onToken(data.token);
         }
         if (data.section !== undefined && handlers.onSection) {
-          handlers.onSection(data.section);
+          handlers.onSection(data.section, data.section_idx, data.section_total);
         }
         if (data.file_written !== undefined && handlers.onFileWritten) {
           handlers.onFileWritten(data.file_written);
@@ -334,6 +345,15 @@ async function startPostStream(url, body, outputEl, handlers) {
         if (data.progress !== undefined && handlers.onProgress) {
           const { done: d, total, current_file } = data.progress;
           handlers.onProgress(d, total, current_file || "");
+        }
+        if (data.status !== undefined) {
+          updateStatusBar(data.status);
+        }
+        if (data.checkpoint !== undefined && handlers.onCheckpoint) {
+          handlers.onCheckpoint(data.checkpoint);
+        }
+        if (data.warning !== undefined && handlers.onWarning) {
+          handlers.onWarning(data.warning);
         }
       }
     }
@@ -428,7 +448,7 @@ async function apiRequest(url, method = "GET", body = null) {
   const json = await response.json();
 
   if (!response.ok) {
-    throw new Error(json.message || `HTTP ${response.status}`);
+    throw new Error(json.error || json.message || `HTTP ${response.status}`);
   }
 
   return json;

@@ -26,7 +26,6 @@ def _get_project_svc() -> ProjectService:
 
 
 def _get_llm() -> OllamaClient:
-    """現在のアプリコンテキストからOllamaClientを取得する。"""
     return current_app.config["llm"]
 
 
@@ -86,9 +85,11 @@ def open_project():
     except LocalForgeError as exc:
         return _error_response(exc)
 
+    llm = _get_llm()
+
     # プロジェクト設定の num_thread を LLM クライアントに適用する
     if project.config.num_thread is not None:
-        _get_llm().set_num_thread(project.config.num_thread)
+        llm.set_num_thread(project.config.num_thread)
 
     mode = project.mode.value
     banner_messages = {
@@ -460,3 +461,47 @@ def ollama_status():
             "models": [],
             "error": f"モデル一覧の取得に失敗しました: {exc}",
         })
+
+
+@bp.route("/pinned", methods=["GET"])
+def get_pinned():
+    """
+    現在のプロジェクトのピン留めコンテキストパスを返す。
+
+    Response JSON:
+        pinned: [str]
+    """
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    return jsonify({"pinned": project_svc.get_pinned_context(project.root)})
+
+
+@bp.route("/pinned", methods=["POST"])
+def save_pinned():
+    """
+    ピン留めコンテキストパスを保存する。
+
+    Request JSON:
+        paths: [str]  プロジェクト相対パスのリスト（ファイルまたはフォルダ）
+
+    Response JSON:
+        ok, pinned
+    """
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    data = request.get_json(silent=True) or {}
+    paths = data.get("paths", [])
+    if not isinstance(paths, list):
+        return jsonify({"error": "InvalidData", "message": "pathsはリストである必要があります"}), 400
+
+    paths = [str(p) for p in paths if isinstance(p, str) and p.strip()]
+    project_svc.save_pinned_context(project.root, paths)
+    logger.info("ピン留めコンテキスト更新: %d件", len(paths))
+
+    return jsonify({"ok": True, "pinned": paths})
