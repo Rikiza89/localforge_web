@@ -161,7 +161,9 @@ class OllamaClient:
         prompt: str,
         system: Optional[str] = None,
         read_timeout: int = _READ_TIMEOUT,
-        num_ctx: Optional[int] = None,  # Add num_ctx here
+        num_ctx: Optional[int] = None,
+        num_predict: Optional[int] = None,
+        keep_alive: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """
         Ollama generate APIを使用してテキストをストリーミング生成する。
@@ -170,6 +172,10 @@ class OllamaClient:
             model: 使用するOllamaモデル名
             prompt: ユーザープロンプト
             system: システムプロンプト（省略可能）
+            read_timeout: 読み込みタイムアウト秒数
+            num_ctx: コンテキスト長（省略時はOllamaデフォルト）
+            num_predict: 最大生成トークン数（-1で無制限）
+            keep_alive: モデルをRAMに保持する時間 (例: "1h", "0") 省略時Ollamaデフォルト(5m)
 
         Yields:
             テキストチャンク（文字列）
@@ -185,26 +191,18 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
-
-        # options: dict = {}
-        # if self.cuda_available:
-        #     options["num_gpu"] = -1          # 全レイヤーをGPUにオフロード
-        # if self.num_thread is not None:
-        #     options["num_thread"] = self.num_thread
-        # if options:
-        #     payload["options"] = options
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
 
         options: dict = {}
         if self.cuda_available:
-            options["num_gpu"] = -1          # 全レイヤーをGPUにオフロード
+            options["num_gpu"] = -1
         if self.num_thread is not None:
             options["num_thread"] = self.num_thread
-            
-        # --- NEW CODE START ---
         if num_ctx is not None:
-            options["num_ctx"] = num_ctx     # トークンコンテキスト上限を適用
-        # --- NEW CODE END ---
-            
+            options["num_ctx"] = num_ctx
+        if num_predict is not None:
+            options["num_predict"] = num_predict
         if options:
             payload["options"] = options
 
@@ -355,6 +353,8 @@ class OllamaClient:
         prompt: str,
         system: Optional[str] = None,
         num_ctx: Optional[int] = None,
+        num_predict: Optional[int] = None,
+        keep_alive: Optional[str] = None,
         read_timeout: int = _GENERATE_READ_TIMEOUT,
     ) -> str:
         """
@@ -382,4 +382,6 @@ class OllamaClient:
             system=system,
             read_timeout=read_timeout,
             num_ctx=num_ctx,
+            num_predict=num_predict,
+            keep_alive=keep_alive,
         ))

@@ -385,20 +385,26 @@ class ExplanationService:
         yield {"phase": "依存関係展開中", "detail": f"展開後 {len(top_chunks)} ファイル確定"}
 
         # ── Phase F: ファイル内容読み込み ──
-        yield {"phase": "ファイル内容読み込み中", "detail": f"{len(top_chunks)} ファイルをディスクから読み込み"}
-        yield {"status": f"ファイル内容を読み込み中... ({len(top_chunks)} ファイル)"}
+        # CPU専用でピン留めなしの場合はフル内容を省略してサマリーのみ使用する。
+        # フル内容は prompt を何千トークンも膨らませ、CPU での prefill を数倍遅くする。
+        _inject_full_content = bool(pinned_base_chunks) or not _is_cpu
         full_contents: List[tuple[str, str]] = []
-        for chunk in top_chunks:
-            # ピン留めファイルはすでに pinned_chunk_contents に含まれているので重複しない
-            if pinned_base_chunks and any(p == chunk.path for p, _ in pinned_chunk_contents):
-                continue
-            file_path = root / chunk.path
-            if file_path.exists():
-                try:
-                    content = file_path.read_text(encoding="utf-8", errors="replace")
-                    full_contents.append((chunk.path, content))
-                except OSError:
-                    pass
+        if _inject_full_content:
+            yield {"phase": "ファイル内容読み込み中", "detail": f"{len(top_chunks)} ファイルをディスクから読み込み"}
+            yield {"status": f"ファイル内容を読み込み中... ({len(top_chunks)} ファイル)"}
+            _max_chars = self._context.max_qa_file_chars() if not _is_cpu else 3000
+            for chunk in top_chunks:
+                if pinned_base_chunks and any(p == chunk.path for p, _ in pinned_chunk_contents):
+                    continue
+                file_path = root / chunk.path
+                if file_path.exists():
+                    try:
+                        content = file_path.read_text(encoding="utf-8", errors="replace")
+                        full_contents.append((chunk.path, content[:_max_chars]))
+                    except OSError:
+                        pass
+        else:
+            yield {"phase": "ファイル選択完了", "detail": f"CPU最適化モード: サマリーのみ使用 ({len(top_chunks)} ファイル)"}
 
         top_summaries = [(c.path, c.summary or "") for c in top_chunks]
 
@@ -421,27 +427,42 @@ class ExplanationService:
         preview_tail = prompt[-200:] if len(prompt) > 1200 else ""
         preview = preview_head + ("\n...[中略]...\n" + preview_tail if preview_tail else "")
         yield {"prompt_preview": preview, "prompt_tokens": tokens}
-        yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})"}
-        yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
 
-        # モデルがすでに VRAM/RAM にロードされているか確認する
+        # CPU 用 Ollama パラメータ調整:
+        #   num_ctx  = 実際のプロンプト + 512 の余裕 (最大 4096, 最小 1024)
+        #             → KV キャッシュが小さくなりモデルロードと prefill が大幅に速くなる
+        #   num_predict = 600  → 応答を適切な長さに制限して生成時間を短縮
+        #   keep_alive  = "2h" → Q&A 間でモデルを RAM に保持してコールドスタートを防ぐ
+        _num_ctx: Optional[int] = None
+        _num_predict: Optional[int] = None
+        if _is_cpu:
+            _num_ctx = min(max(tokens + 512, 1024), 4096)
+            _num_predict = 600
+
+        # モデルがすでに RAM にロードされているか確認する
         model_loaded = getattr(self._llm, "is_model_loaded", lambda m: None)(model)
         if model_loaded is False:
-            yield {"phase": "Ollamaモデルロード中", "detail": f"{model} をメモリに読み込み中 (CPUでは数分かかります)"}
+            yield {"phase": "Ollamaモデルロード中", "detail": f"{model} をRAMに読み込み中 — CPUでは数分かかります"}
             yield {"status": f"Ollamaがモデルをロード中... ({model}) — 最初のトークンが来るまでお待ちください"}
         else:
-            yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})"}
+            yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})" + (f"  [num_ctx={_num_ctx}, num_predict={_num_predict}]" if _is_cpu else "")}
             yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
 
         start_time = time.time()
         answer_tokens: List[str] = []
         _first_token_received = False
         try:
-            for token in self._llm.stream_completion(model, prompt):
+            for token in self._llm.stream_completion(
+                model,
+                prompt,
+                num_ctx=_num_ctx,
+                num_predict=_num_predict,
+                keep_alive="2h",
+            ):
                 if not _first_token_received:
                     _first_token_received = True
                     _load_s = time.time() - start_time
-                    if _load_s > 5:
+                    if _load_s > 3:
                         yield {"phase": "Ollama生成中", "detail": f"最初のトークン到着 (待機 {_load_s:.1f}s)"}
                         yield {"status": f"Ollamaが回答を生成中... (待機 {_load_s:.1f}s 後に開始)"}
                 answer_tokens.append(token)
