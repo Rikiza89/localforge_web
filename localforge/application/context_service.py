@@ -577,13 +577,19 @@ class ContextService:
                         lines.append(f"  --- {p} ---\n  {c[:2000]}")
                     parts.append("\n".join(lines))
 
-        # 会話履歴 — 予算を圧迫しないよう古い履歴から切り詰める
+        # 会話履歴 — O(n) トリミング。各メッセージのトークン数を事前計算し差分更新する。
+        _instr_tokens = _estimate_tokens(instructions)
+        _parts_tokens = _estimate_tokens("\n\n".join(parts))
         if conversation_history:
             history_msgs = list(conversation_history[-10:])
-            _budget_check = self._token_limit - _estimate_tokens("\n\n".join(parts)) - _estimate_tokens(instructions) - 4096
-            while history_msgs and _estimate_tokens(
-                "\n".join(f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}" for m in history_msgs)
-            ) > max(_budget_check // 4, 500):
+            _max_history_tokens = max((self._token_limit - _parts_tokens - _instr_tokens - 4096) // 4, 500)
+            _msg_tokens = [
+                _estimate_tokens(f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}")
+                for m in history_msgs
+            ]
+            _total_history = sum(_msg_tokens)
+            while history_msgs and _total_history > _max_history_tokens:
+                _total_history -= _msg_tokens.pop(0)
                 history_msgs.pop(0)
             if history_msgs:
                 history_text = "\n".join(
@@ -591,10 +597,10 @@ class ContextService:
                     for m in history_msgs
                 )
                 parts.append(f"会話履歴:\n{history_text}")
+                _parts_tokens += _estimate_tokens(f"会話履歴:\n{history_text}") + 2
 
         # 残りの予算を計算してファイルコンテンツを注入（ピン留め優先）
-        # 指示文と固定部分のコストを差し引いた残量を算出する
-        _fixed_cost = _estimate_tokens("\n\n".join(parts)) + _estimate_tokens(instructions) + 200
+        _fixed_cost = _parts_tokens + _instr_tokens + 200
         available = max(self._token_limit - _fixed_cost, 0)
 
         # ピン留めファイルを優先して注入（予算内）

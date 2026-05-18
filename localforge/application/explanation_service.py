@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Generator, List, Optional
@@ -117,8 +118,16 @@ class ExplanationService:
         completed_sections: List[tuple[str, str]] = []  # (name, content)
 
         _is_cpu = not getattr(self._llm, "cuda_available", False)
-        _r_num_ctx: Optional[int] = 16384 if _is_cpu else None
+        # 4096 is sufficient for report section prompts (≤1500 tokens each)
+        _r_num_ctx: Optional[int] = 4096 if _is_cpu else None
         _r_num_predict: Optional[int] = -1 if _is_cpu else None
+
+        # Pre-fetch all section semantic searches in parallel to avoid blocking on the first section
+        def _fetch_section_chunks(section_name: str) -> list:
+            return self._analysis.get_top_chunks_semantic(chunks, section_name, top_n=6)
+
+        with ThreadPoolExecutor(max_workers=min(len(REPORT_SECTIONS), 4)) as ex:
+            all_relevant_chunks = list(ex.map(_fetch_section_chunks, REPORT_SECTIONS))
 
         for sec_idx, section_name in enumerate(REPORT_SECTIONS):
             # セクションヘッダーを送信（インデックスと合計数も含める）
@@ -128,10 +137,8 @@ class ExplanationService:
                 "section_total": total_sections,
             }
 
-            # セクションに関連するチャンクを選択（top_n=6 でプロンプトを抑制）
-            relevant_chunks = self._analysis.get_top_chunks_semantic(
-                chunks, section_name, top_n=6
-            )
+            # セクションに関連するチャンクを選択（事前並列計算済み）
+            relevant_chunks = all_relevant_chunks[sec_idx]
             # 各サマリーを1行目のみに絞ってトークンを節約する
             relevant_summaries = [
                 (c.path, (c.summary or "").split("\n")[0][:120])
@@ -266,15 +273,20 @@ class ExplanationService:
                 )
                 pinned_base_chunks = pinned_chunks
                 yield {"phase": "ピン留めファイル解決中", "detail": f"依存関係を含む {len(pinned_chunks)} ファイルを取得"}
-                for pc in pinned_chunks:
+
+                def _read_pinned(pc):
                     fp = root / pc.path
                     if fp.exists():
                         try:
-                            # 文字数上限なし — build_qa_prompt のトークン予算に委ねる
-                            content = fp.read_text(encoding="utf-8", errors="replace")
-                            pinned_chunk_contents.append((pc.path, content))
+                            return (pc.path, fp.read_text(encoding="utf-8", errors="replace"))
                         except OSError as exc:
                             logger.warning("ピン留めファイル読み込みエラー [%s]: %s", pc.path, exc)
+                    return None
+
+                with ThreadPoolExecutor(max_workers=min(len(pinned_chunks), 8)) as ex:
+                    pinned_chunk_contents = [
+                        r for r in ex.map(_read_pinned, pinned_chunks) if r is not None
+                    ]
             except Exception as exc:
                 logger.warning("ピン留めコンテキスト解決エラー: %s", exc)
 
@@ -283,11 +295,14 @@ class ExplanationService:
         if workspace_roots:
             yield {"phase": "ワークスペース検索中", "detail": f"{len(workspace_roots)} プロジェクト"}
             yield {"status": "ワークスペースプロジェクトを検索中..."}
-            for ws_root, ws_name in workspace_roots[:3]:
+            _max_ws_chars = self._context.max_qa_file_chars() // 2
+
+            def _load_workspace(ws_args):
+                ws_root, ws_name = ws_args
                 try:
                     ws_idx = self._analysis.load_project_index(ws_root)
                     if not ws_idx:
-                        continue
+                        return None
                     ws_chunks = ws_idx.file_chunks
                     ws_top = self._analysis.get_top_chunks_semantic(ws_chunks, question, top_n=5)
                     ws_exp_chunks, _ = self._analysis.expand_with_dependencies(
@@ -295,7 +310,6 @@ class ExplanationService:
                     )
                     ws_summaries = [(c.path, c.summary or "") for c in ws_exp_chunks if c.summary]
                     ws_contents: List[tuple[str, str]] = []
-                    _max_ws_chars = self._context.max_qa_file_chars() // 2
                     for wc in ws_exp_chunks[:3]:
                         fp = ws_root / wc.path
                         if fp.exists():
@@ -304,49 +318,32 @@ class ExplanationService:
                                 ws_contents.append((wc.path, content[:_max_ws_chars]))
                             except OSError:
                                 pass
-                    workspace_project_data.append({
+                    return {
                         "name": ws_name,
                         "root": str(ws_root),
                         "summaries": ws_summaries,
                         "contents": ws_contents,
-                    })
+                    }
                 except Exception as exc:
                     logger.warning("ワークスペース [%s] Q&Aエラー: %s", ws_name, exc)
+                    return None
+
+            with ThreadPoolExecutor(max_workers=min(len(workspace_roots[:3]), 3)) as ex:
+                workspace_project_data = [
+                    r for r in ex.map(_load_workspace, workspace_roots[:3]) if r is not None
+                ]
 
         # ── Phase C: ファイル選択 ──
-        # スキップ条件:
-        #   1. ピン留めファイルが存在する (ユーザーが既に選択済み)
-        #   2. CPU専用デバイス (cold start で必ず timeout するため semantic search の方が速い)
+        # セマンティック検索（ChromaDB / BM25）に一本化。
+        # 以前の GPU 専用 LLM ファイル選択 (generate_sync) は最大 5 分のブロッキングを引き起こすため削除。
+        # ベクトル検索 + 依存関係展開 (Phase E) で同等のカバレッジを達成する。
         selected_paths: List[str] = []
-        _skip_phase1 = bool(pinned_base_chunks) or not getattr(self._llm, "cuda_available", False)
         if pinned_base_chunks:
-            yield {"phase": "ファイル選択", "detail": f"ピン留め {len(pinned_base_chunks)} ファイルを使用 (LLM選択スキップ)"}
+            yield {"phase": "ファイル選択", "detail": f"ピン留め {len(pinned_base_chunks)} ファイルを使用"}
             yield {"status": f"ピン留めファイルを使用中 ({len(pinned_base_chunks)} 件)"}
-        elif _skip_phase1:
-            # CPU専用: LLMを余分に呼ばずセマンティック検索に直行する
-            yield {"phase": "ファイル選択", "detail": "CPU専用モード — セマンティック検索で直接ファイルを選択"}
-            yield {"status": "セマンティック検索でファイルを選択中..."}
         else:
-            # GPU あり: LLM にどのファイルが必要か選ばせる (Phase 1)
-            dep_hints = {c.path: c.imports_resolved for c in chunks if c.imports_resolved}
-            yield {"phase": "LLMファイル選択中", "detail": f"{len(all_summaries)} ファイルから関連ファイルを選択"}
-            yield {"status": "LLMがファイルを選択中..."}
-            try:
-                sel_prompt = self._context.build_qa_file_selection_prompt(
-                    question, all_summaries, dep_hints=dep_hints
-                )
-                sel_response = self._llm.generate_sync(model, sel_prompt, read_timeout=120)
-                _start = sel_response.find("[")
-                _end = sel_response.rfind("]")
-                if _start != -1 and _end != -1:
-                    _parsed = json.loads(sel_response[_start:_end + 1])
-                    if isinstance(_parsed, list):
-                        selected_paths = [p for p in _parsed if isinstance(p, str) and p in chunk_map]
-                if selected_paths:
-                    yield {"phase": "LLMファイル選択中", "detail": f"{len(selected_paths)} ファイルを選択"}
-            except Exception as exc:
-                logger.warning("ファイル選択フェーズエラー（フォールバック）: %s", exc)
-                yield {"phase": "LLMファイル選択中", "detail": f"タイムアウト — セマンティック検索にフォールバック"}
+            yield {"phase": "ファイル選択", "detail": "セマンティック検索でファイルを選択中"}
+            yield {"status": "セマンティック検索でファイルを選択中..."}
 
         # ── Phase D: セマンティック検索で補完 ──
         # CPU専用では top_n を絞ってコンテキストサイズを抑制する（8000+ トークンを防ぐ）
@@ -397,16 +394,23 @@ class ExplanationService:
             yield {"phase": "ファイル内容読み込み中", "detail": f"{len(top_chunks)} ファイルをディスクから読み込み"}
             yield {"status": f"ファイル内容を読み込み中... ({len(top_chunks)} ファイル)"}
             _max_chars = self._context.max_qa_file_chars() if not _is_cpu else 3000
-            for chunk in top_chunks:
-                if pinned_base_chunks and any(p == chunk.path for p, _ in pinned_chunk_contents):
-                    continue
+            _pinned_paths_set = {p for p, _ in pinned_chunk_contents}
+            _chunks_to_read = [c for c in top_chunks if c.path not in _pinned_paths_set]
+
+            def _read_chunk(chunk):
                 file_path = root / chunk.path
                 if file_path.exists():
                     try:
                         content = file_path.read_text(encoding="utf-8", errors="replace")
-                        full_contents.append((chunk.path, content[:_max_chars]))
+                        return (chunk.path, content[:_max_chars])
                     except OSError:
                         pass
+                return None
+
+            with ThreadPoolExecutor(max_workers=min(len(_chunks_to_read), 8)) as ex:
+                full_contents = [
+                    r for r in ex.map(_read_chunk, _chunks_to_read) if r is not None
+                ]
         else:
             yield {"phase": "ファイル選択完了", "detail": f"CPU最適化モード: サマリーのみ使用 ({len(top_chunks)} ファイル)"}
 
@@ -432,10 +436,10 @@ class ExplanationService:
         preview = preview_head + ("\n...[中略]...\n" + preview_tail if preview_tail else "")
         yield {"prompt_preview": preview, "prompt_tokens": tokens}
 
-        # CPU 用 Ollama パラメータ (Q&A / レポート共通で固定値を使用)
-        # num_ctx を呼び出しごとに変えると Ollama がモデルを再ロードしてしまうため
-        # 固定値 4096 に統一する。レポートセクション (1500 tok 以下) にも充分な余裕がある。
-        _CPU_NUM_CTX = 16384
+        # CPU 用 Ollama パラメータ — 固定値にすることでモデル再ロードを防ぐ。
+        # 8192 は CPU モードの典型的な Q&A プロンプト（サマリーのみ）を収容するのに十分で、
+        # 16384 より prefill が約 2 倍速い。
+        _CPU_NUM_CTX = 8192
         _num_ctx: Optional[int] = None
         _num_predict: Optional[int] = None
         if _is_cpu:
