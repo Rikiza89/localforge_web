@@ -254,6 +254,40 @@ class OllamaClient:
         except requests.RequestException as exc:
             raise OllamaConnectionError(f"Ollamaリクエストに失敗しました: {exc}") from exc
 
+    def preload_model_async(self, model: str) -> None:
+        """Fire-and-forget: start loading the model into RAM in a background thread.
+
+        Uses a fresh session so the main session is not blocked. Calling this at
+        the start of a pipeline that does expensive preprocessing (file reads,
+        vector search, prompt assembly) lets model loading and preprocessing
+        overlap — reducing first-token latency by up to the preprocessing time.
+        """
+        import threading
+        import requests as _req
+
+        def _load() -> None:
+            try:
+                s = _req.Session()
+                s.headers.update({"Content-Type": "application/json"})
+                options: dict = {}
+                if self.cuda_available:
+                    options["num_gpu"] = -1
+                if self.num_thread is not None:
+                    options["num_thread"] = self.num_thread
+                payload: dict = {"model": model, "prompt": "", "keep_alive": "2h", "stream": False}
+                if options:
+                    payload["options"] = options
+                s.post(
+                    f"{self._base_url}/api/generate",
+                    json=payload,
+                    timeout=(_CONNECT_TIMEOUT, 1800),
+                )
+                logger.debug("バックグラウンドモデルプリロード完了: %s", model)
+            except Exception as exc:
+                logger.debug("モデルプリロードエラー（非致命的）: %s", exc)
+
+        threading.Thread(target=_load, daemon=True).start()
+
     def unload_model(self, model: str) -> None:
         """
         Ollamaのkeep_alive=0を使ってモデルをVRAM/RAMから即時アンロードする。

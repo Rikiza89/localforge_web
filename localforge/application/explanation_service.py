@@ -101,6 +101,10 @@ class ExplanationService:
         Yields:
             SSEペイロード辞書（section, token, progress, done, error）
         """
+        # Start loading the model immediately — overlaps with index load and parallel
+        # semantic searches so the first section's first token arrives sooner.
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
+
         project_index = self._analysis.load_project_index(root)
         if not project_index:
             yield {"error": "ProjectIndexが見つかりません。先にインデックスを構築してください。"}
@@ -249,6 +253,14 @@ class ExplanationService:
         if not project_index:
             yield {"error": "ProjectIndexが見つかりません。先にインデックスを構築してください。"}
             return
+
+        # Fire model warm-up immediately — phases A-G run in parallel with model loading.
+        # By the time context assembly finishes the model is already in RAM (or much
+        # further along), so the wait at stream_completion is greatly reduced.
+        _model_was_cold = getattr(self._llm, "is_model_loaded", lambda m: None)(model) is False
+        if _model_was_cold:
+            yield {"status": f"モデルをバックグラウンドでプリロード中... ({model})"}
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
 
         chunks = project_index.file_chunks
         chunk_map = {c.path: c for c in chunks}
@@ -446,10 +458,14 @@ class ExplanationService:
             _num_ctx = _CPU_NUM_CTX
             _num_predict = -1
 
-        # モデルがすでに RAM にロードされているか確認する
+        # Check model load status — if still not loaded the preload thread is racing
+        # Ollama's queue so the wait here is reduced by however long preprocessing took.
         model_loaded = getattr(self._llm, "is_model_loaded", lambda m: None)(model)
         if model_loaded is False:
-            yield {"phase": "Ollamaモデルロード中", "detail": f"{model} をRAMに読み込み中 — CPUでは数分かかります"}
+            if _model_was_cold:
+                yield {"phase": "Ollamaモデルロード中", "detail": f"プリロード中... コンテキスト準備と並行してRAMに読み込んでいます"}
+            else:
+                yield {"phase": "Ollamaモデルロード中", "detail": f"{model} をRAMに読み込み中"}
             yield {"status": f"Ollamaがモデルをロード中... ({model}) — 最初のトークンが来るまでお待ちください"}
         else:
             yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})" + (f"  [num_ctx={_num_ctx}, num_predict={_num_predict}]" if _is_cpu else "")}
