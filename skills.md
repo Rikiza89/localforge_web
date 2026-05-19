@@ -1,6 +1,6 @@
-# LocalForge — Claude Code Skills Reference
+# LocalForge — Implementation Skills Reference
 
-This file describes repeatable implementation patterns for common extension tasks.
+Repeatable patterns for common extension and maintenance tasks.
 Each skill maps to a concrete sequence of file changes.
 
 ---
@@ -39,25 +39,25 @@ def stream_start():
 **When**: You want to add a 12th (or more) section to the Explain report.
 
 **Files to change**:
-1. `application/explanation_service.py` — add the section name to `_REPORT_SECTIONS` list
+1. `application/explanation_service.py` — add the section name to `REPORT_SECTIONS` list
 2. `application/context_service.py` — optionally add a specialised `build_report_section_prompt` variant if the section needs a unique prompt structure
 
 **Key list** (in `explanation_service.py`):
 ```python
-_REPORT_SECTIONS = [
-    "アーキテクチャ概要",
-    "主要コンポーネント",
+REPORT_SECTIONS = [
+    "Project Overview",
+    "Module Map",
     # ... add new section name here
 ]
 ```
 
-The report loop in `stream_report()` iterates this list automatically — no other changes needed.
+The report loop in `stream_report()` iterates this list and pre-fetches all section semantic searches in parallel before the loop starts — adding a new section name is the only change required.
 
 ---
 
 ## Skill: Add a New Infrastructure Adapter
 
-**When**: You need a new external integration (database, cloud API, cache, etc.).
+**When**: You need a new external integration (database, cloud API, etc.).
 
 **Steps**:
 1. Define a `Protocol` in `domain/ports.py`:
@@ -76,10 +76,72 @@ class MyAdapter:
 ```python
 from localforge.infrastructure.my_adapter import MyAdapter
 my_adapter = MyAdapter()
-# inject into services that need it
 app.config["my_adapter"] = my_adapter
 ```
 4. Add parameter to the service `__init__` that needs it, store as `self._my = my_adapter`
+
+---
+
+## Skill: Use the DiskCache
+
+**When**: You need a persistent cache for expensive computed values (API results, embeddings, rendered output).
+
+**Import**:
+```python
+from localforge.infrastructure.disk_cache import DiskCache
+```
+
+**Usage pattern**:
+```python
+# Create (typically in __init__)
+self._cache = DiskCache(root / ".localforge" / "cache" / "my_cache", max_memory=100)
+
+# Read-through pattern
+def get_value(self, key: str) -> str:
+    cached = self._cache.get(key)
+    if cached is not None:
+        return cached
+    result = expensive_operation(key)
+    self._cache.set(key, result)
+    return result
+
+# Values must be plain strings — JSON-encode complex objects
+import json
+self._cache.set(key, json.dumps(my_dict))
+value = json.loads(self._cache.get(key))
+
+# Clear on index rebuild
+self._cache.clear()
+```
+
+**Notes**:
+- Hot layer: in-memory LRU dict (bounded by `max_memory`)
+- Cold layer: one JSON file per entry in `cache_dir/<sha256>.json`
+- Thread-safe for reads; last-writer-wins for concurrent writes (harmless — same value)
+- Call `.clear()` whenever the underlying data changes to prevent stale reads
+
+---
+
+## Skill: Read Files Using the Content Cache
+
+**When**: You need to read a file's content inside `ExplanationService` (Phase A pinned reads, Phase F context reads, or any new pipeline step).
+
+**Always use the cache helper instead of `Path.read_text()`**:
+```python
+# Good — uses mtime+size cache, never re-reads unchanged files
+content = self._read_file_cached(root / "some/file.py", max_chars=3000)
+if content is None:
+    # file doesn't exist or couldn't be read
+    ...
+
+# Full file, no truncation
+content = self._read_file_cached(root / "some/file.py", max_chars=-1)
+
+# Bad — bypasses cache, re-reads from disk every call
+content = (root / "some/file.py").read_text()
+```
+
+The cache key is `(path_str, mtime_ns, size_bytes, max_chars)`. Any modification to the file is automatically a cache miss.
 
 ---
 
@@ -92,20 +154,20 @@ app.config["my_adapter"] = my_adapter
 - Calls `llm.unload_model(old_model)` → `OllamaClient.unload_model()` sends `{"model": old_model, "prompt": "", "keep_alive": 0}` to Ollama `/api/generate`
 - Ollama immediately evicts the model from VRAM/RAM on receipt of `keep_alive: 0`
 - Failure is logged as a warning only — the model switch always completes regardless
-- The method is declared in `LLMPort` (`domain/ports.py`) so mocks in tests can implement it
 
-**To force-unload a model programmatically** (e.g. before a large embedding run):
+**Background warm-up** (`OllamaClient.preload_model_async`):
+- Called at the start of `stream_answer()` and `stream_report()` before any preprocessing
+- Sends an empty generate request in a daemon thread using a fresh `requests.Session`
+- Ollama loads the model while preprocessing runs in parallel
+- Fire-and-forget: errors are silent (DEBUG log only)
+
+**To force-unload a model programmatically**:
 ```python
 llm = current_app.config["llm"]
 llm.unload_model("some-large-model")
 ```
 
-**To disable unloading** (e.g. for fast model toggling in dev):
-- Comment out the `llm.unload_model(old_model)` call in `project_routes.py:set_model()`
-
-**Where model is stored**: `ProjectConfig.model` in `.localforge/config.json`. Defaults to `""` (no default model). All generation routes return a `400` error with message *"モデルが選択されていません"* if the model is empty.
-
-**Model sync from UI**: Every streaming function in `app.js` (`generatePlan`, `approvePlanAndGenerate`, `continueGeneration`, `buildIndex`) syncs the model selector value to the project config via `POST /api/project/model` before starting the stream — so the model is always current and the unload always fires at the right moment.
+**Where model is stored**: `ProjectConfig.model` in `.localforge/config.json`. Defaults to `""` (no default model). All generation routes return a `400` error if the model is empty.
 
 ---
 
@@ -127,6 +189,8 @@ llm.unload_model("some-large-model")
 
 **To add a new prompt**: Add a new method following the naming pattern `build_<operation>_prompt()`, then call it from the relevant application service before the `stream_completion` call.
 
+**Token budget notes**: `build_qa_prompt()` uses O(n) history trimming — token costs are pre-computed per message before the trimming loop, not recalculated each iteration.
+
 ---
 
 ## Skill: Extend the RAG Vector Index
@@ -135,28 +199,21 @@ llm.unload_model("some-large-model")
 
 **Key files**:
 - `infrastructure/vector_adapter.py` — all ChromaDB and Ollama embedding logic
+- `infrastructure/bm25_adapter.py` — BM25 keyword fallback search
 - `application/analysis_service.py` — collects chunks in `embed_queue`, then embeds in parallel with `ThreadPoolExecutor(max_workers=4)` after JSONL indexing completes
-- `application/analysis_service.py:get_top_chunks_semantic()` — single entry point for all semantic search
+- `application/analysis_service.py:get_top_chunks_semantic()` — single entry point for all semantic search (with in-memory + disk cache)
 
 **To change embedding model**:
 - Update `_EMBED_MODEL` constant in `vector_adapter.py`
-- Delete `.localforge/chroma/` in existing projects to force re-embedding on next index run
+- Delete `.localforge/chroma/` and `.localforge/cache/semantic/` in existing projects to force re-embedding and clear cached results
 
 **To change embedding parallelism**:
 - Update `max_workers=4` in the `ThreadPoolExecutor` call inside `build_index()` in `analysis_service.py`
-- Higher values speed up embedding but increase Ollama memory pressure
 
 **To add metadata filters** (e.g., search only Python files):
 - Update `VectorAdapter.get_top_chunks_semantic()` to pass `where={"language": "python"}` to `self._collection.query()`
 
-**To add hybrid search** (semantic + keyword reranking):
-- In `get_top_chunks_semantic()`, after getting ChromaDB results, apply keyword scoring on top-K and re-sort
-
-**Embedding flow** (as of current implementation):
-1. Tier-0/1/2 chunks are collected into `embed_queue` during JSONL indexing (non-blocking)
-2. Cached JSONL chunks missing from ChromaDB are detected via `needs_reembedding()` and added to `embed_queue`
-3. All queued chunks are embedded in parallel after JSONL save completes
-4. Status bar events `{"status": "ベクトルインデックス構築中: X/Y"}` show progress
+**Semantic search cache**: `get_top_chunks_semantic()` caches results in `_semantic_cache` (in-memory) and `.localforge/cache/semantic/` (disk). The cache key is `(query_normalized, top_n, chunk_count)`. It is automatically cleared by `invalidate_index_cache()` at the end of every `build_index()` run.
 
 ---
 
@@ -167,7 +224,6 @@ llm.unload_model("some-large-model")
 **For GET streams** (`startStream` — returns an EventSource):
 ```javascript
 async function myStreamFn() {
-  // Start stream first so we have the EventSource reference for the cancel fn
   const _es = startStream("/api/my/endpoint", outputEl, {
     onDone: () => {
       _unlockUI();
@@ -178,32 +234,25 @@ async function myStreamFn() {
       // ... rest of error handler
     },
   });
-  // Lock after stream starts; pass cancel fn so ⏹ 停止 can close EventSource
   _lockUI(() => _es.close());
 }
 ```
 
-**For POST streams** (`startPostStream` — async, returns cancel fn after completion):
+**For POST streams** (`startPostStream` — async):
 ```javascript
 async function myPostStreamFn() {
-  _lockUI(null);   // lock before await; no client-side cancel available
+  _lockUI(null);
   await startPostStream("/api/my/endpoint", body, outputEl, {
-    onDone: () => {
-      _unlockUI();
-      // ...
-    },
-    onError: (err) => {
-      _unlockUI();
-      // ...
-    },
+    onDone: () => { _unlockUI(); },
+    onError: (err) => { _unlockUI(); },
   });
-  _unlockUI();  // safety net — idempotent if already called by onDone/onError
+  _unlockUI();  // safety net — idempotent
 }
 ```
 
 **Rules**:
-- `_lockUI` is idempotent — calling it twice is safe (second call is a no-op)
-- `_unlockUI` restores each button's pre-lock `disabled` state, so buttons that were already disabled (e.g., `generate-report-btn` before an index is built) remain disabled after unlock
+- `_lockUI` is idempotent — calling it twice is safe
+- `_unlockUI` restores each button's pre-lock `disabled` state
 - The global **⏹ 停止** button calls `_activeCancel()` (if set), signals `/api/generate/cancel`, then calls `_unlockUI()`
 
 ---
@@ -213,13 +262,13 @@ async function myPostStreamFn() {
 **Symptoms**: "stream idle timeout", partial responses, frozen progress bar.
 
 **Checklist**:
-1. **Heartbeat**: `_sse_response()` in both route files emits `{"heartbeat": true}` every 15s via a background thread — independent of the LLM generator blocking. Verify both `generation_routes.py` and `explain_routes.py` use the thread-based version.
+1. **Heartbeat**: `_sse_response()` emits `{"heartbeat": true}` every 15s via a background thread — independent of LLM blocking. Verify the route uses the thread-based version.
 2. **Client idle timer**: `startStream()` in `stream.js` reconnects after `IDLE_TIMEOUT = 300000` ms (5 min). With thread-based heartbeats this should never fire.
-3. **Ollama read timeout**: `_READ_TIMEOUT = 7200` (2h) in `ollama_client.py`. Only increase this if you're using an extremely large model.
-4. **Embedding timeout**: `_EMBED_TIMEOUT = 60` in `vector_adapter.py`. Increase if embedding calls are timing out (rare — `nomic-embed-text` is fast).
-5. **Large batches**: `analysis_service.py` saves JSONL every `_INCREMENTAL_SAVE_INTERVAL = 50` files. For very slow LLMs, reduce to 20.
-6. **Flask buffering**: `X-Accel-Buffering: no` header is set in `_SSE_HEADERS`. If behind nginx, ensure `proxy_buffering off` is set.
-7. **UI stuck locked**: If a stream exits without firing `onDone`/`onError`, click **⏹ 停止** to manually call `_unlockUI()`.
+3. **Ollama read timeout**: `_READ_TIMEOUT = 7200` (2h) in `ollama_client.py`.
+4. **Embedding timeout**: `_EMBED_TIMEOUT = 60` in `vector_adapter.py`. Increase if embedding calls are timing out.
+5. **Large batches**: `analysis_service.py` saves JSONL every `_INCREMENTAL_SAVE_INTERVAL = 50` files.
+6. **Flask buffering**: `X-Accel-Buffering: no` header is set in `_SSE_HEADERS`. If behind nginx, ensure `proxy_buffering off`.
+7. **UI stuck locked**: Click **⏹ 停止** to manually call `_unlockUI()`.
 
 ---
 
@@ -249,7 +298,7 @@ const _es = startStream("/api/endpoint", null, {
 _lockUI(() => _es.close());
 ```
 
-**Note**: The `status` event type (`{"status": "message"}`) is already handled by `_dispatch()` and calls `updateStatusBar(data.status)` — reuse it for any text status update rather than adding a new event type.
+**Note**: Reuse the existing `status` event (`{"status": "message"}`) for any plain-text status bar update — it is already handled by `_dispatch()` and calls `updateStatusBar(data.status)`.
 
 ---
 
@@ -261,8 +310,8 @@ _lockUI(() => _es.close());
 
 1. **`thinking` JSON field** (Gemma, QwQ, etc.):
    - Ollama returns `{"response": "...", "thinking": "..."}` chunks
-   - `ollama_client.py` yields thinking text with `\x01` prefix: `yield f"\x01{thinking}"`
-   - Route layer (`_sse_response`) detects `\x01`, wraps in `<think>...</think>`, emits as `raw_token` only
+   - `ollama_client.py` yields thinking text with `\x01` prefix
+   - Route layer detects `\x01`, wraps in `<think>...</think>`, emits as `raw_token` only
    - No changes needed — handled automatically
 
 2. **`<think>` XML tags** (DeepSeek-R1, etc.):
@@ -272,7 +321,7 @@ _lockUI(() => _es.close());
 
 **To add a new pattern**:
 - If the model uses a different field name (e.g., `"reasoning"`): add a third `yield` block in `ollama_client.py:stream_completion()` following the `thinking` field pattern
-- If the model uses different XML tags: update `OllamaPanel.appendToken()` in `stream.js` to detect them
+- If the model uses different XML tags: update `OllamaPanel.appendToken()` in `stream.js`
 
 ---
 
@@ -282,17 +331,17 @@ _lockUI(() => _es.close());
 
 **Per-project**: Edit `.localforge/config.json`:
 ```json
-{"token_limit": 12000}
+{"token_limit": 32768}
 ```
 
-**Global default**: `application/context_service.py`:
+**Global default** (`application/context_service.py`):
 ```python
-_DEFAULT_TOKEN_LIMIT = 6000  # increase here
+_DEFAULT_TOKEN_LIMIT = 131072  # change here
 ```
 
-**Batch summarisation budget**: `application/analysis_service.py`:
-```python
-_TOKEN_BUDGET_PER_BATCH = 3500  # tokens per LLM batch during indexing
-```
+**CPU num_ctx** (controls Ollama KV cache size — smaller = faster prefill):
+- Q&A: `_CPU_NUM_CTX = 8192` in `explanation_service.py:stream_answer()`
+- Report sections: `_r_num_ctx = 4096` in `explanation_service.py:stream_report()`
+- Changing this value causes Ollama to reload the model — keep it fixed to avoid reloads between calls
 
-Token estimation formula: `words × 1.3 ≈ tokens` (defined in `context_service._estimate_tokens()`).
+**Token estimation**: `words × 1.3 ≈ tokens` (defined in `context_service._estimate_tokens()`). History trimming uses O(n) per-message pre-computation — do not revert to the O(n²) loop that rebuilt the full joined string each iteration.
