@@ -101,6 +101,37 @@ class OllamaClient:
         except requests.RequestException:
             return False
 
+    def is_model_loaded(self, model: str) -> Optional[bool]:
+        """
+        Ollama /api/ps を使って指定モデルが現在メモリに存在するか確認する。
+        None: 確認できなかった（APIエラー等）
+        True: ロード済み
+        False: 未ロード（cold start が発生する）
+
+        Args:
+            model: 確認するモデル名
+
+        Returns:
+            True / False / None
+        """
+        try:
+            resp = self._session.get(
+                f"{self._base_url}/api/ps",
+                timeout=(_CONNECT_TIMEOUT, 5),
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            running = data.get("models", [])
+            model_base = model.split(":")[0].lower()
+            for m in running:
+                name = m.get("name", m.get("model", "")).lower()
+                if model_base in name or model.lower() in name:
+                    return True
+            return False
+        except Exception:
+            return None
+
     def list_models(self) -> List[str]:
         """
         Ollamaで利用可能なモデルの一覧を返す。
@@ -130,7 +161,9 @@ class OllamaClient:
         prompt: str,
         system: Optional[str] = None,
         read_timeout: int = _READ_TIMEOUT,
-        num_ctx: Optional[int] = None,  # Add num_ctx here
+        num_ctx: Optional[int] = None,
+        num_predict: Optional[int] = None,
+        keep_alive: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """
         Ollama generate APIを使用してテキストをストリーミング生成する。
@@ -139,6 +172,10 @@ class OllamaClient:
             model: 使用するOllamaモデル名
             prompt: ユーザープロンプト
             system: システムプロンプト（省略可能）
+            read_timeout: 読み込みタイムアウト秒数
+            num_ctx: コンテキスト長（省略時はOllamaデフォルト）
+            num_predict: 最大生成トークン数（-1で無制限）
+            keep_alive: モデルをRAMに保持する時間 (例: "1h", "0") 省略時Ollamaデフォルト(5m)
 
         Yields:
             テキストチャンク（文字列）
@@ -154,26 +191,18 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
-
-        # options: dict = {}
-        # if self.cuda_available:
-        #     options["num_gpu"] = -1          # 全レイヤーをGPUにオフロード
-        # if self.num_thread is not None:
-        #     options["num_thread"] = self.num_thread
-        # if options:
-        #     payload["options"] = options
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
 
         options: dict = {}
         if self.cuda_available:
-            options["num_gpu"] = -1          # 全レイヤーをGPUにオフロード
+            options["num_gpu"] = -1
         if self.num_thread is not None:
             options["num_thread"] = self.num_thread
-            
-        # --- NEW CODE START ---
         if num_ctx is not None:
-            options["num_ctx"] = num_ctx     # トークンコンテキスト上限を適用
-        # --- NEW CODE END ---
-            
+            options["num_ctx"] = num_ctx
+        if num_predict is not None:
+            options["num_predict"] = num_predict
         if options:
             payload["options"] = options
 
@@ -224,6 +253,40 @@ class OllamaClient:
             raise
         except requests.RequestException as exc:
             raise OllamaConnectionError(f"Ollamaリクエストに失敗しました: {exc}") from exc
+
+    def preload_model_async(self, model: str) -> None:
+        """Fire-and-forget: start loading the model into RAM in a background thread.
+
+        Uses a fresh session so the main session is not blocked. Calling this at
+        the start of a pipeline that does expensive preprocessing (file reads,
+        vector search, prompt assembly) lets model loading and preprocessing
+        overlap — reducing first-token latency by up to the preprocessing time.
+        """
+        import threading
+        import requests as _req
+
+        def _load() -> None:
+            try:
+                s = _req.Session()
+                s.headers.update({"Content-Type": "application/json"})
+                options: dict = {}
+                if self.cuda_available:
+                    options["num_gpu"] = -1
+                if self.num_thread is not None:
+                    options["num_thread"] = self.num_thread
+                payload: dict = {"model": model, "prompt": "", "keep_alive": "2h", "stream": False}
+                if options:
+                    payload["options"] = options
+                s.post(
+                    f"{self._base_url}/api/generate",
+                    json=payload,
+                    timeout=(_CONNECT_TIMEOUT, 1800),
+                )
+                logger.debug("バックグラウンドモデルプリロード完了: %s", model)
+            except Exception as exc:
+                logger.debug("モデルプリロードエラー（非致命的）: %s", exc)
+
+        threading.Thread(target=_load, daemon=True).start()
 
     def unload_model(self, model: str) -> None:
         """
@@ -284,21 +347,61 @@ class OllamaClient:
         except Exception:
             return None
 
+    def get_ram_info(self) -> dict:
+        """
+        システムRAM使用状況を psutil で取得する。
+        CPU専用デバイスではVRAMの代替として常に利用可能。
+
+        Returns:
+            {"total": int, "used": int, "free": int} (単位: MiB)
+        """
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            to_mib = 1024 * 1024
+            return {
+                "total": mem.total // to_mib,
+                "used": mem.used // to_mib,
+                "free": mem.available // to_mib,
+            }
+        except Exception:
+            return {"total": 0, "used": 0, "free": 0}
+
+    def get_sysinfo(self) -> dict:
+        """
+        GPU(VRAM)とシステムRAMの両方を返す複合エンドポイント用メソッド。
+        GPUが存在しない場合は gpu フィールドを None にする。
+
+        Returns:
+            {"gpu": dict|None, "ram": dict, "cuda_available": bool}
+        """
+        return {
+            "gpu": self.get_vram_info(),
+            "ram": self.get_ram_info(),
+            "cuda_available": self.cuda_available,
+        }
+
     def generate_sync(
         self,
         model: str,
         prompt: str,
         system: Optional[str] = None,
-        num_ctx: Optional[int] = None,  # Add num_ctx here
+        num_ctx: Optional[int] = None,
+        num_predict: Optional[int] = None,
+        keep_alive: Optional[str] = None,
+        read_timeout: int = _GENERATE_READ_TIMEOUT,
     ) -> str:
         """
         ストリーミングなしで完全なテキスト応答を生成する（テスト・内部用）。
         大型ローカルモデル向けに長めのタイムアウトを使用する。
+        read_timeout を指定することで CPU 推論での過長待機を防げる（例: 120s）。
 
         Args:
             model: 使用するOllamaモデル名
             prompt: ユーザープロンプト
             system: システムプロンプト（省略可能）
+            num_ctx: コンテキスト長（省略可能）
+            read_timeout: 読み込みタイムアウト秒数
 
         Returns:
             生成されたテキスト全文
@@ -308,10 +411,11 @@ class OllamaClient:
             OllamaModelNotFoundError: 指定モデルが見つからない場合
         """
         return "".join(self.stream_completion(
-            model=model, 
-            prompt=prompt, 
-            system=system, 
-            read_timeout=_GENERATE_READ_TIMEOUT,
-            num_ctx=num_ctx  # Pass it down to the stream_completion method
+            model=model,
+            prompt=prompt,
+            system=system,
+            read_timeout=read_timeout,
+            num_ctx=num_ctx,
+            num_predict=num_predict,
+            keep_alive=keep_alive,
         ))
-        # return "".join(self.stream_completion(model, prompt, system, read_timeout=_GENERATE_READ_TIMEOUT))

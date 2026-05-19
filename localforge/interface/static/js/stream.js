@@ -114,6 +114,16 @@ const OllamaPanel = (() => {
     if (btn) btn.textContent = _thinkingVisible ? "思考を隠す" : "思考を表示";
   }
 
+  function _switchInnerTab(tabName) {
+    document.querySelectorAll(".ollama-inner-tab").forEach(btn => {
+      btn.classList.toggle("active", btn.dataset.innerTab === tabName);
+    });
+    document.querySelectorAll(".ollama-inner-content").forEach(content => {
+      const id = content.id.replace("inner-content-", "");
+      content.classList.toggle("hidden", id !== tabName);
+    });
+  }
+
   function init() {
     const toggleBtn = document.getElementById("ollama-panel-toggle");
     const panel = _panel();
@@ -126,9 +136,139 @@ const OllamaPanel = (() => {
     if (thinkingBtn) thinkingBtn.addEventListener("click", toggleThinking);
     const clearBtn = document.getElementById("ollama-clear-btn");
     if (clearBtn) clearBtn.addEventListener("click", clear);
+
+    // 内タブ切り替え
+    document.querySelectorAll(".ollama-inner-tab").forEach(btn => {
+      btn.addEventListener("click", () => _switchInnerTab(btn.dataset.innerTab));
+    });
   }
 
   return { appendToken, markDone, clear, init };
+})();
+
+// =========================================================================
+// プロセスログ — フェーズタイムラインとプロンプトプレビュー
+// =========================================================================
+
+const ProcessLog = (() => {
+  let _phaseEntries = [];
+  let _activeEntry = null;
+
+  function _listEl() { return document.getElementById("process-phase-list"); }
+  function _badgeEl() { return document.getElementById("process-log-badge"); }
+  function _previewDetails() { return document.getElementById("prompt-preview-details"); }
+  function _previewContent() { return document.getElementById("prompt-preview-content"); }
+  function _tokenBadge() { return document.getElementById("prompt-token-badge"); }
+
+  function _now() {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}:${String(d.getSeconds()).padStart(2,"0")}`;
+  }
+
+  function _renderEntry(entry) {
+    const el = document.createElement("div");
+    el.className = "process-phase-entry phase-active";
+    el.dataset.phaseId = entry.id;
+
+    const iconEl = document.createElement("span");
+    iconEl.className = "phase-icon spinning";
+    iconEl.textContent = "⟳";
+
+    const body = document.createElement("div");
+    body.className = "phase-body";
+
+    const name = document.createElement("div");
+    name.className = "phase-name";
+    name.textContent = entry.name;
+
+    const detail = document.createElement("div");
+    detail.className = "phase-detail";
+    detail.textContent = entry.detail || "";
+
+    const timeEl = document.createElement("span");
+    timeEl.className = "phase-time";
+    timeEl.textContent = entry.time;
+
+    body.appendChild(name);
+    body.appendChild(detail);
+    el.appendChild(iconEl);
+    el.appendChild(body);
+    el.appendChild(timeEl);
+    return el;
+  }
+
+  function addPhase(phaseName, detail) {
+    const list = _listEl();
+    if (!list) return;
+
+    // 前のアクティブエントリを完了状態にする
+    if (_activeEntry) {
+      const prevEl = list.querySelector(`[data-phase-id="${_activeEntry.id}"]`);
+      if (prevEl) {
+        prevEl.classList.remove("phase-active");
+        prevEl.classList.add("phase-done");
+        const icon = prevEl.querySelector(".phase-icon");
+        if (icon) { icon.classList.remove("spinning"); icon.textContent = "✓"; }
+      }
+    }
+
+    const entry = { id: Date.now() + Math.random(), name: phaseName, detail: detail || "", time: _now() };
+    _phaseEntries.push(entry);
+    _activeEntry = entry;
+
+    const el = _renderEntry(entry);
+    list.appendChild(el);
+    _autoScroll(list);
+
+    // バッジを点滅させてプロセスログタブに通知
+    const badge = _badgeEl();
+    if (badge) badge.style.display = "inline";
+
+    // パネルが開いていてプロセスログタブが非表示なら自動切替はしない（ユーザー操作を妨げない）
+  }
+
+  function markAllDone() {
+    const list = _listEl();
+    if (!list) return;
+    list.querySelectorAll(".process-phase-entry.phase-active").forEach(el => {
+      el.classList.remove("phase-active");
+      el.classList.add("phase-done");
+      const icon = el.querySelector(".phase-icon");
+      if (icon) { icon.classList.remove("spinning"); icon.textContent = "✓"; }
+    });
+    _activeEntry = null;
+    const badge = _badgeEl();
+    if (badge) badge.style.display = "none";
+  }
+
+  function setPromptPreview(preview, tokens) {
+    const details = _previewDetails();
+    const content = _previewContent();
+    const badge = _tokenBadge();
+    if (details) details.style.display = "";
+    if (content) content.textContent = preview || "";
+    if (badge && tokens) badge.textContent = `~${tokens.toLocaleString()} tokens`;
+  }
+
+  function clear() {
+    _phaseEntries = [];
+    _activeEntry = null;
+    const list = _listEl();
+    if (list) list.innerHTML = "";
+    const details = _previewDetails();
+    if (details) details.style.display = "none";
+    const content = _previewContent();
+    if (content) content.textContent = "";
+    const badge = _badgeEl();
+    if (badge) badge.style.display = "none";
+  }
+
+  function init() {
+    const clearBtn = document.getElementById("processlog-clear-btn");
+    if (clearBtn) clearBtn.addEventListener("click", clear);
+  }
+
+  return { addPhase, markAllDone, setPromptPreview, clear, init };
 })();
 
 /**
@@ -174,11 +314,22 @@ function startStream(url, outputEl, handlers) {
       return;
     }
 
+    if (data.phase !== undefined) {
+      ProcessLog.addPhase(data.phase, data.detail || "");
+      return;
+    }
+
+    if (data.prompt_preview !== undefined) {
+      ProcessLog.setPromptPreview(data.prompt_preview, data.prompt_tokens);
+      return;
+    }
+
     if (data.done) {
       _closed = true;
       if (_idleTimer) clearTimeout(_idleTimer);
       es.close();
       OllamaPanel.markDone();
+      ProcessLog.markAllDone();
       if (handlers.onDone) handlers.onDone();
       return;
     }
@@ -188,6 +339,7 @@ function startStream(url, outputEl, handlers) {
       if (_idleTimer) clearTimeout(_idleTimer);
       es.close();
       OllamaPanel.markDone();
+      ProcessLog.markAllDone();
       if (handlers.onError) handlers.onError(data.error);
       return;
     }
@@ -319,13 +471,25 @@ async function startPostStream(url, body, outputEl, handlers) {
           continue;
         }
 
+        if (data.phase !== undefined) {
+          ProcessLog.addPhase(data.phase, data.detail || "");
+          continue;
+        }
+
+        if (data.prompt_preview !== undefined) {
+          ProcessLog.setPromptPreview(data.prompt_preview, data.prompt_tokens);
+          continue;
+        }
+
         if (data.done) {
           OllamaPanel.markDone();
+          ProcessLog.markAllDone();
           if (handlers.onDone) handlers.onDone();
           return cancel;
         }
         if (data.error) {
           OllamaPanel.markDone();
+          ProcessLog.markAllDone();
           if (handlers.onError) handlers.onError(data.error);
           return cancel;
         }

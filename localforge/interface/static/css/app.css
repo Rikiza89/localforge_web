@@ -1399,6 +1399,208 @@ progress::-moz-progress-bar {
 }
 
 /* =========================================================================
+   Ollamaパネル内タブ（ライブ出力 / プロセスログ）
+   ========================================================================= */
+.ollama-inner-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.ollama-inner-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 6px 8px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  position: relative;
+}
+
+.ollama-inner-tab:hover {
+  color: var(--text-primary);
+}
+
+.ollama-inner-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.ollama-inner-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+.ollama-inner-content.hidden {
+  display: none;
+}
+
+.process-log-badge {
+  color: var(--warning, #f59e0b);
+  font-size: 8px;
+  vertical-align: top;
+  margin-left: 2px;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* =========================================================================
+   プロセスフェーズタイムライン
+   ========================================================================= */
+.process-phase-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+  min-height: 80px;
+}
+
+.process-phase-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 12px;
+  border-left: 2px solid transparent;
+  transition: background 0.1s;
+}
+
+.process-phase-entry:hover {
+  background: var(--surface-elevated, rgba(255,255,255,0.04));
+}
+
+.process-phase-entry.phase-active {
+  border-left-color: var(--accent);
+  background: var(--surface-elevated, rgba(255,255,255,0.04));
+}
+
+.process-phase-entry.phase-done {
+  border-left-color: var(--success, #22c55e);
+  opacity: 0.75;
+}
+
+.process-phase-entry.phase-error {
+  border-left-color: var(--danger);
+}
+
+.phase-icon {
+  font-size: 11px;
+  margin-top: 1px;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+
+.phase-icon.spinning {
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.phase-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.phase-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.phase-detail {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.phase-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* =========================================================================
+   プロンプトプレビュー（折りたたみ可能）
+   ========================================================================= */
+.prompt-preview-details {
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.prompt-preview-summary {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 6px 12px;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.prompt-preview-summary:hover {
+  color: var(--text-primary);
+}
+
+.prompt-preview-summary::-webkit-details-marker {
+  display: none;
+}
+
+.prompt-preview-summary::before {
+  content: "▶";
+  font-size: 9px;
+  transition: transform 0.15s;
+}
+
+.prompt-preview-details[open] .prompt-preview-summary::before {
+  transform: rotate(90deg);
+}
+
+.prompt-token-badge {
+  background: var(--surface-elevated, rgba(255,255,255,0.08));
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.prompt-preview-content {
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary, var(--text-muted));
+  background: var(--bg);
+  margin: 0;
+  padding: 8px 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid var(--border);
+}
+
+/* =========================================================================
    Markdownレンダリング共通スタイル
    ========================================================================= */
 .md-body > :first-child { margin-top: 0; }

@@ -209,3 +209,7 @@ __marimo__/
 # LocalForge — ローカルキャッシュ済み sentence-transformers モデル
 # （初回起動時に自動ダウンロードされる。再コミット不要）
 models/
+
+# LocalForge — ランタイムデータ（インデックス・キャッシュ・ログ）
+# プロジェクトごとに自動生成される。バージョン管理対象外。
+.localforge/

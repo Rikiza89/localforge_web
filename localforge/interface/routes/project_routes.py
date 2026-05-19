@@ -419,15 +419,25 @@ def unload_model():
 
 @bp.route("/vram", methods=["GET"])
 def get_vram():
-    """
-    現在のVRAM使用状況を返す。
-
-    Response JSON:
-        total, used, free (int, MiB) or None
-    """
+    """後方互換エイリアス — /sysinfo を使用してください。"""
     llm = _get_llm()
     info = llm.get_vram_info()
     return jsonify(info)
+
+
+@bp.route("/sysinfo", methods=["GET"])
+def get_sysinfo():
+    """
+    GPU(VRAM)とシステムRAMの両方の使用状況を返す。
+    CPU専用デバイスでは gpu フィールドが null になる。
+
+    Response JSON:
+        gpu: {total, used, free} (MiB) or null
+        ram: {total, used, free} (MiB)
+        cuda_available: bool
+    """
+    llm = _get_llm()
+    return jsonify(llm.get_sysinfo())
 
 
 @bp.route("/ollama-status", methods=["GET"])
