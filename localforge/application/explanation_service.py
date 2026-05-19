@@ -16,6 +16,7 @@ from typing import Generator, List, Optional
 from localforge.application.analysis_service import AnalysisService
 from localforge.application.context_service import ContextService
 from localforge.domain.models import FileChunk, GenerationLogEntry, Message, ProjectIndex
+from localforge.infrastructure.disk_cache import DiskCache
 from localforge.infrastructure.ollama_client import OllamaClient
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,119 @@ class ExplanationService:
         self._llm = llm
         self._context = context
 
+        # ── Cache 1: index_json string ──
+        # key: (root_str, mtime_float) → serialized JSON string
+        # Avoids model_dump() + json.dumps() on every Q&A / report call.
+        self._index_json_cache: dict[tuple, str] = {}
+
+        # ── Cache 2: file content ──
+        # key: (path_str, mtime_ns, size_bytes, max_chars) → content string
+        # Avoids re-reading unchanged files across Q&A calls.
+        # Bounded at 300 entries (LRU-ish: dict insertion order).
+        self._file_content_cache: dict[tuple, str] = {}
+        _FILE_CACHE_MAX = 300
+
+        # ── Cache 4: Q&A response ──
+        # Stores full answer strings keyed by a hash of (root, question,
+        # pinned_paths, last-3 history turns, index_mtime).
+        # Hot layer: in-memory dict; cold layer: .localforge/cache/responses/
+        self._response_cache: dict[str, DiskCache] = {}  # root_str → DiskCache
+        self._FILE_CACHE_MAX = 300
+
+    # ------------------------------------------------------------------
+    # Cache helpers
+    # ------------------------------------------------------------------
+
+    def _get_index_json(self, root: Path, project_index: "ProjectIndex", include_files: bool = False) -> str:
+        """Return serialized project index JSON, using cache to skip model_dump()+json.dumps()."""
+        pi_path = root / _LOCALFORGE_DIR / "project_index.json"
+        try:
+            mtime = pi_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        cache_key = (str(root), mtime, include_files)
+        cached = self._index_json_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        index_dict = project_index.model_dump(
+            include={"project_name", "summary", "total_files", "indexed_files"}
+        )
+        if include_files:
+            index_dict["files"] = [c.path for c in project_index.file_chunks]
+        result = json.dumps(index_dict, ensure_ascii=False)
+        # Evict stale entries for the same root (mtime changed)
+        self._index_json_cache = {k: v for k, v in self._index_json_cache.items() if k[0] != str(root)}
+        self._index_json_cache[cache_key] = result
+        return result
+
+    def _read_file_cached(self, path: Path, max_chars: int = -1) -> Optional[str]:
+        """Read file content with mtime+size cache. Returns None on read error.
+        max_chars=-1 means no truncation (full file)."""
+        try:
+            stat = path.stat()
+            key = (str(path), stat.st_mtime_ns, stat.st_size, max_chars)
+        except OSError:
+            return None
+        cached = self._file_content_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            if max_chars >= 0 and len(content) > max_chars:
+                content = content[:max_chars]
+            # LRU eviction: remove oldest entry when over limit
+            if len(self._file_content_cache) >= self._FILE_CACHE_MAX:
+                self._file_content_cache.pop(next(iter(self._file_content_cache)))
+            self._file_content_cache[key] = content
+            return content
+        except OSError:
+            return None
+
+    def _get_response_disk_cache(self, root: Path) -> "DiskCache":
+        key = str(root)
+        if key not in self._response_cache:
+            self._response_cache[key] = DiskCache(
+                root / _LOCALFORGE_DIR / "cache" / "responses", max_memory=50
+            )
+        return self._response_cache[key]
+
+    def _make_response_cache_key(
+        self,
+        root: Path,
+        question: str,
+        pinned_paths: Optional[list],
+        history: list,
+        index_mtime: float,
+    ) -> str:
+        import hashlib as _hl
+        h = _hl.sha256()
+        h.update(str(root).encode())
+        h.update(question.encode())
+        h.update(json.dumps(sorted(pinned_paths or [])).encode())
+        # Include last 3 history turns so context changes invalidate cache
+        tail = [(m.role, m.content) for m in (history or [])[-3:]]
+        h.update(json.dumps(tail).encode())
+        h.update(str(round(index_mtime, 3)).encode())
+        return h.hexdigest()[:32]
+
+    def invalidate_response_cache(self, root: Path) -> None:
+        """Clear response cache for a project (call after build_index)."""
+        dc = self._response_cache.pop(str(root), None)
+        if dc:
+            dc.clear()
+        else:
+            # Clear disk cache even if not in memory
+            DiskCache(root / _LOCALFORGE_DIR / "cache" / "responses").clear()
+
+    def _log_async(self, log_path: Path, log_entry: "GenerationLogEntry") -> None:
+        """Append a log entry in a background thread — does not block streaming."""
+        import threading
+        threading.Thread(
+            target=self._analysis._index_adapter.append_log_entry,
+            args=(log_path, log_entry),
+            daemon=True,
+        ).start()
+
     def stream_report(
         self,
         root: Path,
@@ -113,10 +227,7 @@ class ExplanationService:
         chunks = project_index.file_chunks
         # レポートセクションには summary（構造化テキスト）のみ渡す。
         # ファイルパス一覧は Q&A フェーズ1専用で、レポートでは不要かつ巨大なので除外する。
-        index_dict = project_index.model_dump(
-            include={"project_name", "summary", "total_files", "indexed_files"}
-        )
-        index_json = json.dumps(index_dict, ensure_ascii=False)
+        index_json = self._get_index_json(root, project_index, include_files=False)
 
         total_sections = len(REPORT_SECTIONS)
         completed_sections: List[tuple[str, str]] = []  # (name, content)
@@ -176,7 +287,7 @@ class ExplanationService:
                 status="completed",
             )
             log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
-            self._analysis._index_adapter.append_log_entry(log_path, log_entry)
+            self._log_async(log_path, log_entry)
 
             completed_sections.append((section_name, "".join(section_tokens)))
 
@@ -266,9 +377,27 @@ class ExplanationService:
         chunk_map = {c.path: c for c in chunks}
         all_summaries = [(c.path, c.summary or "") for c in chunks if c.summary]
 
-        index_dict = project_index.model_dump(include={"project_name", "summary", "total_files", "indexed_files"})
-        index_dict["files"] = [c.path for c in chunks]
-        index_json = json.dumps(index_dict, ensure_ascii=False)
+        index_json = self._get_index_json(root, project_index, include_files=True)
+
+        # ── Response cache check (exact question + pinned_paths + history) ──
+        pi_path = root / _LOCALFORGE_DIR / "project_index.json"
+        try:
+            _index_mtime = pi_path.stat().st_mtime
+        except OSError:
+            _index_mtime = 0.0
+        _rc_key = self._make_response_cache_key(root, question, pinned_paths, history, _index_mtime)
+        _rc = self._get_response_disk_cache(root)
+        _cached_answer = _rc.get(_rc_key)
+        if _cached_answer is not None:
+            yield {"phase": "キャッシュヒット", "detail": "過去の同一質問への回答を再利用します"}
+            yield {"status": "キャッシュから回答を返しています..."}
+            # Stream cached answer in chunks so the UI behaves identically to live generation
+            _CHUNK = 20
+            for _i in range(0, len(_cached_answer), _CHUNK):
+                yield {"token": _cached_answer[_i:_i + _CHUNK]}
+            yield {"phase": "完了", "detail": "キャッシュから回答済み"}
+            yield {"done": True}
+            return
 
         # ── Phase A: ピン留めコンテキスト解決 ──
         # ピン留めファイルはユーザーが明示的に選んだもの。全内容を読み込む（文字数上限なし）。
@@ -288,12 +417,10 @@ class ExplanationService:
 
                 def _read_pinned(pc):
                     fp = root / pc.path
-                    if fp.exists():
-                        try:
-                            return (pc.path, fp.read_text(encoding="utf-8", errors="replace"))
-                        except OSError as exc:
-                            logger.warning("ピン留めファイル読み込みエラー [%s]: %s", pc.path, exc)
-                    return None
+                    content = self._read_file_cached(fp, max_chars=-1)  # -1 = full file
+                    if content is None:
+                        logger.warning("ピン留めファイル読み込みエラー: %s", pc.path)
+                    return (pc.path, content) if content is not None else None
 
                 with ThreadPoolExecutor(max_workers=min(len(pinned_chunks), 8)) as ex:
                     pinned_chunk_contents = [
@@ -410,14 +537,8 @@ class ExplanationService:
             _chunks_to_read = [c for c in top_chunks if c.path not in _pinned_paths_set]
 
             def _read_chunk(chunk):
-                file_path = root / chunk.path
-                if file_path.exists():
-                    try:
-                        content = file_path.read_text(encoding="utf-8", errors="replace")
-                        return (chunk.path, content[:_max_chars])
-                    except OSError:
-                        pass
-                return None
+                content = self._read_file_cached(root / chunk.path, max_chars=_max_chars)
+                return (chunk.path, content) if content is not None else None
 
             with ThreadPoolExecutor(max_workers=min(len(_chunks_to_read), 8)) as ex:
                 full_contents = [
@@ -505,7 +626,15 @@ class ExplanationService:
             status="completed",
         )
         log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
-        self._analysis._index_adapter.append_log_entry(log_path, log_entry)
+        self._log_async(log_path, log_entry)
+
+        # Cache the full answer for future identical questions (fire-and-forget)
+        _full_answer = "".join(answer_tokens)
+        if _full_answer:
+            import threading as _t
+            _t.Thread(
+                target=_rc.set, args=(_rc_key, _full_answer), daemon=True
+            ).start()
 
         yield {"phase": "完了", "detail": f"回答生成完了 ({elapsed/1000:.1f}s)"}
         yield {"done": True}

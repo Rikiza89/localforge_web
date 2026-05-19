@@ -24,6 +24,7 @@ from localforge.domain.models import (
     GenerationLogEntry,
     ProjectIndex,
 )
+from localforge.infrastructure.disk_cache import DiskCache
 from localforge.infrastructure.filesystem_adapter import (
     CODE_EXTENSIONS,
     FileSystemAdapter,
@@ -376,6 +377,11 @@ class AnalysisService:
         # ProjectIndex のインメモリキャッシュ: {path_str: (mtime, ProjectIndex)}
         # リクエストごとのディスク読み込み・JSONパースを回避する
         self._index_cache: dict[str, tuple[float, "ProjectIndex"]] = {}
+        # セマンティック検索キャッシュ: {(root_str, mtime_ns, query, top_n): [path, ...]}
+        # 同一クエリの再埋め込みを回避する。build_index 時にクリアされる。
+        self._semantic_cache: dict[tuple, list[str]] = {}
+        # DiskCache for semantic results — populated lazily per project root
+        self._semantic_disk_caches: dict[str, DiskCache] = {}
 
     def read_file_chunk(self, path: Path, root: Path) -> FileChunk:
         """
@@ -885,9 +891,14 @@ class AnalysisService:
         return index
 
     def invalidate_index_cache(self, root: Path) -> None:
-        """ProjectIndex キャッシュを無効化する（インデックス再構築後に呼び出す）。"""
+        """ProjectIndex・セマンティックキャッシュを無効化する（インデックス再構築後に呼び出す）。"""
         key = str(root / _LOCALFORGE_DIR / "project_index.json")
         self._index_cache.pop(key, None)
+        # セマンティック検索キャッシュも全クリア（インデックスが変わったため）
+        self._semantic_cache.clear()
+        for dc in self._semantic_disk_caches.values():
+            dc.clear()
+        self._semantic_disk_caches.clear()
 
     def migrate_vector_index(self, root: Path) -> Generator[dict, None, None]:
         """
@@ -941,6 +952,7 @@ class AnalysisService:
     ) -> List[FileChunk]:
         """
         セマンティック検索でFileChunkをランキングして上位N件を返す。
+        同一クエリはインメモリキャッシュ → ディスクキャッシュ → 実検索の順で解決する。
         VectorAdapterが利用可能な場合は埋め込みベクトル検索を使用し、
         そうでない場合はキーワードフォールバックを使用する。
 
@@ -952,11 +964,54 @@ class AnalysisService:
         Returns:
             上位N件のFileChunkリスト
         """
+        import json as _json
+
+        chunk_map = {c.path: c for c in chunks}
+
+        # ── キャッシュキー: (クエリ正規化, top_n, チャンク数) ──
+        # チャンク数をキーに含めることでインデックス再構築後の古い結果を返さないようにする
+        norm_q = query.strip().lower()
+        cache_key_tuple = (norm_q, top_n, len(chunks))
+
+        # 1. インメモリキャッシュ確認
+        cached_paths = self._semantic_cache.get(cache_key_tuple)
+        if cached_paths is not None:
+            result = [chunk_map[p] for p in cached_paths if p in chunk_map]
+            if result:
+                return result
+
+        # 2. ディスクキャッシュ確認（chunk_mapの最初のパスからrootを特定する代わりに
+        #    クエリ+サイズのみをキーにする — rootなしでもコリジョンはほぼ起きない）
+        disk_key = f"{norm_q}|{top_n}|{len(chunks)}"
+        # ディスクキャッシュは chunks リストのルートに依存しないグローバルキャッシュを使う
+        if "global" not in self._semantic_disk_caches:
+            self._semantic_disk_caches["global"] = DiskCache(
+                Path(".localforge") / "cache" / "semantic", max_memory=200
+            )
+        disk_cache = self._semantic_disk_caches["global"]
+        disk_val = disk_cache.get(disk_key)
+        if disk_val is not None:
+            try:
+                cached_paths_disk = _json.loads(disk_val)
+                result = [chunk_map[p] for p in cached_paths_disk if p in chunk_map]
+                if result:
+                    self._semantic_cache[cache_key_tuple] = cached_paths_disk
+                    return result
+            except Exception:
+                pass
+
+        # 3. 実際の検索を実行
         if self._vector is not None and self._vector.is_initialized():
-            return self._vector.get_top_chunks_semantic(chunks, query, top_n)
-        # ChromaDB 未使用時は BM25 にフォールバック（旧キーワードカウントより高精度）
-        from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25
-        return get_top_chunks_bm25(chunks, query, top_n)
+            result = self._vector.get_top_chunks_semantic(chunks, query, top_n)
+        else:
+            from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25
+            result = get_top_chunks_bm25(chunks, query, top_n)
+
+        # 結果をキャッシュに保存
+        result_paths = [c.path for c in result]
+        self._semantic_cache[cache_key_tuple] = result_paths
+        disk_cache.set(disk_key, _json.dumps(result_paths))
+        return result
 
     def expand_with_dependencies(
         self,
