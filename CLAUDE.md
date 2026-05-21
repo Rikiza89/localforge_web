@@ -239,3 +239,53 @@ pytest tests/
 ```
 
 Tests use mock adapters — no real Ollama or filesystem required. `VectorAdapter` is not injected in test fixtures (`vector=None`), so embedding is skipped and `get_top_chunks_semantic()` falls back to BM25 keyword search.
+
+## Security Model
+
+LocalForge is designed as a **fully local, offline-first** tool. No data leaves the machine by default. This section documents the threat model, the controls in place, and the environment variables that can change the security posture.
+
+### What stays local
+
+| Component | Network target | Notes |
+|---|---|---|
+| LLM inference | `http://localhost:11434` (Ollama) | All prompts, file contents, and responses stay on-machine |
+| Vector embeddings | `http://localhost:11434` (Ollama) | `nomic-embed-text` via local Ollama |
+| ChromaDB | Embedded, no network | Telemetry explicitly disabled: `Settings(anonymized_telemetry=False)` |
+| Flask server | `127.0.0.1:7331` by default | Binds to loopback only; not reachable from the network |
+| All JS assets | Served from `static/` | No external CDN dependencies anywhere |
+
+### Environment variables that affect security posture
+
+These two variables change where data goes. Both default to safe values. The app logs a **startup warning** if either is set to a non-localhost value.
+
+| Variable | Default | Effect if changed |
+|---|---|---|
+| `OLLAMA_HOST` | `http://localhost:11434` | Redirects all LLM calls (including indexed file contents and prompts) to the specified host |
+| `FLASK_HOST` | `127.0.0.1` | If set to `0.0.0.0`, the Flask API is reachable from the local network with no authentication |
+
+**Do not set `OLLAMA_HOST` to an external URL** unless you own and trust that server. All file content that gets indexed and every LLM prompt is sent there.
+
+**Do not set `FLASK_HOST` to `0.0.0.0`** in untrusted network environments. There is no authentication on the API — anyone on the LAN can read project files and trigger generation.
+
+### Input validation and injection controls
+
+- **Path traversal**: All file read/write endpoints use `path.resolve().relative_to(project_root.resolve())` and return 403 if the resolved path escapes the project directory. This covers symlink and `../` attacks.
+- **Command injection**: All `subprocess.run()` calls (git operations, nvidia-smi, ollama/pkill) use list arguments — never `shell=True`. User-supplied strings are passed as argument values, not shell tokens.
+- **XSS**: User-visible strings are passed through `escapeHtml()` before `innerHTML` assignment. Markdown from LLM output is rendered via `marked.js` and then sanitized by **DOMPurify 3.4.5** (bundled locally in `static/js/purify.min.js`) before being set as `innerHTML`.
+- **Flask debug**: `debug=False` is hardcoded in `main.py` — no environment variable override exists.
+- **SECRET_KEY**: Set to `os.urandom(32)` at startup (fresh each run). Sessions are not used by this app; the key is set for defense-in-depth.
+
+### First-run network access (sentence-transformers)
+
+On the very first run, if the `all-MiniLM-L6-v2` model is not present locally, `sentence-transformers` downloads it from HuggingFace Hub (`https://huggingface.co`). After download it is cached in `./models/all-MiniLM-L6-v2/` and all subsequent runs are fully offline. To pre-cache it and avoid any outbound call:
+
+```bash
+# Before first run, place the model manually:
+mkdir -p models/all-MiniLM-L6-v2
+# copy model files here, or set:
+export LOCALFORGE_ST_MODEL_PATH=/path/to/cached/model
+```
+
+### What was audited and found clean
+
+A full security audit (May 2026) confirmed: no external HTTP calls in production code paths, no CORS headers, no `eval()`/`Function()` in JS, no sensitive data in log files, no hardcoded credentials, no shell-injection risk in subprocess calls, and no `{{ var | safe }}` in Jinja templates.

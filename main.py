@@ -80,6 +80,33 @@ _HOST = os.environ.get("FLASK_HOST", "127.0.0.1")
 _PORT = int(os.environ.get("FLASK_PORT", "7331"))
 
 
+def _check_network_exposure() -> None:
+    """
+    起動時にネットワーク公開リスクとなる環境変数を検査して警告する。
+    FLASK_HOST や OLLAMA_HOST が外部アドレスに向いている場合、
+    ファイル内容・LLMプロンプトが意図せずネットワークに出る可能性がある。
+    """
+    import re as _re
+    _localhost_re = _re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?/?$")
+
+    ollama_host = os.environ.get("OLLAMA_HOST", "")
+    if ollama_host and not _localhost_re.match(ollama_host):
+        logger.warning(
+            "SECURITY WARNING: OLLAMA_HOST is set to an external address: %s — "
+            "indexed file contents and LLM prompts will be sent to this host. "
+            "Unset OLLAMA_HOST to use the local Ollama instance.",
+            ollama_host,
+        )
+
+    if _HOST not in ("127.0.0.1", "localhost"):
+        logger.warning(
+            "SECURITY WARNING: FLASK_HOST is set to %s — "
+            "the LocalForge API will be reachable from the network with no authentication. "
+            "Unset FLASK_HOST to bind to localhost only.",
+            _HOST,
+        )
+
+
 def start_flask(app) -> None:
     """
     Flaskサーバーを別スレッドで起動する関数。
@@ -125,6 +152,9 @@ def main() -> None:
     from localforge.interface.server import create_app
 
     global _flask_app
+
+    # 起動時にネットワーク公開リスクを検査する
+    _check_network_exposure()
 
     # シグナルハンドラとatexitを登録（強制終了時にすべての LLM リソースを解放する）
     signal.signal(signal.SIGTERM, _signal_handler)

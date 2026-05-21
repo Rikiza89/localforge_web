@@ -601,13 +601,15 @@ function escapeHtml(str) {
 
 /**
  * MarkdownテキストをHTMLにレンダリングする。
- * marked.jsが利用可能な場合は変換し、なければエスケープしてpreで囲む。
+ * marked.jsで変換した後、DOMPurifyでXSS対策のサニタイズを行う。
+ * どちらも利用できない場合はエスケープしてpreで囲む。
  * @param {string} text
- * @returns {string} HTML文字列
+ * @returns {string} サニタイズ済みHTML文字列
  */
 function _renderMd(text) {
   if (typeof marked !== "undefined") {
-    return marked.parse(text || "");
+    const raw = marked.parse(text || "");
+    return typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(raw) : raw;
   }
   return "<pre>" + escapeHtml(text || "") + "</pre>";
 }
