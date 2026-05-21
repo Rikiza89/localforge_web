@@ -50,8 +50,6 @@ _CHROMA_DIR = "chroma"
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 # fastembed が HuggingFace hub 形式で保存するキャッシュディレクトリ
 _LOCAL_FASTEMBED_CACHE = _PROJECT_ROOT / "models" / "fastembed"
-# fastembed がモデルを保存する HF hub 形式のディレクトリ名
-_FASTEMBED_HF_CACHE_NAME = "models--Qdrant--bge-small-en-v1.5-onnx-Q"
 _LOCAL_ST_MODEL_DIR = _PROJECT_ROOT / "models" / _ST_MODEL_NAME
 
 # モジュールレベルのモデルキャッシュ（プロセス内で一度だけロードする）
@@ -64,27 +62,14 @@ _embed_backend: Optional[str] = None  # "fastembed" | "sentence-transformers" | 
 # fastembed ロード
 # ---------------------------------------------------------------------------
 
-def _fastembed_cache_exists() -> bool:
-    """
-    fastembed の HuggingFace hub 形式キャッシュが存在するか確認する。
-    既知のキャッシュディレクトリ名を優先し、見つからなければ models-- プレフィックスでも検索する。
-    """
-    if not _LOCAL_FASTEMBED_CACHE.is_dir():
-        return False
-    if (_LOCAL_FASTEMBED_CACHE / _FASTEMBED_HF_CACHE_NAME).is_dir():
-        return True
-    # フォールバック: models-- で始まるディレクトリが存在すれば HF hub キャッシュとみなす
-    return any(
-        p.is_dir() and p.name.startswith("models--")
-        for p in _LOCAL_FASTEMBED_CACHE.iterdir()
-    )
-
-
 def _load_fastembed_model():
     """
     fastembed TextEmbedding モデルをロードする。
-    ローカルキャッシュが存在する場合は HF_HUB_OFFLINE=1 を一時設定して
-    HuggingFace へのネットワークアクセスを完全に防ぐ。
+
+    戦略: オフラインロードを先に試み、キャッシュがなければダウンロードにフォールバックする。
+    これにより fastembed がキャッシュをどこに置いたかに関わらず正しく動作する。
+      1. HF_HUB_OFFLINE=1 でロードを試みる（ネットワーク不使用）
+      2. 失敗した場合のみネットワークアクセスを許可してダウンロードする
     """
     try:
         from fastembed import TextEmbedding
@@ -93,38 +78,35 @@ def _load_fastembed_model():
         return None
 
     env_path = os.environ.get("LOCALFORGE_FASTEMBED_MODEL_PATH", "").strip()
-    if env_path and Path(env_path).is_dir():
-        cache_dir = env_path
-        logger.info("fastembed: 環境変数キャッシュディレクトリを使用: %s", cache_dir)
-    else:
-        cache_dir = str(_LOCAL_FASTEMBED_CACHE)
-
+    cache_dir = env_path if (env_path and Path(env_path).is_dir()) else str(_LOCAL_FASTEMBED_CACHE)
     _LOCAL_FASTEMBED_CACHE.mkdir(parents=True, exist_ok=True)
 
-    # ローカルキャッシュが存在する場合はオフラインモードで起動してネットワークを使わない
-    cache_found = _fastembed_cache_exists()
-    old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
-    if cache_found:
-        logger.info("fastembed: ローカルキャッシュ検出 — オフラインモードで起動します: %s", cache_dir)
-        os.environ["HF_HUB_OFFLINE"] = "1"
-    else:
-        logger.info("fastembed: ローカルキャッシュなし — HuggingFace からダウンロードします → %s", cache_dir)
-
+    # --- Phase 1: オフラインでロードを試みる ---
+    old_offline = os.environ.get("HF_HUB_OFFLINE")
+    os.environ["HF_HUB_OFFLINE"] = "1"
     try:
         model = TextEmbedding(model_name=_FASTEMBED_MODEL_NAME, cache_dir=cache_dir)
         _ = list(model.embed(["test"]))
-        logger.info("fastembed モデルのロード完了: %s", _FASTEMBED_MODEL_NAME)
+        logger.info("fastembed: ローカルキャッシュからロード完了 (オフライン): %s", cache_dir)
+        return model
+    except Exception:
+        pass
+    finally:
+        if old_offline is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = old_offline
+
+    # --- Phase 2: キャッシュなし → ダウンロード ---
+    logger.info("fastembed: ローカルキャッシュなし — HuggingFace からダウンロードします → %s", cache_dir)
+    try:
+        model = TextEmbedding(model_name=_FASTEMBED_MODEL_NAME, cache_dir=cache_dir)
+        _ = list(model.embed(["test"]))
+        logger.info("fastembed: ダウンロード・ロード完了: %s", _FASTEMBED_MODEL_NAME)
         return model
     except Exception as exc:
         logger.warning("fastembed モデルのロードに失敗しました: %s", exc)
         return None
-    finally:
-        # HF_HUB_OFFLINE を元の状態に戻す
-        if cache_found:
-            if old_hf_offline is None:
-                os.environ.pop("HF_HUB_OFFLINE", None)
-            else:
-                os.environ["HF_HUB_OFFLINE"] = old_hf_offline
 
 
 # ---------------------------------------------------------------------------
