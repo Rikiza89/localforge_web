@@ -1,17 +1,27 @@
 """
-VectorAdapter — ChromaDB + sentence-transformers を使ったセマンティック検索アダプター。
+VectorAdapter — ChromaDB + fastembed (ONNX) を使ったセマンティック検索アダプター。
 .localforge/chroma/ に永続化する組み込み ChromaDB コレクションを管理する。
 
-埋め込みモデルは sentence-transformers の all-MiniLM-L6-v2 (384 次元, ~25 MB) を
-プロセス内で実行する。Ollama への HTTP 呼び出しは不要。
-インクリメンタル更新をサポート: mtime+size が変化したファイルのみ再埋め込みする。
+埋め込みバックエンド（優先順）:
+  1. fastembed (BAAI/bge-small-en-v1.5, 384次元, ONNX インプロセス実行)
+     → Ollama 不要、sentence-transformers より高速
+  2. sentence-transformers (all-MiniLM-L6-v2, 384次元) — fastembed が利用不可の場合
+  3. BM25 キーワード検索 — 両方とも利用不可の場合
 
-モデルのキャッシュ戦略:
+モデルキャッシュ戦略 (fastembed):
+  1. LOCALFORGE_FASTEMBED_MODEL_PATH が設定されている → そのパスから直接ロード
+  2. ./models/fastembed/fast-bge-small-en-v1.5/ が存在する → そこからロード
+  3. 上記いずれもない → Qdrant CDN からダウンロードして models/fastembed/ に保存
+
+プロキシ制限環境での事前ダウンロード:
+  URL: https://storage.googleapis.com/qdrant-fastembed/fast-bge-small-en-v1.5.tar.gz
+  展開先: ./models/fastembed/fast-bge-small-en-v1.5/
+  必要ファイル: model.onnx, tokenizer.json, config.json
+
+sentence-transformers フォールバックのキャッシュ戦略:
   1. LOCALFORGE_ST_MODEL_PATH が設定されている → そのパスから直接ロード
-  2. プロジェクトルートの models/all-MiniLM-L6-v2/ が存在する → そこからロード
-     （main.py が自動検出して LOCALFORGE_ST_MODEL_PATH を設定する）
+  2. ./models/all-MiniLM-L6-v2/ が存在する → そこからロード
   3. 上記いずれもない → HuggingFace からダウンロードして models/ に保存
-     → 次回起動から models/ を参照（ダウンロードは一度だけ）
 
 SSL 証明書エラー（自己署名 CA / 企業プロキシ環境）への対処:
   LOCALFORGE_DISABLE_SSL=1 python main.py  （初回ダウンロード時のみ必要）
@@ -29,19 +39,75 @@ from localforge.domain.models import FileChunk
 
 logger = logging.getLogger(__name__)
 
+_FASTEMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+_FASTEMBED_MODEL_DIR_NAME = "fast-bge-small-en-v1.5"
 _ST_MODEL_NAME = "all-MiniLM-L6-v2"
-_COLLECTION_NAME = "localforge_minilm"
+_COLLECTION_NAME = "localforge_fastembed"
 _CHROMA_DIR = "chroma"
 
 # プロジェクトルートの models/ フォルダ（main.py と同じ階層）
-# localforge/infrastructure/vector_adapter.py → ../../ = プロジェクトルート
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-_LOCAL_MODEL_DIR = _PROJECT_ROOT / "models" / _ST_MODEL_NAME
+_LOCAL_FASTEMBED_DIR = _PROJECT_ROOT / "models" / "fastembed" / _FASTEMBED_MODEL_DIR_NAME
+_LOCAL_ST_MODEL_DIR = _PROJECT_ROOT / "models" / _ST_MODEL_NAME
 
 # モジュールレベルのモデルキャッシュ（プロセス内で一度だけロードする）
-_st_model_instance = None
-_st_model_load_attempted = False
+_embed_model_instance = None
+_embed_model_load_attempted = False
+_embed_backend: Optional[str] = None  # "fastembed" | "sentence-transformers" | None
 
+
+# ---------------------------------------------------------------------------
+# fastembed ロード
+# ---------------------------------------------------------------------------
+
+def _load_fastembed_model():
+    """
+    fastembed TextEmbedding モデルをロードする。
+
+    優先順位:
+      1. LOCALFORGE_FASTEMBED_MODEL_PATH 環境変数が指すローカルパス
+      2. ./models/fastembed/fast-bge-small-en-v1.5/ フォルダ
+      3. Qdrant CDN からダウンロード → models/fastembed/ に保存
+    """
+    try:
+        from fastembed import TextEmbedding
+    except ImportError:
+        logger.debug("fastembed がインストールされていません。sentence-transformers を試みます。")
+        return None
+
+    env_path = os.environ.get("LOCALFORGE_FASTEMBED_MODEL_PATH", "").strip()
+    if env_path and Path(env_path).is_dir():
+        cache_dir = str(Path(env_path).parent)
+        model_name = _FASTEMBED_MODEL_NAME
+        logger.info("fastembed: 環境変数パスからロード: %s", env_path)
+    elif _LOCAL_FASTEMBED_DIR.is_dir():
+        cache_dir = str(_LOCAL_FASTEMBED_DIR.parent.parent)
+        model_name = _FASTEMBED_MODEL_NAME
+        logger.info("fastembed: ローカルモデルディレクトリからロード: %s", _LOCAL_FASTEMBED_DIR)
+    else:
+        # CDN からダウンロードして models/fastembed/ に保存する
+        cache_dir = str(_PROJECT_ROOT / "models" / "fastembed")
+        model_name = _FASTEMBED_MODEL_NAME
+        logger.info(
+            "fastembed: モデルが見つかりません。CDN からダウンロードします: %s → %s",
+            model_name, cache_dir,
+        )
+
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        model = TextEmbedding(model_name=model_name, cache_dir=cache_dir)
+        # ロード確認: 1件だけ埋め込んでエラーがないか確認する
+        _ = list(model.embed(["test"]))
+        logger.info("fastembed モデルのロード完了: %s", model_name)
+        return model
+    except Exception as exc:
+        logger.warning("fastembed モデルのロードに失敗しました: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# sentence-transformers フォールバック
+# ---------------------------------------------------------------------------
 
 def _is_ssl_error(exc: Exception) -> bool:
     msg = str(exc).lower()
@@ -50,62 +116,40 @@ def _is_ssl_error(exc: Exception) -> bool:
 
 def _load_st_model():
     """
-    sentence-transformers モデルをロードしてキャッシュする。
-
-    優先順位:
-      1. LOCALFORGE_ST_MODEL_PATH 環境変数が指すローカルパス
-      2. プロジェクトルートの models/all-MiniLM-L6-v2/ フォルダ
-      3. HuggingFace からダウンロード → models/ に保存（以降は 2 が適用される）
-      4. SSL エラー時: LOCALFORGE_DISABLE_SSL=1 でリトライ後に保存
-
-    インストールされていない場合は None を返す（警告のみ、クラッシュしない）。
+    sentence-transformers モデルをロードしてキャッシュする（fastembed 失敗時のフォールバック）。
     """
-    global _st_model_instance, _st_model_load_attempted
-    if _st_model_load_attempted:
-        return _st_model_instance
-    _st_model_load_attempted = True
-
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError:
         logger.warning(
-            "sentence-transformers がインストールされていません。"
-            " ベクトル埋め込みは無効になり、BM25 検索のみ使用されます。"
-            " 有効にするには: pip install sentence-transformers"
+            "sentence-transformers がインストールされていません。BM25 検索のみ使用されます。"
         )
         return None
 
-    # --- ロードするパスを決定 ---
     env_path = os.environ.get("LOCALFORGE_ST_MODEL_PATH", "").strip()
     if env_path and Path(env_path).is_dir():
-        # 環境変数が有効なローカルディレクトリを指している
         load_from = env_path
         save_after_load = False
-    elif _LOCAL_MODEL_DIR.is_dir():
-        # プロジェクト内の models/ フォルダに既にある
-        load_from = str(_LOCAL_MODEL_DIR)
+    elif _LOCAL_ST_MODEL_DIR.is_dir():
+        load_from = str(_LOCAL_ST_MODEL_DIR)
         save_after_load = False
     else:
-        # ローカルになし → HuggingFace からダウンロードして models/ に保存する
         load_from = _ST_MODEL_NAME
         save_after_load = True
 
-    logger.info("sentence-transformers モデルをロード中: %s", load_from)
-
-    model = _try_load(SentenceTransformer, load_from)
+    logger.info("sentence-transformers モデルをロード中 (フォールバック): %s", load_from)
+    model = _try_load_st(SentenceTransformer, load_from)
     if model is None:
         _log_st_help()
         return None
 
     if save_after_load:
-        _save_model_locally(model)
+        _save_st_model_locally(model)
 
-    _st_model_instance = model
-    return _st_model_instance
+    return model
 
 
-def _try_load(SentenceTransformer, load_from: str):
-    """モデルのロードを試みる。SSL エラー時は LOCALFORGE_DISABLE_SSL=1 でリトライ。"""
+def _try_load_st(SentenceTransformer, load_from: str):
     try:
         model = SentenceTransformer(load_from)
         logger.info("sentence-transformers モデルのロード完了: %s", load_from)
@@ -138,37 +182,70 @@ def _try_load(SentenceTransformer, load_from: str):
         ssl._create_default_https_context = _orig_ctx  # type: ignore[attr-defined]
 
 
-def _save_model_locally(model) -> None:
-    """ダウンロード済みモデルをプロジェクトの models/ フォルダに保存する。"""
+def _save_st_model_locally(model) -> None:
     try:
-        _LOCAL_MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
-        model.save(str(_LOCAL_MODEL_DIR))
-        # 次回起動時に main.py が検出できるよう環境変数も更新する
-        os.environ["LOCALFORGE_ST_MODEL_PATH"] = str(_LOCAL_MODEL_DIR)
-        logger.info(
-            "sentence-transformers モデルを保存しました: %s"
-            " — 次回起動からローカルファイルを使用します", _LOCAL_MODEL_DIR
-        )
+        _LOCAL_ST_MODEL_DIR.parent.mkdir(parents=True, exist_ok=True)
+        model.save(str(_LOCAL_ST_MODEL_DIR))
+        os.environ["LOCALFORGE_ST_MODEL_PATH"] = str(_LOCAL_ST_MODEL_DIR)
+        logger.info("sentence-transformers モデルを保存しました: %s", _LOCAL_ST_MODEL_DIR)
     except Exception as exc:
         logger.warning("モデルのローカル保存に失敗しました（動作には影響なし）: %s", exc)
 
 
 def _log_st_help() -> None:
     logger.warning(
-        "sentence-transformers が利用不可のため BM25 検索にフォールバックします。\n"
+        "sentence-transformers も利用不可のため BM25 検索にフォールバックします。\n"
         "解決方法:\n"
-        "  [A] 通常起動でモデルを自動ダウンロード（models/ に保存、以降は再ダウンロード不要）:\n"
-        "        python main.py\n"
-        "  [B] SSL エラーがある場合はスキップしてダウンロード（初回のみ）:\n"
-        "        LOCALFORGE_DISABLE_SSL=1 python main.py\n"
+        "  [A] fastembed モデルを事前配置:\n"
+        "        URL: https://storage.googleapis.com/qdrant-fastembed/fast-bge-small-en-v1.5.tar.gz\n"
+        "        展開先: ./models/fastembed/fast-bge-small-en-v1.5/\n"
+        "  [B] sentence-transformers を自動ダウンロード: python main.py\n"
         "  [C] BM25 のみを使用する（設定不要 — 現在このモードで動作中）"
     )
 
 
+# ---------------------------------------------------------------------------
+# 統合ロードエントリポイント
+# ---------------------------------------------------------------------------
+
+def _load_embed_model():
+    """
+    fastembed → sentence-transformers の順で埋め込みモデルをロードする。
+    成功したバックエンド名を _embed_backend に記録する。
+    """
+    global _embed_model_instance, _embed_model_load_attempted, _embed_backend
+    if _embed_model_load_attempted:
+        return _embed_model_instance
+    _embed_model_load_attempted = True
+
+    model = _load_fastembed_model()
+    if model is not None:
+        _embed_model_instance = model
+        _embed_backend = "fastembed"
+        logger.info("埋め込みバックエンド: fastembed (BAAI/bge-small-en-v1.5)")
+        return _embed_model_instance
+
+    logger.info("fastembed 利用不可 — sentence-transformers にフォールバックします")
+    model = _load_st_model()
+    if model is not None:
+        _embed_model_instance = model
+        _embed_backend = "sentence-transformers"
+        logger.info("埋め込みバックエンド: sentence-transformers (all-MiniLM-L6-v2)")
+        return _embed_model_instance
+
+    _embed_backend = None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# VectorAdapter
+# ---------------------------------------------------------------------------
+
 class VectorAdapter:
     """
     ChromaDB を使ったベクトルインデックスの永続化・検索を担うアダプター。
-    sentence-transformers の all-MiniLM-L6-v2 でプロセス内埋め込みを生成する。
+    fastembed (BAAI/bge-small-en-v1.5) でプロセス内埋め込みを生成する。
+    fastembed が利用不可の場合は sentence-transformers (all-MiniLM-L6-v2) を使用する。
     """
 
     def __init__(self) -> None:
@@ -212,16 +289,21 @@ class VectorAdapter:
         return (project_root / ".localforge" / _CHROMA_DIR).exists()
 
     # ------------------------------------------------------------------
-    # 埋め込み生成（sentence-transformers プロセス内実行）
+    # 埋め込み生成
     # ------------------------------------------------------------------
 
     def _embed(self, text: str) -> Optional[List[float]]:
-        model = _load_st_model()
+        model = _load_embed_model()
         if model is None:
             return None
         try:
-            embedding = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
-            return embedding.tolist()
+            if _embed_backend == "fastembed":
+                embedding = list(model.embed([text]))[0]
+                return embedding.tolist()
+            else:
+                # sentence-transformers
+                embedding = model.encode(text, normalize_embeddings=True, show_progress_bar=False)
+                return embedding.tolist()
         except Exception as exc:
             logger.warning("埋め込み生成エラー: %s", exc)
             return None
@@ -312,7 +394,7 @@ class VectorAdapter:
     ) -> List[FileChunk]:
         """
         クエリに意味的に近い FileChunk を返す。
-        ChromaDB が初期化されていない、または sentence-transformers が利用不可の場合は
+        ChromaDB が初期化されていない、または埋め込みモデルが利用不可の場合は
         BM25 にフォールバックする。
         """
         if not self._collection:
