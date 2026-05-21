@@ -309,6 +309,44 @@ def stream_generation():
     return _sse_response(gen)
 
 
+@bp.route("/plan/saved", methods=["GET"])
+def get_saved_plan():
+    """
+    保存済みプラン（.localforge/plan.json）を返す。
+
+    Response JSON:
+        plan: {project_name, description, approved, files: [{path, description, action, modification_notes, exists}]}
+    """
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    plan = project_svc.load_generation_plan(project.root)
+    if not plan:
+        return jsonify({"error": "NoPlan", "message": "保存済みプランが見つかりません"}), 404
+
+    root = project.root
+    files = []
+    for f in plan.files:
+        files.append({
+            "path": f.path,
+            "description": f.description,
+            "action": f.action,
+            "modification_notes": f.modification_notes,
+            "exists": (root / f.path).exists(),
+        })
+
+    return jsonify({
+        "plan": {
+            "project_name": plan.project_name,
+            "description": plan.description,
+            "approved": plan.approved,
+            "files": files,
+        }
+    })
+
+
 @bp.route("/logs", methods=["GET"])
 def get_generation_logs():
     """

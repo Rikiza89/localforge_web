@@ -225,6 +225,9 @@ async function openProject(pathOverride = null) {
     // モードに応じてタブを切り替え
     switchTab(data.mode);
 
+    // 保存済みプランがあればGenerateタブに表示
+    await loadSavedPlan();
+
     // モデルセレクタをプロジェクトの保存済みモデルに合わせる
     const modelSelectEl = document.getElementById("model-selector");
     if (modelSelectEl && data.model) {
@@ -815,9 +818,86 @@ async function loadSavedReport() {
       _hideSavedReportBanner();
     }
 
+    await _loadQAHistory();
+
     return true;
   } catch (e) {
     return false;
+  }
+}
+
+async function _loadQAHistory() {
+  try {
+    const data = await apiRequest("/api/explain/qa-history");
+    if (data.entries && data.entries.length > 0) {
+      const historyEl = document.getElementById("chat-history");
+      if (historyEl) historyEl.innerHTML = "";
+      if (typeof loadChatHistory === "function") loadChatHistory(data.entries);
+    }
+  } catch (e) {
+    console.warn("Q&A履歴ロードエラー:", e.message);
+  }
+}
+
+/**
+ * 保存済みプラン（.localforge/plan.json）を読み込んでGenerateタブに表示する。
+ * プランが存在しない場合は何もしない。
+ */
+async function loadSavedPlan() {
+  if (!_currentProjectRoot) return;
+  try {
+    const data = await apiRequest("/api/generate/plan/saved");
+    if (!data.plan) return;
+    const plan = data.plan;
+
+    const planSection = document.getElementById("plan-section");
+    const planTree = document.getElementById("plan-tree");
+    const planSummary = document.getElementById("plan-summary");
+
+    if (planSection) planSection.style.display = "flex";
+
+    if (planSummary && plan.description) {
+      planSummary.innerHTML = _renderMd(plan.description);
+      planSummary.style.display = "block";
+    }
+
+    if (planTree) {
+      planTree.innerHTML = "";
+
+      if (plan.project_name || plan.description) {
+        const header = document.createElement("div");
+        header.style.marginBottom = "10px";
+        header.innerHTML = `
+          <strong style="color:var(--accent)">${escapeHtml(plan.project_name || "")}</strong>
+          <div style="color:var(--text-muted); font-size:12px; margin-top:4px;">${escapeHtml((plan.description || "").slice(0, 120))}</div>
+        `;
+        planTree.appendChild(header);
+      }
+
+      plan.files.forEach(f => {
+        const isModify = f.action === "modify";
+        const existsBadge = f.exists
+          ? `<span class="plan-badge-exists" title="ファイルが存在します">✓</span>`
+          : "";
+        const item = document.createElement("div");
+        item.className = "plan-file-item";
+        item.innerHTML = `
+          <span class="plan-badge ${isModify ? "plan-badge-edit" : "plan-badge-new"}">${isModify ? "EDIT" : "NEW"}</span>
+          ${existsBadge}
+          <span class="plan-file-path">${escapeHtml(f.path || "")}</span>
+          <span class="plan-file-desc">${escapeHtml(f.description || "")}</span>
+          ${f.modification_notes ? `<span class="plan-mod-notes">${escapeHtml(f.modification_notes)}</span>` : ""}
+        `;
+        planTree.appendChild(item);
+      });
+    }
+
+    const banner = document.getElementById("saved-plan-banner");
+    if (banner) banner.style.display = "flex";
+
+  } catch (e) {
+    if (e.message && (e.message.includes("404") || e.message.includes("NoPlan"))) return;
+    console.warn("保存済みプランロードエラー:", e.message);
   }
 }
 
@@ -1501,6 +1581,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (regenBtn) regenBtn.addEventListener("click", () => generateReport({}));
   const dismissBanner = document.getElementById("report-partial-dismiss");
   if (dismissBanner) dismissBanner.addEventListener("click", _hideSavedReportBanner);
+
+  const dismissPlanBanner = document.getElementById("dismiss-plan-banner-btn");
+  if (dismissPlanBanner) {
+    dismissPlanBanner.addEventListener("click", () => {
+      const banner = document.getElementById("saved-plan-banner");
+      if (banner) banner.style.display = "none";
+    });
+  }
 
   // セクション選択パネルの全選択/解除
   const selectAll = document.getElementById("sections-select-all");

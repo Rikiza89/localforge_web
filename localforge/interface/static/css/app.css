@@ -2230,3 +2230,50 @@ details[open] .section-selector-summary::before { content: "▼"; }
   background: var(--border);
   flex-shrink: 0;
 }
+
+/* ── Q&A 履歴区切り ────────────────────────────────────────────── */
+.chat-history-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.chat-history-divider::before,
+.chat-history-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.chat-turn-history { opacity: 0.8; }
+.chat-turn-history .chat-q { font-style: italic; }
+.chat-turn-ts {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+/* ── 保存済みプランバナー ───────────────────────────────────────── */
+.saved-plan-banner {
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* ── plan-badge-exists ─────────────────────────────────────────── */
+.plan-badge-exists {
+  display: inline-block;
+  color: var(--accent);
+  font-size: 11px;
+  margin-right: 4px;
+  font-weight: 600;
+}

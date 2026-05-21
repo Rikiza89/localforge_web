@@ -21,6 +21,44 @@ function resetChatHistory() {
 }
 
 /**
+ * 過去のQ&A履歴をチャット表示エリアに読み込む（表示専用、_chatHistoryには追加しない）。
+ * @param {Array<{timestamp: string, question: string, answer: string}>} entries
+ */
+function loadChatHistory(entries) {
+  if (!entries || entries.length === 0) return;
+
+  const historyEl = document.getElementById("chat-history");
+  if (!historyEl) return;
+
+  const divider = document.createElement("div");
+  divider.className = "chat-history-divider";
+  divider.innerHTML = `<span>— 過去の Q&A (${entries.length}件) —</span>`;
+  historyEl.appendChild(divider);
+
+  entries.forEach(entry => {
+    const turn = document.createElement("div");
+    turn.className = "chat-turn chat-turn-history";
+
+    const tsEl = document.createElement("div");
+    tsEl.className = "chat-turn-ts";
+    tsEl.textContent = entry.timestamp;
+
+    const qEl = document.createElement("div");
+    qEl.className = "chat-q";
+    qEl.textContent = entry.question;
+
+    const aEl = document.createElement("div");
+    aEl.className = "chat-a md-body";
+    aEl.innerHTML = _renderMd(entry.answer);
+
+    turn.appendChild(tsEl);
+    turn.appendChild(qEl);
+    turn.appendChild(aEl);
+    historyEl.appendChild(turn);
+  });
+}
+
+/**
  * チャット機能を有効化する。
  */
 function enableChat() {

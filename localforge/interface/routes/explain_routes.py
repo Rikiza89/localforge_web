@@ -371,6 +371,46 @@ def delete_historical_report(report_id: str):
     return jsonify({"ok": True})
 
 
+@bp.route("/qa-history", methods=["GET"])
+def get_qa_history():
+    """
+    .localforge/qa_history.md からQ&A履歴を読み込んで返す。
+
+    Response JSON:
+        entries: [{timestamp, question, answer}, ...]  (最大50件、新しい順)
+    """
+    import re as _re
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    qa_path = project.root / ".localforge" / "qa_history.md"
+    if not qa_path.exists():
+        return jsonify({"entries": []})
+
+    try:
+        content = qa_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return jsonify({"error": "ReadError", "message": str(exc)}), 500
+
+    entries = []
+    pattern = _re.compile(
+        r"##\s+\[([^\]]+)\]\s*\n+\*\*Q:\*\*\s*(.*?)\s*\n+\*\*A:\*\*\s*(.*?)(?=\n+---|\Z)",
+        _re.DOTALL,
+    )
+    for m in pattern.finditer(content):
+        entries.append({
+            "timestamp": m.group(1).strip(),
+            "question": m.group(2).strip(),
+            "answer": m.group(3).strip(),
+        })
+
+    entries = entries[-50:]
+    entries.reverse()
+    return jsonify({"entries": entries})
+
+
 @bp.route("/migrate-vector", methods=["GET"])
 def migrate_vector_index():
     """
