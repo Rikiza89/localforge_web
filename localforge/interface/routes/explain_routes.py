@@ -143,8 +143,11 @@ def stream_index():
 @bp.route("/report", methods=["GET"])
 def stream_report():
     """
-    11セクションの説明レポートをSSEストリーミングする。
-    インデックスが存在しない場合はエラーを返す。
+    レポートをSSEストリーミングする。
+    クエリパラメータ:
+      - sections: カンマ区切りのセクションインデックス (例: 0,1,4,7)
+      - resume_from: このインデックス以降を生成 (例: 6)
+      - model: 使用モデルの上書き（省略時はプロジェクト設定モデル）
 
     SSE Events:
         section, token, progress, done, error
@@ -157,7 +160,7 @@ def stream_report():
             yield {"error": "プロジェクトが開かれていません"}
         return _sse_response(err_gen())
 
-    model = project.config.model
+    model = request.args.get("model", "").strip() or project.config.model
     if not model:
         def err_gen():
             yield {"error": "モデルが選択されていません。UIでモデルを選択してください"}
@@ -165,7 +168,28 @@ def stream_report():
 
     root = project.root
 
-    gen = explanation_svc.stream_report(root=root, model=model)
+    # セクション選択フィルタ
+    sections_param = request.args.get("sections", "").strip()
+    selected_indices: List[int] | None = None
+    if sections_param:
+        try:
+            selected_indices = [int(x) for x in sections_param.split(",") if x.strip().isdigit()]
+        except ValueError:
+            selected_indices = None
+
+    # resume_from
+    resume_from = 0
+    try:
+        resume_from = max(0, int(request.args.get("resume_from", "0")))
+    except ValueError:
+        resume_from = 0
+
+    gen = explanation_svc.stream_report(
+        root=root,
+        model=model,
+        selected_section_indices=selected_indices,
+        resume_from=resume_from,
+    )
     return _sse_response(gen)
 
 
@@ -254,11 +278,14 @@ def save_qa_entry():
 def get_saved_report():
     """
     .localforge/report.md の内容を返す。
-    ファイルが存在しない場合は content: null を返す。
 
     Response JSON:
         content: Markdownテキスト（存在しない場合はnull）
+        partial: 部分的なレポートかどうか
+        sections_done: 完了済みセクション数（部分的な場合）
+        sections_total: 総セクション数（部分的な場合）
     """
+    import re as _re
     project_svc = _get_project_svc()
     project = project_svc.current_project
     if not project:
@@ -266,13 +293,77 @@ def get_saved_report():
 
     report_path = project.root / ".localforge" / "report.md"
     if not report_path.exists():
-        return jsonify({"content": None})
+        return jsonify({"content": None, "partial": False})
 
     try:
         content = report_path.read_text(encoding="utf-8")
-        return jsonify({"content": content})
+        m = _re.search(r"<!-- localforge:partial:(\d+)/(\d+) -->", content)
+        partial = m is not None
+        return jsonify({
+            "content": content,
+            "partial": partial,
+            "sections_done": int(m.group(1)) if m else None,
+            "sections_total": int(m.group(2)) if m else None,
+        })
     except OSError as exc:
         return jsonify({"error": "ReadError", "message": str(exc)}), 500
+
+
+@bp.route("/report-history", methods=["GET"])
+def get_report_history():
+    """
+    レポート履歴メタデータ一覧を返す（新しい順）。
+
+    Response JSON: [{id, filename, created_at, partial, sections_done, sections_total, model}]
+    """
+    project_svc = _get_project_svc()
+    explanation_svc = _get_explanation_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    history = explanation_svc.get_report_history(project.root)
+    return jsonify({"history": history})
+
+
+@bp.route("/report-history/<report_id>", methods=["GET"])
+def get_historical_report(report_id: str):
+    """
+    指定IDの履歴レポート内容を返す。
+
+    Response JSON:
+        content: Markdownテキスト
+    """
+    project_svc = _get_project_svc()
+    explanation_svc = _get_explanation_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    content = explanation_svc.get_historical_report(project.root, report_id)
+    if content is None:
+        return jsonify({"error": "NotFound", "message": "指定されたレポートが見つかりません"}), 404
+    return jsonify({"content": content})
+
+
+@bp.route("/report-history/<report_id>", methods=["DELETE"])
+def delete_historical_report(report_id: str):
+    """
+    指定IDの履歴レポートを削除する。
+
+    Response JSON:
+        ok: true
+    """
+    project_svc = _get_project_svc()
+    explanation_svc = _get_explanation_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    ok = explanation_svc.delete_historical_report(project.root, report_id)
+    if not ok:
+        return jsonify({"error": "NotFound", "message": "指定されたレポートが見つかりません"}), 404
+    return jsonify({"ok": True})
 
 
 @bp.route("/migrate-vector", methods=["GET"])

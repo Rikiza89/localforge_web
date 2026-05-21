@@ -282,23 +282,41 @@ const ProcessLog = (() => {
  *   - onProgress(done, total, currentFile): 進捗更新時
  *   - onDone(): ストリーム完了時
  *   - onError(message): エラー受信時
- * @returns {EventSource} 開いたEventSourceインスタンス
+ *   - noReconnect(bool): trueの場合、アイドルタイムアウト時に再接続せずonErrorを呼ぶ
+ * @returns {{close: function}} ストリームコントローラー（常に現在のESをclose()する）
  */
 function startStream(url, outputEl, handlers) {
   let es = null;
   let _closed = false;
   let _idleTimer = null;
+  const _noReconnect = !!(handlers && handlers.noReconnect);
   // 5分 — モデルロード時間を考慮した余裕のあるタイムアウト。
   // スレッドベースのハートビート（15秒間隔）が正常に機能すれば実際には発火しない。
   const IDLE_TIMEOUT = 300000;
+
+  // コントローラープロキシ — 常に現在の es を参照するため再接続後も有効
+  const ctrl = {
+    close() {
+      _closed = true;
+      if (_idleTimer) clearTimeout(_idleTimer);
+      if (es) es.close();
+    }
+  };
 
   function _resetIdle() {
     if (_idleTimer) clearTimeout(_idleTimer);
     _idleTimer = setTimeout(() => {
       if (!_closed) {
-        console.warn("SSEアイドルタイムアウト — 再接続します");
-        es.close();
-        es = _open();
+        if (_noReconnect) {
+          console.warn("SSEアイドルタイムアウト — noReconnectのため接続を終了します");
+          _closed = true;
+          if (es) es.close();
+          if (handlers.onError) handlers.onError("接続がタイムアウトしました。再試行してください。");
+        } else {
+          console.warn("SSEアイドルタイムアウト — 再接続します");
+          if (es) es.close();
+          es = _open();
+        }
       }
     }, IDLE_TIMEOUT);
   }
@@ -327,7 +345,7 @@ function startStream(url, outputEl, handlers) {
     if (data.done) {
       _closed = true;
       if (_idleTimer) clearTimeout(_idleTimer);
-      es.close();
+      if (es) es.close();
       OllamaPanel.markDone();
       ProcessLog.markAllDone();
       if (handlers.onDone) handlers.onDone();
@@ -337,7 +355,7 @@ function startStream(url, outputEl, handlers) {
     if (data.error) {
       _closed = true;
       if (_idleTimer) clearTimeout(_idleTimer);
-      es.close();
+      if (es) es.close();
       OllamaPanel.markDone();
       ProcessLog.markAllDone();
       if (handlers.onError) handlers.onError(data.error);
@@ -402,7 +420,7 @@ function startStream(url, outputEl, handlers) {
   }
 
   es = _open();
-  return es;
+  return ctrl;
 }
 
 /**

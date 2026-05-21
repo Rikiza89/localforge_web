@@ -183,6 +183,13 @@ function switchTab(tabName) {
     content.classList.toggle("active", content.id === `tab-content-${tabName}`);
   });
   _currentMode = tabName;
+
+  // Explainタブに切り替わったとき、保存済みレポートを自動ロードする
+  if (tabName === "explain" && _currentProjectRoot && !_uiLocked) {
+    loadSavedReport().then(hasReport => {
+      if (hasReport) enableChat();
+    });
+  }
 }
 
 // =========================================================================
@@ -703,10 +710,17 @@ async function buildIndex() {
       _unlockUI();
       if (progressContainer) progressContainer.style.display = "none";
       if (reportBtn) reportBtn.disabled = false;
+      const histBtn = document.getElementById("report-history-btn");
+      if (histBtn) histBtn.disabled = false;
       _indexBuilt = true;
       updateStatusBar("インデックス構築完了");
       _applyRagButtonState(true);
       refreshContextPanel();
+      _initSectionSelector();
+
+      // セクション選択パネルを表示
+      const sectionPanel = document.getElementById("section-selector-panel");
+      if (sectionPanel) sectionPanel.style.display = "";
 
       // 保存済みレポートがあればロードしてQ&Aをそのまま有効化する
       const hasReport = await loadSavedReport();
@@ -779,51 +793,98 @@ async function migrateVectorIndex() {
 /**
  * 保存済みレポート（.localforge/report.md）を読み込んでUIに表示する。
  * レポートが存在すればtrue、存在しなければfalseを返す。
+ * 部分的なレポートの場合は専用バナーを表示する。
  * @returns {Promise<boolean>}
  */
 async function loadSavedReport() {
   try {
     const data = await apiRequest("/api/explain/saved-report");
-    if (!data.content) return false;
+    if (!data.content) {
+      _hideSavedReportBanner();
+      return false;
+    }
 
     const reportOutput = document.getElementById("report-output");
     if (!reportOutput) return false;
 
     reportOutput.innerHTML = _renderMd(data.content);
+
+    if (data.partial) {
+      _showPartialBanner(data.sections_done, data.sections_total);
+    } else {
+      _hideSavedReportBanner();
+    }
+
     return true;
   } catch (e) {
     return false;
   }
 }
 
+function _showPartialBanner(done, total) {
+  const banner = document.getElementById("report-partial-banner");
+  const text = document.getElementById("report-partial-text");
+  if (banner) banner.style.display = "flex";
+  if (text) text.textContent = `部分レポート: ${done}/${total} セクション完了 — 残りを生成するか最初から再生成できます。`;
+  // resume_from をグローバルに記憶
+  window._reportResumFrom = done;
+}
+
+function _hideSavedReportBanner() {
+  const banner = document.getElementById("report-partial-banner");
+  if (banner) banner.style.display = "none";
+  window._reportResumFrom = 0;
+}
+
 /**
  * 説明レポートを生成する。
+ * @param {Object} opts - オプション
+ * @param {number[]} [opts.sectionIndices] - 生成するセクションのインデックスリスト（省略で全セクション）
+ * @param {number} [opts.resumeFrom] - このインデックス以降を生成（0で最初から）
+ * @param {string} [opts.model] - 使用モデルの上書き（省略でプロジェクト設定）
  */
-function generateReport() {
+function generateReport(opts = {}) {
   if (!_indexBuilt && !_currentProjectRoot) {
     showAlert("先にインデックスを構築してください。", "warning");
     return;
   }
 
   const reportOutput = document.getElementById("report-output");
-  if (reportOutput) reportOutput.innerHTML = "";
+  if (reportOutput && !opts.resumeFrom) reportOutput.innerHTML = "";
+
+  _hideSavedReportBanner();
 
   let currentSectionEl = null;
-  // 重複セクション防止: 既にレンダリング済みのセクション名を追跡する
   const _renderedSections = new Set();
   updateStatusBar("レポートを生成中...");
 
-  const _es = startStream("/api/explain/report", null, {
+  // SSEエンドポイントにパラメータを付加
+  const params = new URLSearchParams();
+  if (opts.sectionIndices && opts.sectionIndices.length > 0) {
+    params.set("sections", opts.sectionIndices.join(","));
+  }
+  if (opts.resumeFrom && opts.resumeFrom > 0) {
+    params.set("resume_from", String(opts.resumeFrom));
+  }
+  if (opts.model) {
+    params.set("model", opts.model);
+  }
+  const streamUrl = "/api/explain/report" + (params.toString() ? "?" + params.toString() : "");
+
+  // noReconnect: true — レポート生成中のサイレント再接続を防ぐ
+  const _ctrl = startStream(streamUrl, null, {
+    noReconnect: true,
     onSection: (name, idx, total) => {
       if (!reportOutput) return;
 
-      // ステータスバーをセクション開始と同時に更新（バナーとh3の不一致を防ぐ）
       const countStr = (idx && total) ? ` (${idx}/${total})` : "";
       updateStatusBar(`レポート生成中: ${name}${countStr}`);
 
-      // 同じセクションが再度来た場合 = SSE再接続によるリスタート。ストリームを閉じて中断する。
       if (_renderedSections.has(name)) {
-        _es.close();
+        // 重複セクション = 予期しない再接続。安全に終了。
+        _ctrl.close();
+        showAlert("予期しないストリーム再起動を検出しました。「続きから生成」で再試行できます。", "warning");
+        _unlockUI();
         return;
       }
       _renderedSections.add(name);
@@ -843,31 +904,30 @@ function generateReport() {
     onToken: (token) => {
       if (currentSectionEl) {
         currentSectionEl._mdBuf = (currentSectionEl._mdBuf || "") + token;
-        // LLM がセクション見出しを先頭に出力した場合に除去（h3 と重複するため）
         const buf = _stripLeadingMdHeading(currentSectionEl._mdBuf, currentSectionEl._sectionName || "");
         currentSectionEl.innerHTML = _renderMd(buf);
-        if (reportOutput) {
-          _autoScroll(reportOutput);
-        }
+        if (reportOutput) _autoScroll(reportOutput);
       }
     },
     onProgress: (done, total, currentFile) => {
-      // セクション完了時に呼ばれる（done = 完了済みセクション数）
       updateStatusBar(`レポート生成中: ${currentFile} ✓ (${done}/${total})`);
     },
     onDone: () => {
       _unlockUI();
       updateStatusBar("レポート生成完了");
       showAlert("レポートが完成しました！Q&Aで質問できます。", "success");
+      _hideSavedReportBanner();
       enableChat();
     },
     onError: (err) => {
       _unlockUI();
       showAlert(`レポート生成エラー: ${err}`, "error");
       updateStatusBar("エラーが発生しました");
+      // 部分的に保存されたレポートを再ロードしてバナーを更新
+      loadSavedReport();
     },
   });
-  _lockUI(() => _es.close());
+  _lockUI(() => _ctrl.close());
 }
 
 // =========================================================================
@@ -1047,6 +1107,242 @@ async function applyCpuThread(numThread) {
 }
 
 // =========================================================================
+// セクション選択・レポート履歴・比較ビュー
+// =========================================================================
+
+const REPORT_SECTIONS = [
+  "Project Overview",
+  "Module Map",
+  "Entry Points & Startup Flow",
+  "Data Flow",
+  "Key Interfaces & Contracts",
+  "External Dependencies",
+  "Configuration",
+  "Test Coverage",
+  "Notable Patterns & Design Decisions",
+  "Potential Issues & Technical Debt",
+  "Project Health & Code Quality Analysis",
+  "How to Extend This Project",
+];
+
+/** セクション選択パネルを初期化してチェックボックスを描画する。 */
+function _initSectionSelector() {
+  const panel = document.getElementById("section-selector-panel");
+  const container = document.getElementById("section-checkboxes");
+  if (!panel || !container) return;
+
+  container.innerHTML = "";
+  REPORT_SECTIONS.forEach((name, idx) => {
+    const label = document.createElement("label");
+    label.className = "section-checkbox-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = String(idx);
+    cb.checked = true;
+    cb.dataset.sectionIdx = idx;
+    cb.addEventListener("change", _updateSectionCount);
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(` ${name}`));
+    container.appendChild(label);
+  });
+  _updateSectionCount();
+
+  // レポートモデルオーバーライドセレクタにメインのオプションをコピーする
+  const mainSelect = document.getElementById("model-selector");
+  const overrideSelect = document.getElementById("report-model-override");
+  if (mainSelect && overrideSelect) {
+    // 既存オプション（「プロジェクト設定を使用」以外）をクリア
+    while (overrideSelect.options.length > 1) overrideSelect.remove(1);
+    Array.from(mainSelect.options).forEach(opt => {
+      if (opt.value) {
+        const copy = new Option(opt.text, opt.value);
+        overrideSelect.appendChild(copy);
+      }
+    });
+  }
+}
+
+function _updateSectionCount() {
+  const checkboxes = document.querySelectorAll("#section-checkboxes input[type=checkbox]");
+  const checked = Array.from(checkboxes).filter(cb => cb.checked).length;
+  const badge = document.getElementById("section-selector-count");
+  if (badge) badge.textContent = `${checked}/${REPORT_SECTIONS.length} 選択中`;
+}
+
+/** チェック済みセクションのインデックスを返す。全選択の場合はnullを返す。 */
+function _getSelectedSectionIndices() {
+  const checkboxes = document.querySelectorAll("#section-checkboxes input[type=checkbox]");
+  const all = Array.from(checkboxes);
+  const checked = all.filter(cb => cb.checked).map(cb => parseInt(cb.value, 10));
+  if (checked.length === all.length) return null; // 全セクション
+  return checked;
+}
+
+/** 履歴パネルを開いてリストを読み込む。 */
+async function openReportHistory() {
+  const panel = document.getElementById("report-history-panel");
+  if (!panel) return;
+  panel.style.display = "flex";
+
+  const list = document.getElementById("history-panel-list");
+  if (!list) return;
+  list.innerHTML = "<p>読み込み中...</p>";
+
+  try {
+    const data = await apiRequest("/api/explain/report-history");
+    const history = data.history || [];
+    if (history.length === 0) {
+      list.innerHTML = "<p class='history-empty'>履歴がありません。</p>";
+      return;
+    }
+    list.innerHTML = "";
+    history.forEach(entry => {
+      const item = document.createElement("div");
+      item.className = "history-item";
+      item.dataset.id = entry.id;
+
+      const date = new Date(entry.created_at).toLocaleString();
+      const badge = entry.partial ? " <span class='badge-partial'>部分</span>" : "";
+      const sections = `${entry.sections_done}/${entry.sections_total}`;
+
+      item.innerHTML = `
+        <label class="history-select-label">
+          <input type="checkbox" class="history-compare-cb" value="${entry.id}">
+        </label>
+        <div class="history-item-body">
+          <div class="history-item-date">${date}${badge}</div>
+          <div class="history-item-meta">モデル: ${escapeHtml(entry.model || "不明")} | ${sections}セクション</div>
+        </div>
+        <div class="history-item-actions">
+          <button class="btn btn-sm btn-secondary history-load-btn" data-id="${entry.id}">読込</button>
+          <button class="btn btn-sm btn-ghost history-delete-btn" data-id="${entry.id}" title="削除">✕</button>
+        </div>
+      `;
+      list.appendChild(item);
+    });
+
+    // イベント委任
+    list.querySelectorAll(".history-load-btn").forEach(btn => {
+      btn.addEventListener("click", () => _loadHistoricalReport(btn.dataset.id));
+    });
+    list.querySelectorAll(".history-delete-btn").forEach(btn => {
+      btn.addEventListener("click", () => _deleteHistoricalReport(btn.dataset.id));
+    });
+    list.querySelectorAll(".history-compare-cb").forEach(cb => {
+      cb.addEventListener("change", _updateCompareButton);
+    });
+
+    _updateCompareButton();
+  } catch (e) {
+    list.innerHTML = `<p class='history-empty'>エラー: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function _updateCompareButton() {
+  const checked = document.querySelectorAll(".history-compare-cb:checked");
+  const btn = document.getElementById("history-compare-btn");
+  if (btn) btn.disabled = checked.length !== 2;
+}
+
+async function _loadHistoricalReport(reportId) {
+  try {
+    const data = await apiRequest(`/api/explain/report-history/${reportId}`);
+    const reportOutput = document.getElementById("report-output");
+    if (reportOutput) reportOutput.innerHTML = _renderMd(data.content);
+    const panel = document.getElementById("report-history-panel");
+    if (panel) panel.style.display = "none";
+    showAlert("履歴レポートを読み込みました。", "success", 3000);
+  } catch (e) {
+    showAlert(`レポート読込エラー: ${e.message}`, "error");
+  }
+}
+
+async function _deleteHistoricalReport(reportId) {
+  if (!confirm("このレポートを削除しますか？")) return;
+  try {
+    await apiRequest(`/api/explain/report-history/${reportId}`, "DELETE");
+    showAlert("削除しました。", "success", 2000);
+    openReportHistory(); // 一覧を再読み込み
+  } catch (e) {
+    showAlert(`削除エラー: ${e.message}`, "error");
+  }
+}
+
+/** 2つのレポートを並べて比較するビューを開く。 */
+async function openCompareView() {
+  const checked = document.querySelectorAll(".history-compare-cb:checked");
+  if (checked.length !== 2) return;
+
+  const [idA, idB] = Array.from(checked).map(cb => cb.value);
+
+  try {
+    const [dataA, dataB] = await Promise.all([
+      apiRequest(`/api/explain/report-history/${idA}`),
+      apiRequest(`/api/explain/report-history/${idB}`),
+    ]);
+
+    const sectionsA = _parseReportSections(dataA.content);
+    const sectionsB = _parseReportSections(dataB.content);
+
+    // ヒストリーパネルを閉じて比較ビューを開く
+    const histPanel = document.getElementById("report-history-panel");
+    if (histPanel) histPanel.style.display = "none";
+
+    const compareView = document.getElementById("report-compare-view");
+    if (!compareView) return;
+    compareView.style.display = "flex";
+
+    // セクション選択セレクトを構築
+    const sectionSelect = document.getElementById("compare-section-select");
+    if (sectionSelect) {
+      sectionSelect.innerHTML = "";
+      const allSections = Array.from(new Set([...Object.keys(sectionsA), ...Object.keys(sectionsB)]));
+      allSections.forEach(name => {
+        const opt = new Option(name, name);
+        sectionSelect.appendChild(opt);
+      });
+      sectionSelect.onchange = () => _renderCompareSection(sectionsA, sectionsB, sectionSelect.value, idA, idB);
+      if (allSections.length > 0) _renderCompareSection(sectionsA, sectionsB, allSections[0], idA, idB);
+    }
+  } catch (e) {
+    showAlert(`比較エラー: ${e.message}`, "error");
+  }
+}
+
+function _renderCompareSection(sectionsA, sectionsB, sectionName, idA, idB) {
+  const colA = document.getElementById("compare-col-a");
+  const colB = document.getElementById("compare-col-b");
+  const titleA = document.getElementById("compare-col-a-title");
+  const titleB = document.getElementById("compare-col-b-title");
+
+  if (titleA) titleA.textContent = idA;
+  if (titleB) titleB.textContent = idB;
+
+  if (colA) colA.innerHTML = _renderMd(sectionsA[sectionName] || "_このセクションは含まれていません_");
+  if (colB) colB.innerHTML = _renderMd(sectionsB[sectionName] || "_このセクションは含まれていません_");
+}
+
+/** report.md 文字列をセクション名→内容の辞書にパースする。 */
+function _parseReportSections(content) {
+  const result = {};
+  if (!content) return result;
+  const lines = content.split("\n");
+  let currentName = null;
+  let buf = [];
+  for (const line of lines) {
+    if (line.startsWith("## ")) {
+      if (currentName !== null) result[currentName] = buf.join("\n").trim();
+      currentName = line.slice(3).trim();
+      buf = [];
+    } else {
+      if (currentName !== null) buf.push(line);
+    }
+  }
+  if (currentName !== null) result[currentName] = buf.join("\n").trim();
+  return result;
+}
+
+// =========================================================================
 // 初期化
 // =========================================================================
 
@@ -1170,10 +1466,69 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (buildIndexBtn) buildIndexBtn.addEventListener("click", buildIndex);
 
   const generateReportBtn = document.getElementById("generate-report-btn");
-  if (generateReportBtn) generateReportBtn.addEventListener("click", generateReport);
+  if (generateReportBtn) {
+    generateReportBtn.addEventListener("click", () => {
+      const indices = _getSelectedSectionIndices();
+      const modelOverride = (document.getElementById("report-model-override") || {}).value || "";
+      generateReport({
+        sectionIndices: indices,
+        model: modelOverride || undefined,
+      });
+    });
+  }
 
   const migrateVectorBtn = document.getElementById("migrate-vector-btn");
   if (migrateVectorBtn) migrateVectorBtn.addEventListener("click", migrateVectorIndex);
+
+  // 履歴ボタン
+  const reportHistoryBtn = document.getElementById("report-history-btn");
+  if (reportHistoryBtn) reportHistoryBtn.addEventListener("click", openReportHistory);
+
+  // 部分レポートバナーのボタン
+  const resumeBtn = document.getElementById("report-resume-btn");
+  if (resumeBtn) {
+    resumeBtn.addEventListener("click", () => {
+      generateReport({ resumeFrom: window._reportResumFrom || 0 });
+    });
+  }
+  const regenBtn = document.getElementById("report-regen-btn");
+  if (regenBtn) regenBtn.addEventListener("click", () => generateReport({}));
+  const dismissBanner = document.getElementById("report-partial-dismiss");
+  if (dismissBanner) dismissBanner.addEventListener("click", _hideSavedReportBanner);
+
+  // セクション選択パネルの全選択/解除
+  const selectAll = document.getElementById("sections-select-all");
+  if (selectAll) {
+    selectAll.addEventListener("click", () => {
+      document.querySelectorAll("#section-checkboxes input[type=checkbox]").forEach(cb => { cb.checked = true; });
+      _updateSectionCount();
+    });
+  }
+  const deselectAll = document.getElementById("sections-deselect-all");
+  if (deselectAll) {
+    deselectAll.addEventListener("click", () => {
+      document.querySelectorAll("#section-checkboxes input[type=checkbox]").forEach(cb => { cb.checked = false; });
+      _updateSectionCount();
+    });
+  }
+
+  // 履歴パネルの閉じるボタン
+  const histClose = document.getElementById("history-panel-close");
+  if (histClose) histClose.addEventListener("click", () => {
+    const panel = document.getElementById("report-history-panel");
+    if (panel) panel.style.display = "none";
+  });
+
+  // 比較ボタン
+  const compareBtn = document.getElementById("history-compare-btn");
+  if (compareBtn) compareBtn.addEventListener("click", openCompareView);
+
+  // 比較ビューを閉じる
+  const compareClose = document.getElementById("compare-close-btn");
+  if (compareClose) compareClose.addEventListener("click", () => {
+    const view = document.getElementById("report-compare-view");
+    if (view) view.style.display = "none";
+  });
 
   // Resumeタブのボタン
   const continueGenBtn = document.getElementById("continue-generation-btn");

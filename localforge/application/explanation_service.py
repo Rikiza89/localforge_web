@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re as _re_mod
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator, List, Optional
 
@@ -202,21 +203,22 @@ class ExplanationService:
         self,
         root: Path,
         model: str,
+        selected_section_indices: Optional[List[int]] = None,
+        resume_from: int = 0,
     ) -> Generator[dict, None, None]:
         """
-        11セクションのレポートをSSEイベントとしてストリーミング生成する。
-        各セクションは別々のOllamaコールで処理する。
-        生成完了後に <project>/.localforge/report.md として保存する。
+        レポートをSSEイベントとしてストリーミング生成する。
+        各セクションは別々のOllamaコールで処理し、完了ごとにdiskへ保存する。
 
         Args:
             root: プロジェクトルート
             model: 使用するOllamaモデル名
+            selected_section_indices: 生成するセクションのインデックスリスト（Noneで全セクション）
+            resume_from: このインデックス以降のセクションを生成（それ以前は既存内容を再利用）
 
         Yields:
             SSEペイロード辞書（section, token, progress, done, error）
         """
-        # Start loading the model immediately — overlaps with index load and parallel
-        # semantic searches so the first section's first token arrives sooner.
         getattr(self._llm, "preload_model_async", lambda m: None)(model)
 
         project_index = self._analysis.load_project_index(root)
@@ -225,42 +227,77 @@ class ExplanationService:
             return
 
         chunks = project_index.file_chunks
-        # レポートセクションには summary（構造化テキスト）のみ渡す。
-        # ファイルパス一覧は Q&A フェーズ1専用で、レポートでは不要かつ巨大なので除外する。
         index_json = self._get_index_json(root, project_index, include_files=False)
 
+        # セクション選択フィルタリング
+        if selected_section_indices is not None:
+            active_indices = set(selected_section_indices)
+            sections_to_run = [
+                (i, name) for i, name in enumerate(REPORT_SECTIONS)
+                if i in active_indices
+            ]
+        else:
+            sections_to_run = list(enumerate(REPORT_SECTIONS))
+
         total_sections = len(REPORT_SECTIONS)
-        completed_sections: List[tuple[str, str]] = []  # (name, content)
+        completed_sections: List[tuple[str, str]] = []
 
-        _is_cpu = not getattr(self._llm, "cuda_available", False)
-        # 4096 is sufficient for report section prompts (≤1500 tokens each)
-        _r_num_ctx: Optional[int] = 4096 if _is_cpu else None
-        _r_num_predict: Optional[int] = -1 if _is_cpu else None
+        # resume_from: 既存レポートから既存セクション内容を取得して再利用する
+        if resume_from > 0:
+            existing = self._load_existing_sections(root)
+            for i, name in enumerate(REPORT_SECTIONS):
+                if i < resume_from:
+                    existing_content = existing.get(name, "")
+                    completed_sections.append((name, existing_content))
+                    # スキップ済みセクションをフロントエンドに通知
+                    yield {
+                        "section": name,
+                        "section_idx": i + 1,
+                        "section_total": total_sections,
+                        "skipped": True,
+                    }
+                    yield {"token": existing_content}
+                    yield {
+                        "progress": {
+                            "done": i + 1,
+                            "total": total_sections,
+                            "current_file": name,
+                        }
+                    }
 
-        # Pre-fetch all section semantic searches in parallel to avoid blocking on the first section
-        def _fetch_section_chunks(section_name: str) -> list:
+        # 生成対象セクションのみsemantic searchを並列プリフェッチ
+        sections_needing_gen = [
+            (i, name) for i, name in sections_to_run if i >= resume_from
+        ]
+
+        def _fetch_section_chunks(args: tuple) -> list:
+            _, section_name = args
             return self._analysis.get_top_chunks_semantic(chunks, section_name, top_n=6)
 
-        with ThreadPoolExecutor(max_workers=min(len(REPORT_SECTIONS), 4)) as ex:
-            all_relevant_chunks = list(ex.map(_fetch_section_chunks, REPORT_SECTIONS))
+        if sections_needing_gen:
+            with ThreadPoolExecutor(max_workers=min(len(sections_needing_gen), 4)) as ex:
+                fetched_chunks = list(ex.map(_fetch_section_chunks, sections_needing_gen))
+            chunk_map = {name: fetched_chunks[j] for j, (_, name) in enumerate(sections_needing_gen)}
+        else:
+            chunk_map = {}
 
-        for sec_idx, section_name in enumerate(REPORT_SECTIONS):
-            # セクションヘッダーを送信（インデックスと合計数も含める）
+        for sec_idx, section_name in sections_to_run:
+            if sec_idx < resume_from:
+                continue  # 既に処理済み
+
             yield {
                 "section": section_name,
                 "section_idx": sec_idx + 1,
                 "section_total": total_sections,
             }
 
-            # セクションに関連するチャンクを選択（事前並列計算済み）
-            relevant_chunks = all_relevant_chunks[sec_idx]
-            # 各サマリーを1行目のみに絞ってトークンを節約する
+            relevant_chunks = chunk_map.get(section_name, [])
+            # サマリーを先頭3行・最大400文字に拡張してコンテキストを豊かにする
             relevant_summaries = [
-                (c.path, (c.summary or "").split("\n")[0][:120])
+                (c.path, "\n".join((c.summary or "").splitlines()[:3])[:400])
                 for c in relevant_chunks if c.summary
             ]
 
-            # プロンプトを構築してストリーミング生成
             prompt, tokens = self._context.build_report_section_prompt(
                 section_name=section_name,
                 project_index_json=index_json,
@@ -291,7 +328,13 @@ class ExplanationService:
 
             completed_sections.append((section_name, "".join(section_tokens)))
 
-            # セクション完了後に進捗を送信（done = 完了済みセクション数）
+            # セクション完了ごとに差分保存（中断しても失わない）
+            is_partial = len(completed_sections) < total_sections
+            self._save_report(
+                root, completed_sections, project_index.project_name,
+                partial=is_partial, total=total_sections,
+            )
+
             yield {
                 "progress": {
                     "done": sec_idx + 1,
@@ -300,8 +343,14 @@ class ExplanationService:
                 }
             }
 
-        # レポートをディスクに保存
-        self._save_report(root, completed_sections, project_index.project_name)
+        # 全セクション対象かつ全て完了した場合のみ履歴に保存する
+        generated_all = (
+            selected_section_indices is None
+            and resume_from == 0
+            and len(completed_sections) == total_sections
+        )
+        if generated_all and completed_sections:
+            self._save_to_history(root, completed_sections, project_index.project_name, model)
 
         yield {
             "progress": {
@@ -317,26 +366,140 @@ class ExplanationService:
         root: Path,
         sections: List[tuple[str, str]],
         project_name: str,
+        partial: bool = False,
+        total: Optional[int] = None,
     ) -> None:
         """
         レポートをMarkdown形式で .localforge/report.md に保存する。
-
-        Args:
-            root: プロジェクトルート
-            sections: [(セクション名, 内容)] のリスト
-            project_name: プロジェクト名（ドキュメントタイトル用）
+        partial=True の場合は機械可読なコメントマーカーを埋め込む。
         """
         report_path = root / _LOCALFORGE_DIR / "report.md"
         report_path.parent.mkdir(parents=True, exist_ok=True)
 
+        total_count = total or len(sections)
         lines: List[str] = [f"# {project_name} — Codebase Report\n\n"]
+        if partial:
+            lines.append(f"<!-- localforge:partial:{len(sections)}/{total_count} -->\n\n")
+
         for name, content in sections:
             lines.append(f"## {name}\n\n")
             lines.append(_strip_leading_heading(content, name))
             lines.append("\n\n---\n\n")
 
         report_path.write_text("".join(lines), encoding="utf-8")
-        logger.info("レポートを保存しました: %s", report_path)
+        logger.info("レポートを保存しました (%s): %s", "部分" if partial else "完了", report_path)
+
+    def _save_to_history(
+        self,
+        root: Path,
+        sections: List[tuple[str, str]],
+        project_name: str,
+        model: str,
+    ) -> None:
+        """完成したレポートを .localforge/reports/ に履歴として保存する。"""
+        reports_dir = root / _LOCALFORGE_DIR / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        report_file = reports_dir / f"{ts}.md"
+
+        lines: List[str] = [f"# {project_name} — Codebase Report\n\n"]
+        for name, content in sections:
+            lines.append(f"## {name}\n\n")
+            lines.append(_strip_leading_heading(content, name))
+            lines.append("\n\n---\n\n")
+        report_file.write_text("".join(lines), encoding="utf-8")
+
+        history_path = reports_dir / "history.json"
+        history: list = []
+        if history_path.exists():
+            try:
+                history = json.loads(history_path.read_text(encoding="utf-8"))
+            except Exception:
+                history = []
+
+        history.append({
+            "id": ts,
+            "filename": report_file.name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "partial": False,
+            "sections_done": len(sections),
+            "sections_total": len(REPORT_SECTIONS),
+            "model": model,
+        })
+        history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("レポート履歴に保存しました: %s", report_file)
+
+    def _load_existing_sections(self, root: Path) -> dict:
+        """
+        既存の report.md からセクション名→内容の辞書を読み込む。
+        resume_from 時に使用する。
+        """
+        report_path = root / _LOCALFORGE_DIR / "report.md"
+        if not report_path.exists():
+            return {}
+        try:
+            content = report_path.read_text(encoding="utf-8")
+        except OSError:
+            return {}
+
+        result: dict = {}
+        # ## Section Name\n\n ... \n\n---\n\n のパターンで分割
+        pattern = _re_mod.compile(r"^## (.+?)$", _re_mod.MULTILINE)
+        matches = list(pattern.finditer(content))
+        for i, m in enumerate(matches):
+            name = m.group(1).strip()
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+            section_body = content[start:end].strip().rstrip("---").strip()
+            result[name] = section_body
+        return result
+
+    def get_report_history(self, root: Path) -> list:
+        """レポート履歴メタデータのリストを返す（新しい順）。"""
+        history_path = root / _LOCALFORGE_DIR / "reports" / "history.json"
+        if not history_path.exists():
+            return []
+        try:
+            history = json.loads(history_path.read_text(encoding="utf-8"))
+            return list(reversed(history))
+        except Exception:
+            return []
+
+    def get_historical_report(self, root: Path, report_id: str) -> Optional[str]:
+        """指定IDの履歴レポート内容を返す。存在しない場合はNone。"""
+        reports_dir = root / _LOCALFORGE_DIR / "reports"
+        # IDはタイムスタンプ文字列 = ファイル名のstem
+        for candidate in reports_dir.glob("*.md"):
+            if candidate.stem == report_id:
+                try:
+                    return candidate.read_text(encoding="utf-8")
+                except OSError:
+                    return None
+        return None
+
+    def delete_historical_report(self, root: Path, report_id: str) -> bool:
+        """指定IDの履歴レポートを削除してhistory.jsonを更新する。成功したらTrue。"""
+        reports_dir = root / _LOCALFORGE_DIR / "reports"
+        report_file: Optional[Path] = None
+        for candidate in reports_dir.glob("*.md"):
+            if candidate.stem == report_id:
+                report_file = candidate
+                break
+        if not report_file or not report_file.exists():
+            return False
+
+        report_file.unlink()
+
+        history_path = reports_dir / "history.json"
+        if history_path.exists():
+            try:
+                history = json.loads(history_path.read_text(encoding="utf-8"))
+                history = [h for h in history if h.get("id") != report_id]
+                history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        return True
 
     def stream_answer(
         self,

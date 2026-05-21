@@ -10,6 +10,9 @@
       <button class="btn btn-secondary" id="generate-report-btn" disabled>
         ✦ レポート生成
       </button>
+      <button class="btn btn-secondary" id="report-history-btn" disabled title="過去のレポート履歴">
+        🕐 履歴
+      </button>
     </div>
   </div>
 
@@ -21,10 +24,78 @@
     </div>
   </div>
 
+  <!-- 部分レポートバナー -->
+  <div id="report-partial-banner" class="report-partial-banner" style="display:none;">
+    <span id="report-partial-text"></span>
+    <div class="report-partial-actions">
+      <button class="btn btn-sm btn-primary" id="report-resume-btn">▶ 続きから生成</button>
+      <button class="btn btn-sm btn-secondary" id="report-regen-btn">↺ 最初から再生成</button>
+      <button class="btn btn-sm btn-ghost" id="report-partial-dismiss">✕</button>
+    </div>
+  </div>
+
+  <!-- セクション選択パネル -->
+  <details id="section-selector-panel" class="section-selector-panel" style="display:none;">
+    <summary class="section-selector-summary">
+      <span>📋 生成するセクションを選択</span>
+      <span id="section-selector-count" class="section-count-badge"></span>
+    </summary>
+    <div class="section-selector-body">
+      <div class="section-selector-controls">
+        <button class="btn btn-sm btn-ghost" id="sections-select-all">すべて選択</button>
+        <button class="btn btn-sm btn-ghost" id="sections-deselect-all">すべて解除</button>
+        <label class="section-model-label">モデル:
+          <select id="report-model-override" class="report-model-select">
+            <option value="">プロジェクト設定を使用</option>
+          </select>
+        </label>
+      </div>
+      <div id="section-checkboxes" class="section-checkboxes"></div>
+    </div>
+  </details>
+
   <!-- レポート出力エリア -->
   <div class="report-output" id="report-output">
     <div class="empty-state report-empty">
       <p>「インデックス構築」を実行してからレポートを生成してください。</p>
+    </div>
+  </div>
+
+  <!-- 履歴パネル（スライドイン） -->
+  <div id="report-history-panel" class="report-history-panel" style="display:none;">
+    <div class="history-panel-header">
+      <h3>レポート履歴</h3>
+      <button class="btn btn-sm btn-ghost" id="history-panel-close">✕</button>
+    </div>
+    <div id="history-panel-list" class="history-panel-list">
+      <p class="history-empty">履歴がありません。</p>
+    </div>
+    <div class="history-panel-footer">
+      <button class="btn btn-sm btn-secondary" id="history-compare-btn" disabled>⇆ 選択した2件を比較</button>
+    </div>
+  </div>
+
+  <!-- 比較ビュー -->
+  <div id="report-compare-view" class="report-compare-view" style="display:none;">
+    <div class="compare-header">
+      <h3>レポート比較</h3>
+      <div class="compare-nav">
+        <label>セクション:
+          <select id="compare-section-select" class="compare-section-select"></select>
+        </label>
+      </div>
+      <button class="btn btn-sm btn-ghost" id="compare-close-btn">✕ 閉じる</button>
+    </div>
+    <div class="compare-columns">
+      <div class="compare-col">
+        <div class="compare-col-header" id="compare-col-a-title">レポートA</div>
+        <div class="compare-col-body md-body" id="compare-col-a"></div>
+      </div>
+      <div class="compare-divider"></div>
+      <div class="compare-col">
+        <div class="compare-col-header" id="compare-col-b-title">レポートB</div>
+        <div class="compare-col-body md-body" id="compare-col-b"></div>
+      </div>
     </div>
   </div>
 

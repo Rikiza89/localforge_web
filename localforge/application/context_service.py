@@ -419,6 +419,87 @@ class ContextService:
         # )
         return self._guard_budget(prompt, f"file_summary:{file_path}")
 
+    # セクション別の具体的な分析指示 — 各セクションで何を書くべきかをLLMに明示する
+    _SECTION_GUIDANCE: dict = {
+        "Project Overview": (
+            "Cover: (1) what the project does and its primary goals, (2) intended users or audience, "
+            "(3) key technologies and language stack, (4) overall architecture style "
+            "(e.g. Clean Architecture, MVC, monolith, microservice), "
+            "(5) any notable design philosophy or constraints. Aim for 300-500 words."
+        ),
+        "Module Map": (
+            "Produce a Markdown table listing every major module/package with columns: "
+            "Module | Layer (domain/application/infrastructure/interface) | Responsibility. "
+            "Then add a short paragraph describing how the layers interact. "
+            "Include sub-packages where meaningful."
+        ),
+        "Entry Points & Startup Flow": (
+            "Describe: (1) the main entry point file and function, "
+            "(2) the initialization sequence step-by-step (dependency injection, config loading, server start, etc.), "
+            "(3) any background threads or processes launched at startup, "
+            "(4) how the app handles shutdown/cleanup. Use a numbered list for the sequence."
+        ),
+        "Data Flow": (
+            "Trace how data moves through the system: "
+            "(1) primary input sources (HTTP request, file, user input), "
+            "(2) processing pipeline (parsing, validation, transformation, business logic), "
+            "(3) storage or output (DB write, file write, HTTP response). "
+            "Give at least one concrete end-to-end example with actual function/method names."
+        ),
+        "Key Interfaces & Contracts": (
+            "Document: (1) all Protocol/interface/abstract class definitions with their method signatures, "
+            "(2) major Pydantic models or data schemas, "
+            "(3) public API contracts (REST endpoints, event schemas). "
+            "Use code blocks for signatures where helpful."
+        ),
+        "External Dependencies": (
+            "Produce a Markdown table: Library | Version (if known) | Purpose | Risk/Notes. "
+            "Group by category (LLM/AI, web framework, storage, utilities). "
+            "Flag any dependencies with known security concerns, heavy resource use, or limited maintenance."
+        ),
+        "Configuration": (
+            "List: (1) all configuration files and their formats, "
+            "(2) all environment variables the app reads, "
+            "(3) the config loading order and override mechanism, "
+            "(4) required vs optional settings and their defaults. "
+            "Use a table for env vars: Name | Default | Description."
+        ),
+        "Test Coverage": (
+            "Describe: (1) testing strategy (unit, integration, e2e), "
+            "(2) test framework(s) used, "
+            "(3) rough coverage estimate if determinable from the codebase, "
+            "(4) what is well-tested vs what is untested or difficult to test, "
+            "(5) any mocking or fixture patterns used. "
+            "Be specific about gaps."
+        ),
+        "Notable Patterns & Design Decisions": (
+            "Identify: (1) architectural patterns used (Repository, Factory, Strategy, etc.) with examples, "
+            "(2) specific design decisions that stand out and the likely reasoning behind them, "
+            "(3) any trade-offs that are evident in the code. "
+            "Reference actual file/class names to ground each point."
+        ),
+        "Potential Issues & Technical Debt": (
+            "List concrete issues sorted by estimated severity (High/Medium/Low): "
+            "for each item state the issue, where it lives (file/function), and a suggested fix direction. "
+            "Include: error handling gaps, performance hotspots, security concerns, "
+            "missing validation, TODO/FIXME comments, and coupling problems."
+        ),
+        "Project Health & Code Quality Analysis": (
+            "Assess: (1) code readability and consistency, "
+            "(2) documentation quality (docstrings, comments, README), "
+            "(3) modularity and separation of concerns (1-5 score with justification), "
+            "(4) test confidence level, "
+            "(5) overall maintainability rating with a brief rationale. "
+            "Be candid — include both strengths and weaknesses."
+        ),
+        "How to Extend This Project": (
+            "Provide a practical guide for the three most common extension scenarios "
+            "(e.g. adding a new API endpoint, adding a new LLM operation, adding a new storage adapter). "
+            "For each: list the exact files to create/modify, describe the minimal changes needed, "
+            "and note any pitfalls or conventions to follow. Use numbered steps."
+        ),
+    }
+
     def build_report_section_prompt(
         self,
         section_name: str,
@@ -427,28 +508,37 @@ class ContextService:
     ) -> tuple[str, int]:
         """
         レポートセクション生成のプロンプトを組み立てる。
+        セクション別の具体的な指示を注入してレポートの深度と一貫性を高める。
 
         Args:
             section_name: セクション名
             project_index_json: ProjectIndexのJSON文字列
-            relevant_summaries: [(ファイルパス, サマリー)] のリスト
+            relevant_summaries: [(ファイルパス, サマリー)] のリスト（各最大400文字）
 
         Returns:
-            組み立てたプロンプト文字列
+            (プロンプト文字列, 推定トークン数)
         """
         summaries_text = "\n".join(
-            f"- {path}: {summary}" for path, summary in relevant_summaries
+            f"- {path}:\n  {summary}" for path, summary in relevant_summaries
+        )
+
+        section_guidance = self._SECTION_GUIDANCE.get(
+            section_name,
+            "Provide a detailed, structured analysis of this section using markdown formatting."
         )
 
         prompt = (
-            f"プロジェクト概要:\n{project_index_json}\n\n"
-            f"関連ファイルサマリー:\n{summaries_text}\n\n"
-            f"上記の情報を基に、以下のセクションについて詳細な分析を日本語で記述してください。\n"
-            f"セクション: {section_name}\n\n"
-            f"出力ルール:\n"
-            f"- セクションタイトル（見出し行）は出力しないでください。内容のみを出力してください。\n"
-            f"- マークダウン形式で記述してください（本文中の小見出しは ## / ### を使用可）。\n"
-            f"- このセクションの内容のみを出力してください。"
+            f"You are analyzing a software project. Write a detailed report section in the same language "
+            f"as the project documentation (default to English if unclear).\n\n"
+            f"Project metadata:\n{project_index_json}\n\n"
+            f"Most relevant file summaries:\n{summaries_text}\n\n"
+            f"Section to write: **{section_name}**\n\n"
+            f"Specific guidance for this section:\n{section_guidance}\n\n"
+            f"Output rules:\n"
+            f"- Do NOT output the section title/heading — content only.\n"
+            f"- Use Markdown (### subheadings, tables, code blocks, bullet lists as appropriate).\n"
+            f"- Be specific: reference actual file names, class names, and function names from the summaries.\n"
+            f"- Output only the content for this section, nothing else."
         )
         return self._guard_budget(prompt, f"report_section:{section_name}"), _estimate_tokens(prompt)
 
