@@ -842,6 +842,7 @@ function _hideSavedReportBanner() {
  * @param {number[]} [opts.sectionIndices] - 生成するセクションのインデックスリスト（省略で全セクション）
  * @param {number} [opts.resumeFrom] - このインデックス以降を生成（0で最初から）
  * @param {string} [opts.model] - 使用モデルの上書き（省略でプロジェクト設定）
+ * @param {string} [opts.lang] - 出力言語 ("ja" = 日本語デフォルト, "en" = 英語)
  */
 function generateReport(opts = {}) {
   if (!_indexBuilt && !_currentProjectRoot) {
@@ -868,6 +869,9 @@ function generateReport(opts = {}) {
   }
   if (opts.model) {
     params.set("model", opts.model);
+  }
+  if (opts.lang && opts.lang !== "ja") {
+    params.set("lang", opts.lang);
   }
   const streamUrl = "/api/explain/report" + (params.toString() ? "?" + params.toString() : "");
 
@@ -1470,9 +1474,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     generateReportBtn.addEventListener("click", () => {
       const indices = _getSelectedSectionIndices();
       const modelOverride = (document.getElementById("report-model-override") || {}).value || "";
+      const lang = (document.getElementById("report-language-select") || {}).value || "ja";
       generateReport({
         sectionIndices: indices,
         model: modelOverride || undefined,
+        lang,
       });
     });
   }

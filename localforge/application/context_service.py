@@ -505,6 +505,7 @@ class ContextService:
         section_name: str,
         project_index_json: str,
         relevant_summaries: List[tuple[str, str]],
+        language: str = "ja",
     ) -> tuple[str, int]:
         """
         レポートセクション生成のプロンプトを組み立てる。
@@ -514,6 +515,7 @@ class ContextService:
             section_name: セクション名
             project_index_json: ProjectIndexのJSON文字列
             relevant_summaries: [(ファイルパス, サマリー)] のリスト（各最大400文字）
+            language: 出力言語 ("ja" = 日本語, "en" = 英語)
 
         Returns:
             (プロンプト文字列, 推定トークン数)
@@ -527,9 +529,13 @@ class ContextService:
             "Provide a detailed, structured analysis of this section using markdown formatting."
         )
 
+        if language == "en":
+            lang_instruction = "Write the report section in English."
+        else:
+            lang_instruction = "レポートセクションを日本語で記述してください。"
+
         prompt = (
-            f"You are analyzing a software project. Write a detailed report section in the same language "
-            f"as the project documentation (default to English if unclear).\n\n"
+            f"You are analyzing a software project. {lang_instruction}\n\n"
             f"Project metadata:\n{project_index_json}\n\n"
             f"Most relevant file summaries:\n{summaries_text}\n\n"
             f"Section to write: **{section_name}**\n\n"

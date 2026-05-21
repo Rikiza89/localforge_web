@@ -205,6 +205,7 @@ class ExplanationService:
         model: str,
         selected_section_indices: Optional[List[int]] = None,
         resume_from: int = 0,
+        language: str = "ja",
     ) -> Generator[dict, None, None]:
         """
         レポートをSSEイベントとしてストリーミング生成する。
@@ -302,6 +303,7 @@ class ExplanationService:
                 section_name=section_name,
                 project_index_json=index_json,
                 relevant_summaries=relevant_summaries,
+                language=language,
             )
 
             start_time = time.time()

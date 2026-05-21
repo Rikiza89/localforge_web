@@ -184,11 +184,16 @@ def stream_report():
     except ValueError:
         resume_from = 0
 
+    language = request.args.get("lang", "ja").strip().lower()
+    if language not in ("ja", "en"):
+        language = "ja"
+
     gen = explanation_svc.stream_report(
         root=root,
         model=model,
         selected_section_indices=selected_indices,
         resume_from=resume_from,
+        language=language,
     )
     return _sse_response(gen)
 
