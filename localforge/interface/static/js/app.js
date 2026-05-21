@@ -625,6 +625,8 @@ async function approvePlanAndGenerate() {
     }
   }
 
+  const genFileHeader = document.getElementById("gen-current-file-header");
+
   const _es = startStream("/api/generate/start", genStream, {
     onProgress: (done, total, currentFile) => {
       if (genProgress) {
@@ -635,9 +637,24 @@ async function approvePlanAndGenerate() {
         progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
       }
       updateStatusBar(`生成中: ${currentFile} (${done}/${total})`);
+      // Clear the output area for each new file so tokens don't accumulate across files
+      if (genStream) genStream.textContent = "";
+      if (genFileHeader && currentFile) {
+        genFileHeader.style.display = "flex";
+        genFileHeader.innerHTML =
+          `<span class="gen-file-icon">▶</span>` +
+          `<span class="gen-file-name">${escapeHtml(currentFile)}</span>` +
+          `<span class="gen-file-count">${done + 1} / ${total}</span>`;
+      }
     },
     onFileWritten: (path) => {
       refreshFileTree();
+      // Briefly show a completion tick before the next file clears the header
+      if (genFileHeader) {
+        genFileHeader.innerHTML =
+          `<span class="gen-file-icon gen-file-done">✓</span>` +
+          `<span class="gen-file-name">${escapeHtml(path)}</span>`;
+      }
     },
     onCheckpoint: (hash) => {
       _setCheckpoint(hash);
@@ -1114,6 +1131,7 @@ async function continueGeneration() {
         progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
       }
       updateStatusBar(`再開中: ${currentFile} (${done}/${total})`);
+      if (genStream) genStream.textContent = "";
     },
     onFileWritten: () => refreshFileTree(),
     onDone: () => {
