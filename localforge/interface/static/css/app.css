@@ -2257,7 +2257,7 @@ details[open] .section-selector-summary::before { content: "▼"; }
 
 /* ── 保存済みプランバナー ───────────────────────────────────────── */
 .saved-plan-banner {
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 8px 12px;
   background: var(--bg-secondary);
@@ -2267,6 +2267,21 @@ details[open] .section-selector-summary::before { content: "▼"; }
   margin-bottom: 10px;
   font-size: 13px;
   color: var(--text-primary);
+}
+.saved-plan-banner-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.saved-plan-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 /* ── plan-badge-exists ─────────────────────────────────────────── */

@@ -918,13 +918,195 @@ async function loadSavedPlan() {
       });
     }
 
-    const banner = document.getElementById("saved-plan-banner");
-    if (banner) banner.style.display = "flex";
+    // Check generation progress to decide banner content
+    let progress = null;
+    try {
+      progress = await apiRequest("/api/project/generation-progress");
+    } catch (e) {
+      console.warn("生成進捗取得エラー:", e.message);
+    }
+
+    _updateSavedPlanBanner(plan, progress);
 
   } catch (e) {
     if (e.message && (e.message.includes("404") || e.message.includes("NoPlan"))) return;
     console.warn("保存済みプランロードエラー:", e.message);
   }
+}
+
+/**
+ * 保存済みプランバナーの内容を進捗に応じて更新する。
+ * @param {Object} plan - プランオブジェクト（approved フラグを含む）
+ * @param {Object|null} progress - 生成進捗オブジェクト
+ */
+function _updateSavedPlanBanner(plan, progress) {
+  const banner = document.getElementById("saved-plan-banner");
+  const bannerText = document.getElementById("saved-plan-banner-text");
+  const bannerActions = document.getElementById("saved-plan-banner-actions");
+  const resumeBtn = document.getElementById("resume-generation-btn");
+  const restartBtn = document.getElementById("restart-generation-btn");
+
+  if (!banner) return;
+
+  const isApproved = plan && plan.approved;
+  const total = progress ? progress.total : 0;
+  const completed = progress ? progress.completed : 0;
+  const isComplete = total > 0 && completed >= total;
+  const hasPartialProgress = isApproved && completed > 0 && !isComplete;
+
+  if (isComplete) {
+    if (bannerText) bannerText.textContent = `プランは完了しています（全${total}ファイル生成済み）。新しいプロンプトを入力してください。`;
+    if (bannerActions) bannerActions.style.display = "none";
+  } else if (hasPartialProgress) {
+    if (bannerText) bannerText.textContent = `生成が中断されています（${completed}/${total} 完了）。続きから再開するか、最初から生成できます。`;
+    if (resumeBtn) resumeBtn.style.display = "";
+    if (restartBtn) { restartBtn.style.display = ""; restartBtn.textContent = "▶ 最初から生成"; }
+    if (bannerActions) bannerActions.style.display = "flex";
+  } else if (isApproved) {
+    if (bannerText) bannerText.textContent = "プランが承認済みです。生成を開始するか、新しいプロンプトで再生成できます。";
+    if (resumeBtn) resumeBtn.style.display = "none";
+    if (restartBtn) { restartBtn.style.display = ""; restartBtn.textContent = "▶ 生成開始"; }
+    if (bannerActions) bannerActions.style.display = "flex";
+  } else {
+    if (bannerText) bannerText.textContent = "保存済みプランを読み込みました。承認して生成を続行するか、新しいプロンプトを入力してください。";
+    if (bannerActions) bannerActions.style.display = "none";
+  }
+
+  banner.style.display = "flex";
+}
+
+/**
+ * 保存済みプランの生成を続きから再開する（前回中断した箇所から）。
+ */
+async function _resumeFromSavedPlan() {
+  const genSection = document.getElementById("generation-section");
+  const planSection = document.getElementById("plan-section");
+  const genStream = document.getElementById("generation-stream-output");
+  const genProgress = document.getElementById("generation-progress");
+  const progressLabel = document.getElementById("progress-label");
+  const genFileHeader = document.getElementById("gen-current-file-header");
+  const banner = document.getElementById("saved-plan-banner");
+
+  if (banner) banner.style.display = "none";
+  if (planSection) planSection.style.display = "none";
+  if (genSection) genSection.style.display = "flex";
+  if (genStream) genStream.textContent = "";
+
+  updateStatusBar("生成を再開中...");
+
+  const modelEl = document.getElementById("model-selector");
+  const model = modelEl ? modelEl.value : null;
+  if (model) {
+    try { await apiRequest("/api/project/model", "POST", { model }); }
+    catch (e) { console.warn("モデル同期エラー:", e.message); }
+  }
+
+  const _es = startStream("/api/generate/resume", genStream, {
+    onProgress: (done, total, currentFile) => {
+      if (genProgress) { genProgress.max = total; genProgress.value = done; }
+      if (progressLabel) progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
+      updateStatusBar(`再開中: ${currentFile} (${done}/${total})`);
+      if (genStream) genStream.textContent = "";
+      if (genFileHeader && currentFile) {
+        genFileHeader.style.display = "flex";
+        genFileHeader.innerHTML =
+          `<span class="gen-file-icon">▶</span>` +
+          `<span class="gen-file-name">${escapeHtml(currentFile)}</span>` +
+          `<span class="gen-file-count">${done + 1} / ${total}</span>`;
+      }
+    },
+    onFileWritten: (path) => {
+      refreshFileTree();
+      if (genFileHeader) {
+        genFileHeader.innerHTML =
+          `<span class="gen-file-icon gen-file-done">✓</span>` +
+          `<span class="gen-file-name">${escapeHtml(path)}</span>`;
+      }
+    },
+    onDone: () => {
+      _unlockUI();
+      updateStatusBar("生成再開完了");
+      showAlert("すべてのファイルを生成しました！", "success");
+      if (genSection) genSection.style.display = "none";
+      refreshFileTree();
+      refreshContextPanel();
+      refreshGitLog();
+    },
+    onError: (err) => {
+      _unlockUI();
+      showAlert(`再開エラー: ${err}`, "error");
+      updateStatusBar("エラーが発生しました");
+    },
+  });
+  _lockUI(() => _es.close());
+  _cancelGenStream = _es;
+}
+
+/**
+ * 保存済みプランの生成を最初から（全ファイル）やり直す。
+ */
+async function _restartFromSavedPlan() {
+  const genSection = document.getElementById("generation-section");
+  const planSection = document.getElementById("plan-section");
+  const genStream = document.getElementById("generation-stream-output");
+  const genProgress = document.getElementById("generation-progress");
+  const progressLabel = document.getElementById("progress-label");
+  const genFileHeader = document.getElementById("gen-current-file-header");
+  const banner = document.getElementById("saved-plan-banner");
+
+  if (banner) banner.style.display = "none";
+  if (planSection) planSection.style.display = "none";
+  if (genSection) genSection.style.display = "flex";
+  if (genStream) genStream.textContent = "";
+
+  updateStatusBar("ファイルを生成中...");
+
+  const modelEl = document.getElementById("model-selector");
+  const model = modelEl ? modelEl.value : null;
+  if (model) {
+    try { await apiRequest("/api/project/model", "POST", { model }); }
+    catch (e) { console.warn("モデル同期エラー:", e.message); }
+  }
+
+  const _es = startStream("/api/generate/start", genStream, {
+    onProgress: (done, total, currentFile) => {
+      if (genProgress) { genProgress.max = total; genProgress.value = done; }
+      if (progressLabel) progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
+      updateStatusBar(`生成中: ${currentFile} (${done}/${total})`);
+      if (genStream) genStream.textContent = "";
+      if (genFileHeader && currentFile) {
+        genFileHeader.style.display = "flex";
+        genFileHeader.innerHTML =
+          `<span class="gen-file-icon">▶</span>` +
+          `<span class="gen-file-name">${escapeHtml(currentFile)}</span>` +
+          `<span class="gen-file-count">${done + 1} / ${total}</span>`;
+      }
+    },
+    onFileWritten: (path) => {
+      refreshFileTree();
+      if (genFileHeader) {
+        genFileHeader.innerHTML =
+          `<span class="gen-file-icon gen-file-done">✓</span>` +
+          `<span class="gen-file-name">${escapeHtml(path)}</span>`;
+      }
+    },
+    onDone: () => {
+      _unlockUI();
+      updateStatusBar("ファイル生成完了");
+      showAlert("すべてのファイルを生成しました！", "success");
+      if (genSection) genSection.style.display = "none";
+      refreshFileTree();
+      refreshContextPanel();
+      refreshGitLog();
+    },
+    onError: (err) => {
+      _unlockUI();
+      showAlert(`生成エラー: ${err}`, "error");
+      updateStatusBar("エラーが発生しました");
+    },
+  });
+  _lockUI(() => _es.close());
+  _cancelGenStream = _es;
 }
 
 function _showPartialBanner(done, total) {
@@ -1616,6 +1798,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (banner) banner.style.display = "none";
     });
   }
+
+  const resumeGenBtn = document.getElementById("resume-generation-btn");
+  if (resumeGenBtn) resumeGenBtn.addEventListener("click", _resumeFromSavedPlan);
+
+  const restartGenBtn = document.getElementById("restart-generation-btn");
+  if (restartGenBtn) restartGenBtn.addEventListener("click", _restartFromSavedPlan);
 
   // セクション選択パネルの全選択/解除
   const selectAll = document.getElementById("sections-select-all");

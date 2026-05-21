@@ -253,6 +253,44 @@ class ProjectService:
             logger.error("プランパースエラー: %s", exc)
             return None
 
+    def get_generation_progress(self, root: Path) -> dict:
+        """
+        生成プランの進捗状況を返す。
+
+        Args:
+            root: プロジェクトルート
+
+        Returns:
+            has_plan, total, completed, start_from, completed_files, pending_files
+        """
+        plan = self.load_generation_plan(root)
+        if not plan:
+            return {
+                "has_plan": False,
+                "total": 0,
+                "completed": 0,
+                "start_from": 0,
+                "completed_files": [],
+                "pending_files": [],
+            }
+        resume_state = self._build_resume_state(root)
+        total = len(plan.files)
+        completed = len(resume_state.completed_files)
+        completed_set = set(resume_state.completed_files)
+        start_from = total
+        for idx, pf in enumerate(plan.files):
+            if pf.path not in completed_set:
+                start_from = idx
+                break
+        return {
+            "has_plan": True,
+            "total": total,
+            "completed": completed,
+            "start_from": start_from,
+            "completed_files": resume_state.completed_files,
+            "pending_files": resume_state.pending_files,
+        }
+
     def log_operation(
         self,
         root: Path,

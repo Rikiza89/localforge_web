@@ -379,6 +379,50 @@ def get_saved_plan():
     })
 
 
+@bp.route("/resume", methods=["GET"])
+def stream_resume_generation():
+    """
+    前回中断されたプランの続きからSSEストリーミング生成を再開する。
+    generation_log.jsonlを参照して完了済みファイルをスキップする。
+
+    SSE Events:
+        progress, token, file_written, done, error
+    """
+    project_svc = _get_project_svc()
+    generation_svc = _get_generation_svc()
+    project = project_svc.current_project
+    if not project:
+        def err_gen():
+            yield {"error": "プロジェクトが開かれていません"}
+        return _sse_response(err_gen())
+
+    plan = project_svc.load_generation_plan(project.root)
+    if not plan:
+        def err_gen():
+            yield {"error": "承認済みプランが見つかりません"}
+        return _sse_response(err_gen())
+
+    model = project.config.model
+    if not model:
+        def err_gen():
+            yield {"error": "モデルが選択されていません。UIでモデルを選択してください"}
+        return _sse_response(err_gen())
+
+    root = project.root
+    context_md = project_svc.get_context_md(root)
+    progress = project_svc.get_generation_progress(root)
+    start_from = progress.get("start_from", 0)
+
+    gen = generation_svc.stream_all_files(
+        root=root,
+        plan=plan,
+        model=model,
+        context_md=context_md,
+        start_from=start_from,
+    )
+    return _sse_response(gen)
+
+
 @bp.route("/logs", methods=["GET"])
 def get_generation_logs():
     """

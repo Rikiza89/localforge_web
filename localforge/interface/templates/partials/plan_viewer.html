@@ -6,7 +6,13 @@
 
   <!-- 保存済みプランバナー -->
   <div class="saved-plan-banner" id="saved-plan-banner" style="display:none;">
-    <span id="saved-plan-banner-text">保存済みプランを読み込みました。承認して生成を続行するか、新しいプロンプトを入力してください。</span>
+    <div class="saved-plan-banner-body">
+      <span id="saved-plan-banner-text">保存済みプランを読み込みました。承認して生成を続行するか、新しいプロンプトを入力してください。</span>
+      <div class="saved-plan-banner-actions" id="saved-plan-banner-actions" style="display:none;">
+        <button class="btn btn-primary btn-sm" id="resume-generation-btn">↺ 続きから再開</button>
+        <button class="btn btn-secondary btn-sm" id="restart-generation-btn">▶ 生成開始</button>
+      </div>
+    </div>
     <button class="btn-link" id="dismiss-plan-banner-btn">✕ 閉じる</button>
   </div>
 
