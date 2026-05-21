@@ -88,6 +88,8 @@ class ContextService:
         project_index_json: Optional[str] = None,
         pinned_contents: Optional[List[tuple[str, str]]] = None,
         workspace_summaries: Optional[List[tuple[str, str]]] = None,
+        max_files: Optional[int] = None,
+        min_files: Optional[int] = None,
     ) -> str:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
@@ -144,8 +146,36 @@ class ContextService:
         elif "llama3" in model_name.lower():
             parts.append("簡潔かつ正確な回答を心がけてください。")
 
+        # File count constraints
+        count_rules: list[str] = []
+        if max_files is not None and max_files > 0:
+            count_rules.append(f"- ファイル数の上限: 最大 {max_files} ファイルとすること。")
+        if min_files is not None and min_files > 0:
+            count_rules.append(
+                f"- ファイル数の下限: 少なくとも {min_files} ファイルを含めること（要求の範囲内で）。"
+            )
+
+        # Detect test/refactor requests to inject comprehensiveness guidance
+        _test_keywords = ("test", "テスト", "spec", "pytest", "unittest", "coverage")
+        _is_test_request = any(kw in user_prompt.lower() for kw in _test_keywords)
+
+        comprehensiveness = (
+            "- ロジックを含む全ファイルにテストファイルを計画すること。"
+            " ファイル数を人工的に制限しないこと — テストが少なすぎるより網羅的なほうが良い。"
+            " テストフレームワーク（pytest / unittest 等）はプロジェクト既存コードに合わせること。"
+        ) if _is_test_request else (
+            "- ユーザーの要求を完全に実現するために必要なファイルをすべて含めること。"
+            " ファイル数を人工的に制限しないこと。"
+        )
+
+        planning_rules = [comprehensiveness] + count_rules
+
         parts.append(
             f"\nユーザーの要求:\n{user_prompt}\n\n"
+            "【プラン作成ルール】\n"
+            + "\n".join(planning_rules) + "\n"
+            "- すべての path は プロジェクトルートからの相対パスにすること（先頭の / や .. を含めないこと）。\n"
+            "- 依存関係が明確な場合のみ dependencies を設定すること。\n\n"
             "まず、このプランで何をするかを2〜3文のMarkdown形式で簡潔に説明してください"
             "（新規作成ファイル数・修正ファイル数・主な変更点を含む）。\n"
             "その際、プロジェクト全体の一貫性や、技術的な選定理由があればそれも含めてください。\n"

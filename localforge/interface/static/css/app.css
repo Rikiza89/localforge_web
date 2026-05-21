@@ -2277,3 +2277,33 @@ details[open] .section-selector-summary::before { content: "▼"; }
   margin-right: 4px;
   font-weight: 600;
 }
+
+/* ── Plan file-count row ──────────────────────────────────────── */
+.plan-file-count-row {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.file-count-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: default;
+}
+.file-count-input {
+  width: 80px;
+  padding: 3px 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.file-count-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

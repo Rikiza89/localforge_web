@@ -211,6 +211,20 @@ def stream_plan():
     except Exception as exc:
         logger.warning("ワークスペースサマリー取得エラー: %s", exc)
 
+    # Optional file-count constraints from the UI
+    def _parse_int_param(name: str) -> "int | None":
+        val = data.get(name, None)
+        if val is None:
+            return None
+        try:
+            n = int(val)
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    max_files = _parse_int_param("max_files")
+    min_files = _parse_int_param("min_files")
+
     gen = generation_svc.stream_plan(
         root=root,
         model=model,
@@ -223,6 +237,8 @@ def stream_plan():
         project_index_json=project_index_json,
         pinned_contents=pinned_contents or None,
         workspace_summaries=workspace_summaries or None,
+        max_files=max_files,
+        min_files=min_files,
     )
     return _sse_response(gen)
 
@@ -255,6 +271,22 @@ def approve_plan():
         return _error_response(exc, 400)
     except LocalForgeError as exc:
         return _error_response(exc)
+
+    # Path safety check at approval time (defense-in-depth before any file is written)
+    root_resolved = project.root.resolve()
+    for f in plan.files:
+        try:
+            candidate = (project.root / f.path).resolve()
+            if not candidate.is_relative_to(root_resolved):
+                return jsonify({
+                    "error": "UnsafePath",
+                    "message": f"プロジェクト外を指すパスが含まれています: {f.path}",
+                }), 400
+        except Exception:
+            return jsonify({
+                "error": "InvalidPath",
+                "message": f"無効なパスが含まれています: {f.path}",
+            }), 400
 
     plan.approved = True
     project_svc.save_generation_plan(project.root, plan)

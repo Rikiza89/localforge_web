@@ -460,10 +460,19 @@ async function generatePlan() {
     catch (e) { console.warn("モデル同期エラー:", e.message); }
   }
 
+  // Read optional file-count hints
+  const _maxFilesEl = document.getElementById("plan-max-files");
+  const _minFilesEl = document.getElementById("plan-min-files");
+  const _maxFiles = _maxFilesEl && _maxFilesEl.value.trim() ? parseInt(_maxFilesEl.value, 10) : null;
+  const _minFiles = _minFilesEl && _minFilesEl.value.trim() ? parseInt(_minFilesEl.value, 10) : null;
+  const _planBody = { prompt };
+  if (_maxFiles && _maxFiles > 0) _planBody.max_files = _maxFiles;
+  if (_minFiles && _minFiles > 0) _planBody.min_files = _minFiles;
+
   _lockUI(null);
   await startPostStream(
     "/api/generate/plan",
-    { prompt },
+    _planBody,
     planStream,
     {
       onToken: (token) => { _currentPlanText += token; },

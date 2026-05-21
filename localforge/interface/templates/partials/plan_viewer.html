@@ -19,6 +19,18 @@
       placeholder="例（新規）: FlaskとSQLiteを使ったTodoアプリを作ってください。&#10;例（改善）: エラーハンドリングを改善して、型ヒントを追加してください。&#10;例（質問）: このプロジェクトの問題点を分析して改善プランを作成してください。"
       rows="5"
     ></textarea>
+    <div class="plan-file-count-row">
+      <label class="file-count-label" title="生成するファイルの最小数をLLMへのヒントとして渡します（空=制限なし）">
+        最小ファイル数
+        <input type="number" id="plan-min-files" class="file-count-input"
+               min="1" max="200" placeholder="制限なし">
+      </label>
+      <label class="file-count-label" title="生成するファイルの最大数をLLMへのヒントとして渡します（空=制限なし）">
+        最大ファイル数
+        <input type="number" id="plan-max-files" class="file-count-input"
+               min="1" max="200" placeholder="制限なし">
+      </label>
+    </div>
     <div class="prompt-actions">
       <button class="btn btn-primary" id="generate-plan-btn">
         ✦ プランを生成

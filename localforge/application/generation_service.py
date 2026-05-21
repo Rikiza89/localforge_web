@@ -29,6 +29,36 @@ _LOCALFORGE_DIR = ".localforge"
 _cancel_flag: bool = False
 
 
+def _sanitize_path(raw: str) -> str:
+    """
+    LLMが出力したファイルパスをプロジェクトルート相対の安全なパスに正規化する。
+    絶対パス・..セグメント・NULバイトを含むパスは空文字列を返す（拒否）。
+
+    Args:
+        raw: LLMが出力した生パス文字列
+
+    Returns:
+        正規化済みの相対パス。安全でない場合は空文字列。
+    """
+    if not raw or "\x00" in raw:
+        return ""
+    stripped = raw.strip()
+    # 絶対パス（/ や Windows の C:\ 形式）は即座に拒否
+    if stripped.startswith("/") or (len(stripped) >= 2 and stripped[1] == ":"):
+        return ""
+    # 先頭の ./ を除去
+    p = Path(stripped)
+    if p.is_absolute():
+        return ""
+    # ".." セグメントを検出
+    if any(part == ".." for part in p.parts):
+        return ""
+    normalized = str(p)
+    if not normalized or normalized == ".":
+        return ""
+    return normalized
+
+
 def request_cancel() -> None:
     """生成キャンセルを要求する（グローバルフラグを設定）。"""
     global _cancel_flag
@@ -85,6 +115,8 @@ class GenerationService:
         project_index_json: Optional[str] = None,
         pinned_contents: Optional[List[tuple[str, str]]] = None,
         workspace_summaries: Optional[List[tuple[str, str]]] = None,
+        max_files: Optional[int] = None,
+        min_files: Optional[int] = None,
     ) -> Generator[dict, None, None]:
         """
         ユーザープロンプトからプロジェクト生成プランをストリーミング生成する。
@@ -116,6 +148,8 @@ class GenerationService:
             project_index_json=project_index_json,
             pinned_contents=pinned_contents,
             workspace_summaries=workspace_summaries,
+            max_files=max_files,
+            min_files=min_files,
         )
 
         start_time = time.time()
@@ -180,20 +214,37 @@ class GenerationService:
             raise PlanParseError(f"プランJSONのパースに失敗しました: {exc}") from exc
 
         try:
-            return GenerationPlan(
+            raw_files = data.get("files", [])
+            validated_files: list[PlannedFile] = []
+            skipped: list[str] = []
+            for f in raw_files:
+                raw_path = f.get("path", "").strip()
+                safe_path = _sanitize_path(raw_path)
+                if not safe_path:
+                    skipped.append(raw_path or "<空>")
+                    logger.warning("プランパスを拒否しました（安全でないパス）: %r", raw_path)
+                    continue
+                validated_files.append(PlannedFile(
+                    path=safe_path,
+                    description=f.get("description", ""),
+                    dependencies=[
+                        s for d in f.get("dependencies", [])
+                        if (s := _sanitize_path(str(d)))
+                    ],
+                    action=f.get("action", "create"),
+                    modification_notes=f.get("modification_notes"),
+                ))
+            plan = GenerationPlan(
                 project_name=data.get("project_name", "unnamed"),
                 description=data.get("description", ""),
-                files=[
-                    PlannedFile(
-                        path=f.get("path", ""),
-                        description=f.get("description", ""),
-                        dependencies=f.get("dependencies", []),
-                        action=f.get("action", "create"),
-                        modification_notes=f.get("modification_notes"),
-                    )
-                    for f in data.get("files", [])
-                ],
+                files=validated_files,
             )
+            if skipped:
+                logger.warning(
+                    "プランから %d 個の安全でないパスを除外しました: %s",
+                    len(skipped), skipped,
+                )
+            return plan
         except (KeyError, TypeError, ValueError) as exc:
             raise PlanParseError(f"プランの構造が無効です: {exc}") from exc
 
@@ -267,6 +318,25 @@ class GenerationService:
                         pass
 
             file_path = root / planned_file.path
+            # パス traversal 防御: 解決済みパスがプロジェクトルート内に収まることを確認する
+            try:
+                resolved_file = file_path.resolve()
+                resolved_root = root.resolve()
+                if not resolved_file.is_relative_to(resolved_root):
+                    logger.error(
+                        "パス traversal を検出してスキップ: %s → %s",
+                        planned_file.path, resolved_file,
+                    )
+                    yield {
+                        "warning": f"スキップ: プロジェクト外パス — {planned_file.path}",
+                        "status": f"⚠ スキップ: {planned_file.path}",
+                    }
+                    continue
+            except Exception as exc:
+                logger.error("パス検証エラー: %s — %s", planned_file.path, exc)
+                yield {"warning": f"スキップ: パス検証エラー — {planned_file.path}"}
+                continue
+
             # ファイルが既に存在する場合は action="create" でも修正路に昇格する
             file_exists_on_disk = file_path.exists()
             is_modify = planned_file.action == "modify" or (
