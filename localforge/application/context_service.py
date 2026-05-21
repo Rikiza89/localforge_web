@@ -530,17 +530,24 @@ class ContextService:
         )
 
         if language == "en":
-            lang_instruction = "Write the report section in English."
+            lang_rule = "- LANGUAGE: Write all content in English."
         else:
-            lang_instruction = "レポートセクションを日本語で記述してください。"
+            # Bilingual — stated in both languages so the model cannot miss it
+            # even after processing a long English guidance block.
+            lang_rule = (
+                "- 【言語 / LANGUAGE】必ず日本語で記述すること。"
+                " Write ALL output in Japanese (日本語). "
+                "The guidance above is structural instruction only — your written content MUST be in Japanese."
+            )
 
         prompt = (
-            f"You are analyzing a software project. {lang_instruction}\n\n"
+            f"You are analyzing a software project.\n\n"
             f"Project metadata:\n{project_index_json}\n\n"
             f"Most relevant file summaries:\n{summaries_text}\n\n"
             f"Section to write: **{section_name}**\n\n"
             f"Specific guidance for this section:\n{section_guidance}\n\n"
             f"Output rules:\n"
+            f"{lang_rule}\n"
             f"- Do NOT output the section title/heading — content only.\n"
             f"- Use Markdown (### subheadings, tables, code blocks, bullet lists as appropriate).\n"
             f"- Be specific: reference actual file names, class names, and function names from the summaries.\n"
