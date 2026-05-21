@@ -199,11 +199,45 @@ function switchTab(tabName) {
 /**
  * フォルダ選択ダイアログを開いてプロジェクトをロードする。
  */
+function _resetProjectUI() {
+  // Clear stale content from the previous project before loading a new one
+  _indexBuilt = false;
+  window._reportResumFrom = 0;
+
+  const reportOutput = document.getElementById("report-output");
+  if (reportOutput) reportOutput.innerHTML = "";
+
+  const chatHistory = document.getElementById("chat-history");
+  if (chatHistory) chatHistory.innerHTML = "";
+
+  const planSection = document.getElementById("plan-section");
+  if (planSection) planSection.style.display = "none";
+
+  const savedPlanBanner = document.getElementById("saved-plan-banner");
+  if (savedPlanBanner) savedPlanBanner.style.display = "none";
+
+  const partialBanner = document.getElementById("report-partial-banner");
+  if (partialBanner) partialBanner.style.display = "none";
+
+  const sectionPanel = document.getElementById("section-selector-panel");
+  if (sectionPanel) sectionPanel.style.display = "none";
+
+  const indexSummary = document.getElementById("index-summary");
+  if (indexSummary) indexSummary.innerHTML = "";
+
+  const reportBtn = document.getElementById("generate-report-btn");
+  if (reportBtn) reportBtn.disabled = true;
+
+  const indexProgress = document.getElementById("index-progress-container");
+  if (indexProgress) indexProgress.style.display = "none";
+}
+
 async function openProject(pathOverride = null) {
   updateStatusBar("フォルダを選択中...");
   try {
     const body = pathOverride ? { path: pathOverride } : null;
     const data = await apiRequest("/api/project/open", "POST", body);
+    _resetProjectUI();
     _currentProjectRoot = data.project_root;
     _currentMode = data.mode;
 
