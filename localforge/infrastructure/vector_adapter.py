@@ -81,7 +81,7 @@ def _load_fastembed_model():
         model_name = _FASTEMBED_MODEL_NAME
         logger.info("fastembed: 環境変数パスからロード: %s", env_path)
     elif _LOCAL_FASTEMBED_DIR.is_dir():
-        cache_dir = str(_LOCAL_FASTEMBED_DIR.parent.parent)
+        cache_dir = str(_LOCAL_FASTEMBED_DIR.parent)
         model_name = _FASTEMBED_MODEL_NAME
         logger.info("fastembed: ローカルモデルディレクトリからロード: %s", _LOCAL_FASTEMBED_DIR)
     else:
