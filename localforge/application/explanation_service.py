@@ -587,10 +587,11 @@ class ExplanationService:
                         logger.warning("ピン留めファイル読み込みエラー: %s", pc.path)
                     return (pc.path, content) if content is not None else None
 
-                with ThreadPoolExecutor(max_workers=min(len(pinned_chunks), 8)) as ex:
-                    pinned_chunk_contents = [
-                        r for r in ex.map(_read_pinned, pinned_chunks) if r is not None
-                    ]
+                if pinned_chunks:
+                    with ThreadPoolExecutor(max_workers=min(len(pinned_chunks), 8)) as ex:
+                        pinned_chunk_contents = [
+                            r for r in ex.map(_read_pinned, pinned_chunks) if r is not None
+                        ]
             except Exception as exc:
                 logger.warning("ピン留めコンテキスト解決エラー: %s", exc)
 
@@ -705,10 +706,11 @@ class ExplanationService:
                 content = self._read_file_cached(root / chunk.path, max_chars=_max_chars)
                 return (chunk.path, content) if content is not None else None
 
-            with ThreadPoolExecutor(max_workers=min(len(_chunks_to_read), 8)) as ex:
-                full_contents = [
-                    r for r in ex.map(_read_chunk, _chunks_to_read) if r is not None
-                ]
+            if _chunks_to_read:
+                with ThreadPoolExecutor(max_workers=min(len(_chunks_to_read), 8)) as ex:
+                    full_contents = [
+                        r for r in ex.map(_read_chunk, _chunks_to_read) if r is not None
+                    ]
         else:
             yield {"phase": "ファイル選択完了", "detail": f"CPU最適化モード: サマリーのみ使用 ({len(top_chunks)} ファイル)"}
 
