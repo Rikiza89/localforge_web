@@ -649,6 +649,47 @@ class ContextService:
         )
         return self._guard_budget(prompt, "qa_file_selection")
 
+    def _build_qa_prompt_fast(
+        self,
+        question: str,
+        project_index_json: str,
+        top_summaries: List[tuple[str, str]],
+        full_contents: List[tuple[str, str]],
+        conversation_history: List[Message],
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+    ) -> tuple[str, int]:
+        """高速Q&A用の軽量プロンプト。whitelist・RULE 1-5・サマリー省略で最小トークン数を実現。"""
+        parts = [f"プロジェクト概要:\n{project_index_json}"]
+
+        # History — last 3 turns only
+        if conversation_history:
+            history_text = "\n".join(
+                f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}"
+                for m in conversation_history[-3:]
+            )
+            parts.append(f"会話履歴:\n{history_text}")
+
+        # Pinned files (already capped at 800 chars each by the service layer)
+        if pinned_contents:
+            pin_texts = "\n\n".join(f"--- {p} ---\n{c}" for p, c in pinned_contents)
+            parts.append(f"[ピン留めファイル]\n{pin_texts}")
+
+        # Additional file snippets from RAG (top 3, 800 chars each)
+        for fc_path, fc_content in (full_contents or [])[:3]:
+            parts.append(f"--- {fc_path} ---\n{fc_content[:800]}")
+
+        instructions = (
+            f"質問: {question}\n\n"
+            "コードベースに基づいて簡潔に回答してください。\n"
+            "1. 具体的なクラス名・関数名・ファイルパスを使うこと。\n"
+            "2. コンテキストにない情報は正直に述べ、推測は '[推測]' と明示すること。\n"
+        )
+        parts.append(instructions)
+
+        prompt = "\n\n".join(parts)
+        estimated = _estimate_tokens(prompt)
+        return self._guard_budget(prompt, "qa_fast"), estimated
+
     def build_qa_prompt(
         self,
         question: str,
@@ -661,6 +702,7 @@ class ContextService:
         workspace_projects: Optional[List[Dict[str, object]]] = None,
         pinned_depth_map: Optional[Dict[str, int]] = None,
         direct_pinned_set: Optional[Set[str]] = None,
+        fast_mode: bool = False,
     ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
@@ -676,6 +718,17 @@ class ContextService:
         Returns:
             (プロンプト文字列, 推定トークン数)
         """
+        # ── Fast mode: lightweight prompt — no whitelist, compact rules, minimal summaries ──
+        if fast_mode:
+            return self._build_qa_prompt_fast(
+                question=question,
+                project_index_json=project_index_json,
+                top_summaries=top_summaries,
+                full_contents=full_contents,
+                conversation_history=conversation_history,
+                pinned_contents=pinned_contents,
+            )
+
         parts = [f"プロジェクト概要:\n{project_index_json}"]
         _pinned_added: List[tuple[str, str]] = []
         _injected_paths: List[str] = []

@@ -2028,6 +2028,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // テーマの初期化
   initTheme();
 
+  // Q&Aモードトグル
+  if (typeof initChatModeToggle === "function") initChatModeToggle();
+
   updateStatusBar("LocalForge 準備完了 — フォルダを開いてください");
 });
 

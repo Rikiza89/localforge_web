@@ -1130,6 +1130,7 @@ class AnalysisService:
         pinned_paths: List[str],
         chunks: List[FileChunk],
         max_total: int = 100,
+        max_depth: int = 10,
     ) -> Tuple[List[FileChunk], Dict[str, List[str]], Dict[str, int]]:
         """
         ピン留めパス（ファイルまたはフォルダ）をチャンクに解決し、
@@ -1192,7 +1193,7 @@ class AnalysisService:
             )
 
         # import依存関係を展開（expand_with_dependenciesを再利用）
-        return self.expand_with_dependencies(chunks, resolved_files, max_total=max_total)
+        return self.expand_with_dependencies(chunks, resolved_files, max_total=max_total, max_depth=max_depth)
 
     def get_top_chunks_by_keywords(
         self,

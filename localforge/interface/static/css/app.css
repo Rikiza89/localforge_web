@@ -895,6 +895,39 @@ progress::-moz-progress-bar {
   line-height: 1.6;
 }
 
+.chat-mode-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.chat-mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.chat-mode-btn {
+  background: var(--bg-secondary);
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 12px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chat-mode-btn:hover:not(.active) {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.chat-mode-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
 .chat-input-row {
   display: flex;
   gap: 8px;

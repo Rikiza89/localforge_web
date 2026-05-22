@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Generator, List, Optional
+from typing import Dict, Generator, List, Optional
 
 from localforge.application.analysis_service import AnalysisService
 from localforge.application.context_service import ContextService
@@ -511,6 +511,7 @@ class ExplanationService:
         history: List[Message],
         workspace_roots: Optional[List[tuple[Path, str]]] = None,
         pinned_paths: Optional[List[str]] = None,
+        fast_mode: bool = False,
     ) -> Generator[dict, None, None]:
         """
         Q&A質問への回答をSSEイベントとしてストリーミング生成する。
@@ -567,6 +568,7 @@ class ExplanationService:
         # ── Phase A: ピン留めコンテキスト解決 ──
         # ピン留めファイルはユーザーが明示的に選んだもの。全内容を読み込む（文字数上限なし）。
         # トークン予算は build_qa_prompt 内で管理する。
+        # fast_mode では BFS を省略し直接選択ファイルのみを軽量読み込みする。
         pinned_chunk_contents: List[tuple[str, str]] = []
         pinned_base_chunks: List = []
         _pinned_depth_map: dict = {}
@@ -575,22 +577,30 @@ class ExplanationService:
             yield {"phase": "ピン留めファイル解決中", "detail": f"{len(pinned_paths)} 件のパスを展開中"}
             yield {"status": f"ピン留めファイルを展開中... ({len(pinned_paths)} 件)"}
             try:
-                # ピン留めの場合は依存関係をより深く (max_total=40, max_depth=10) 展開する
-                pinned_chunks, _pdep, _pinned_depth_map = self._analysis.resolve_pinned_chunks(
-                    root, pinned_paths, chunks, max_total=200
-                )
+                if fast_mode:
+                    # Fast mode: direct files only, no BFS, 800-char cap
+                    pinned_chunks, _pdep, _pinned_depth_map = self._analysis.resolve_pinned_chunks(
+                        root, pinned_paths, chunks, max_total=30, max_depth=1
+                    )
+                else:
+                    pinned_chunks, _pdep, _pinned_depth_map = self._analysis.resolve_pinned_chunks(
+                        root, pinned_paths, chunks, max_total=200
+                    )
                 _direct_pinned_set = {p for p, d in _pinned_depth_map.items() if d == 0}
                 pinned_base_chunks = pinned_chunks
                 yield {"phase": "ピン留めファイル解決中", "detail": f"依存関係を含む {len(pinned_chunks)} ファイルを取得 (直接: {len(_direct_pinned_set)})"}
 
                 def _read_pinned(pc):
-                    depth = _pinned_depth_map.get(pc.path, 0)
-                    if depth <= 1:
-                        max_chars = -1  # full file for directly pinned and direct imports
-                    elif depth <= 4:
-                        max_chars = 6000
+                    if fast_mode:
+                        max_chars = 800
                     else:
-                        max_chars = 1500
+                        depth = _pinned_depth_map.get(pc.path, 0)
+                        if depth <= 1:
+                            max_chars = -1  # full file for directly pinned and direct imports
+                        elif depth <= 4:
+                            max_chars = 6000
+                        else:
+                            max_chars = 1500
                     content = self._read_file_cached(root / pc.path, max_chars=max_chars)
                     if content is None:
                         logger.warning("ピン留めファイル読み込みエラー: %s", pc.path)
@@ -605,8 +615,9 @@ class ExplanationService:
                 logger.warning("ピン留めコンテキスト解決エラー: %s", exc)
 
         # ── Phase B: ワークスペース他プロジェクトのコンテキスト ──
+        # fast_mode ではワークスペース展開をスキップする
         workspace_project_data: List[dict] = []
-        if workspace_roots:
+        if workspace_roots and not fast_mode:
             yield {"phase": "ワークスペース検索中", "detail": f"{len(workspace_roots)} プロジェクト"}
             yield {"status": "ワークスペースプロジェクトを検索中..."}
             _max_ws_chars = self._context.max_qa_file_chars() // 2
@@ -661,8 +672,9 @@ class ExplanationService:
 
         # ── Phase D: セマンティック検索で補完 ──
         # CPU専用では top_n を絞ってコンテキストサイズを抑制する（8000+ トークンを防ぐ）
+        # fast_mode では常に top_n=3 に絞る
         _is_cpu = not getattr(self._llm, "cuda_available", False)
-        _top_n = 5 if _is_cpu else 10
+        _top_n = 3 if fast_mode else (5 if _is_cpu else 10)
         if pinned_base_chunks:
             # ピン留めファイルを起点に、不足分をセマンティック検索で補完
             base_chunks = list(pinned_base_chunks)
@@ -688,27 +700,34 @@ class ExplanationService:
             base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
 
         # ── Phase E: 依存関係展開 (BFS 10 hop, カスタムインポートのみ) ──
+        # fast_mode では BFS を完全にスキップして base_chunks をそのまま使う
         # CPU専用: max_total を絞ってプロンプトサイズを抑制する
-        _dep_max = 40 if pinned_base_chunks else (10 if _is_cpu else 20)
-        yield {"phase": "依存関係展開中", "detail": f"{len(base_chunks)} ファイルから最大 {_dep_max} ファイルに展開 (10 hop BFS)"}
-        yield {"status": f"依存関係を展開中... ({len(base_chunks)} → 最大 {_dep_max} ファイル)"}
-        top_chunks, dep_map, _phase_e_depth = self._analysis.expand_with_dependencies(
-            chunks,
-            [c.path for c in base_chunks],
-            max_total=_dep_max,
-            max_depth=10,
-        )
-        yield {"phase": "依存関係展開中", "detail": f"展開後 {len(top_chunks)} ファイル確定"}
+        if fast_mode:
+            top_chunks = base_chunks
+            dep_map: Dict[str, List[str]] = {}
+            yield {"phase": "依存関係展開スキップ", "detail": f"高速モード: {len(base_chunks)} ファイルをそのまま使用"}
+        else:
+            _dep_max = 40 if pinned_base_chunks else (10 if _is_cpu else 20)
+            yield {"phase": "依存関係展開中", "detail": f"{len(base_chunks)} ファイルから最大 {_dep_max} ファイルに展開 (10 hop BFS)"}
+            yield {"status": f"依存関係を展開中... ({len(base_chunks)} → 最大 {_dep_max} ファイル)"}
+            top_chunks, dep_map, _phase_e_depth = self._analysis.expand_with_dependencies(
+                chunks,
+                [c.path for c in base_chunks],
+                max_total=_dep_max,
+                max_depth=10,
+            )
+            yield {"phase": "依存関係展開中", "detail": f"展開後 {len(top_chunks)} ファイル確定"}
 
         # ── Phase F: ファイル内容読み込み ──
         # CPU専用でピン留めなしの場合はフル内容を省略してサマリーのみ使用する。
         # フル内容は prompt を何千トークンも膨らませ、CPU での prefill を数倍遅くする。
-        _inject_full_content = bool(pinned_base_chunks) or not _is_cpu
+        # fast_mode では 800 文字上限で軽量読み込みする。
+        _inject_full_content = fast_mode or bool(pinned_base_chunks) or not _is_cpu
         full_contents: List[tuple[str, str]] = []
         if _inject_full_content:
             yield {"phase": "ファイル内容読み込み中", "detail": f"{len(top_chunks)} ファイルをディスクから読み込み"}
             yield {"status": f"ファイル内容を読み込み中... ({len(top_chunks)} ファイル)"}
-            _max_chars = self._context.max_qa_file_chars() if not _is_cpu else 3000
+            _max_chars = 800 if fast_mode else (self._context.max_qa_file_chars() if not _is_cpu else 3000)
             _pinned_paths_set = {p for p, _ in pinned_chunk_contents}
             _chunks_to_read = [c for c in top_chunks if c.path not in _pinned_paths_set]
 
@@ -729,17 +748,19 @@ class ExplanationService:
         # ── Phase G: プロンプト構築 ──
         yield {"phase": "プロンプト構築中", "detail": "コンテキストを組み立てています"}
         yield {"status": "プロンプトを構築中..."}
+        _history_window = history[-3:] if fast_mode else history[-10:]
         prompt, tokens = self._context.build_qa_prompt(
             question=question,
             project_index_json=index_json,
             top_summaries=top_summaries,
             full_contents=full_contents,
-            conversation_history=history[-10:],
+            conversation_history=_history_window,
             dep_map=dep_map,
             pinned_contents=pinned_chunk_contents or None,
             workspace_projects=workspace_project_data or None,
             pinned_depth_map=_pinned_depth_map if pinned_paths else None,
             direct_pinned_set=_direct_pinned_set if pinned_paths else None,
+            fast_mode=fast_mode,
         )
 
         # プロンプトのプレビューを送信（最初の 1000 文字 + 末尾 200 文字）

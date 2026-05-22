@@ -11,6 +11,9 @@ let _chatHistory = [];
 // 送信中フラグ
 let _chatSending = false;
 
+// Q&Aモード: true=高速, false=精密
+let _chatFastMode = true;
+
 /**
  * チャット履歴をリセットする。
  */
@@ -56,6 +59,25 @@ function loadChatHistory(entries) {
     turn.appendChild(aEl);
     historyEl.appendChild(turn);
   });
+}
+
+/**
+ * Q&Aモードトグルを初期化する。
+ */
+function initChatModeToggle() {
+  const fastBtn = document.getElementById("chat-mode-fast");
+  const preciseBtn = document.getElementById("chat-mode-precise");
+  if (!fastBtn || !preciseBtn) return;
+
+  function _applyMode(fast) {
+    _chatFastMode = fast;
+    fastBtn.classList.toggle("active", fast);
+    preciseBtn.classList.toggle("active", !fast);
+  }
+
+  fastBtn.addEventListener("click", () => _applyMode(true));
+  preciseBtn.addEventListener("click", () => _applyMode(false));
+  _applyMode(_chatFastMode);
 }
 
 /**
@@ -123,6 +145,7 @@ async function sendChatMessage(question) {
     {
       question,
       history: _chatHistory.slice(-10).map(m => ({ role: m.role, content: m.content })),
+      fast_mode: _chatFastMode,
     },
     null,
     {
