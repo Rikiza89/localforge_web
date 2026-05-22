@@ -1,93 +1,93 @@
-<!-- プラン生成・承認UIコンポーネント -->
+<!-- Plan generation & approval UI component -->
 <div class="plan-viewer">
   <div class="workspace-header">
-    <h2>Generate — プロジェクトを生成・改善</h2>
+    <h2 data-i18n="generate_title">Generate — Create &amp; Improve Project</h2>
   </div>
 
-  <!-- 保存済みプランバナー -->
+  <!-- Saved plan banner -->
   <div class="saved-plan-banner" id="saved-plan-banner" style="display:none;">
     <div class="saved-plan-banner-body">
-      <span id="saved-plan-banner-text">保存済みプランを読み込みました。承認して生成を続行するか、新しいプロンプトを入力してください。</span>
+      <span id="saved-plan-banner-text" data-i18n="saved_plan_banner_text">Saved plan loaded. Approve to continue or enter a new prompt.</span>
       <div class="saved-plan-banner-actions" id="saved-plan-banner-actions" style="display:none;">
-        <button class="btn btn-primary btn-sm" id="resume-generation-btn">↺ 続きから再開</button>
-        <button class="btn btn-secondary btn-sm" id="restart-generation-btn">▶ 生成開始</button>
+        <button class="btn btn-primary btn-sm" id="resume-generation-btn" data-i18n="resume_gen_btn">↺ Resume from last point</button>
+        <button class="btn btn-secondary btn-sm" id="restart-generation-btn" data-i18n="restart_gen_btn">▶ Start generation</button>
       </div>
     </div>
-    <button class="btn-link" id="dismiss-plan-banner-btn">✕ 閉じる</button>
+    <button class="btn-link" id="dismiss-plan-banner-btn" data-i18n="dismiss_banner_btn">✕ Close</button>
   </div>
 
-  <!-- プロンプト入力エリア -->
+  <!-- Prompt input area -->
   <div class="prompt-section">
-    <label for="generate-prompt" class="field-label">プロジェクトの説明・改善要求</label>
+    <label for="generate-prompt" class="field-label" data-i18n="prompt_label">Project description / improvement request</label>
     <textarea
       id="generate-prompt"
       class="prompt-input"
-      placeholder="例（新規）: FlaskとSQLiteを使ったTodoアプリを作ってください。&#10;例（改善）: エラーハンドリングを改善して、型ヒントを追加してください。&#10;例（質問）: このプロジェクトの問題点を分析して改善プランを作成してください。"
+      data-i18n-placeholder="prompt_placeholder"
       rows="5"
     ></textarea>
     <div class="plan-file-count-row">
-      <label class="file-count-label" title="生成するファイルの最小数をLLMへのヒントとして渡します（空=制限なし）">
-        最小ファイル数
+      <label class="file-count-label">
+        <span data-i18n="min_files_label">Min files</span>
         <input type="number" id="plan-min-files" class="file-count-input"
-               min="1" max="200" placeholder="制限なし">
+               min="1" max="200" data-i18n-placeholder="no_limit_placeholder">
       </label>
-      <label class="file-count-label" title="生成するファイルの最大数をLLMへのヒントとして渡します（空=制限なし）">
-        最大ファイル数
+      <label class="file-count-label">
+        <span data-i18n="max_files_label">Max files</span>
         <input type="number" id="plan-max-files" class="file-count-input"
-               min="1" max="200" placeholder="制限なし">
+               min="1" max="200" data-i18n-placeholder="no_limit_placeholder">
       </label>
     </div>
     <div class="prompt-actions">
-      <button class="btn btn-primary" id="generate-plan-btn">
-        ✦ プランを生成
+      <button class="btn btn-primary" id="generate-plan-btn" data-i18n="generate_plan_btn">
+        ✦ Generate plan
       </button>
     </div>
   </div>
 
-  <!-- プラン表示・編集エリア -->
+  <!-- Plan display & edit area -->
   <div class="plan-section" id="plan-section" style="display:none;">
     <div class="plan-header">
-      <h3>生成されたプラン</h3>
+      <h3 data-i18n="generated_plan_h3">Generated plan</h3>
       <div class="plan-actions">
-        <label class="branch-toggle-label" title="生成を新しいブランチで行う">
+        <label class="branch-toggle-label">
           <input type="checkbox" id="gen-branch-toggle">
-          <span>新ブランチで生成</span>
+          <span data-i18n="new_branch_label">Generate on new branch</span>
         </label>
-        <button class="btn btn-primary" id="approve-plan-btn">✓ 承認して生成開始</button>
-        <button class="btn btn-secondary" id="edit-plan-btn">✎ 編集</button>
-        <button class="btn btn-secondary" id="reprompt-btn">↺ 再プロンプト</button>
+        <button class="btn btn-primary" id="approve-plan-btn" data-i18n="approve_btn">✓ Approve &amp; start generation</button>
+        <button class="btn btn-secondary" id="edit-plan-btn" data-i18n="edit_plan_btn">✎ Edit</button>
+        <button class="btn btn-secondary" id="reprompt-btn" data-i18n="reprompt_btn">↺ Re-prompt</button>
       </div>
     </div>
 
-    <!-- F: AIによるプランサマリー（Markdownレンダリング） -->
+    <!-- AI plan summary (Markdown rendered) -->
     <div class="plan-summary md-body" id="plan-summary" style="display:none;"></div>
 
-    <!-- プランのビジュアルツリー（NEW/EDIT バッジ付き） -->
+    <!-- Plan visual tree (with NEW/EDIT badges) -->
     <div class="plan-tree" id="plan-tree"></div>
 
-    <!-- 編集可能な生JSONテキストエリア -->
+    <!-- Editable raw JSON textarea -->
     <div class="plan-json-editor" id="plan-json-editor" style="display:none;">
-      <label class="field-label">プランJSON（直接編集可能）</label>
+      <label class="field-label" data-i18n="plan_json_label">Plan JSON (directly editable)</label>
       <textarea id="plan-json-textarea" class="json-textarea" rows="20" spellcheck="false"></textarea>
       <div class="json-editor-actions">
-        <button class="btn btn-primary" id="apply-json-btn">適用</button>
-        <button class="btn btn-secondary" id="cancel-edit-btn">キャンセル</button>
+        <button class="btn btn-primary" id="apply-json-btn" data-i18n="json_apply_btn">Apply</button>
+        <button class="btn btn-secondary" id="cancel-edit-btn" data-i18n="json_cancel_btn">Cancel</button>
       </div>
     </div>
 
-    <!-- プランストリーム出力（生成中） -->
+    <!-- Plan stream output (during generation) -->
     <pre class="stream-output" id="plan-stream-output" style="display:none;"></pre>
   </div>
 
-  <!-- ファイル生成エリア -->
+  <!-- File generation area -->
   <div class="generation-section" id="generation-section" style="display:none;">
     <div class="generation-header">
-      <h3>ファイル生成中...</h3>
-      <button class="btn btn-danger" id="cancel-generation-btn">✕ キャンセル</button>
+      <h3 data-i18n="generating_h3">Generating files…</h3>
+      <button class="btn btn-danger" id="cancel-generation-btn" data-i18n="cancel_gen_btn">✕ Cancel</button>
     </div>
     <div class="progress-container">
       <progress id="generation-progress" max="100" value="0"></progress>
-      <span class="progress-label" id="progress-label">準備中...</span>
+      <span class="progress-label" id="progress-label" data-i18n="preparing_label">Preparing…</span>
     </div>
     <div class="stream-output-container">
       <div class="gen-file-header" id="gen-current-file-header" style="display:none;"></div>

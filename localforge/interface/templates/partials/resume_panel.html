@@ -1,62 +1,62 @@
-<!-- 再開状態パネルコンポーネント -->
+<!-- Resume state panel component -->
 <div class="resume-panel">
   <div class="workspace-header">
-    <h2>Resume — プロジェクトを再開</h2>
+    <h2 data-i18n="resume_title">Resume — Continue Project</h2>
   </div>
 
-  <!-- 未プロジェクト時のメッセージ -->
+  <!-- No-project message -->
   <div id="resume-empty" class="empty-state">
-    <p>フォルダを開いて再開可能なプロジェクトを選択してください。</p>
+    <p data-i18n="resume_empty_p">Open a folder to select a resumable project.</p>
   </div>
 
-  <!-- 再開状態の詳細 -->
+  <!-- Resume state details -->
   <div id="resume-content" style="display:none;">
 
-    <!-- サマリーカード -->
+    <!-- Summary card -->
     <div class="resume-summary-card" id="resume-summary-card">
       <div class="summary-row">
-        <span class="summary-label">最終コミット:</span>
+        <span class="summary-label" data-i18n="last_commit_label">Last commit:</span>
         <span class="summary-value" id="last-commit-msg">—</span>
       </div>
       <div class="summary-row">
-        <span class="summary-label">進行状況:</span>
-        <span class="summary-value" id="resume-progress-text">0 / 0 ファイル</span>
+        <span class="summary-label" data-i18n="progress_label">Progress:</span>
+        <span class="summary-value" id="resume-progress-text" data-i18n="files_progress_text">0 / 0 files</span>
       </div>
       <div class="progress-container">
         <progress id="resume-progress-bar" max="100" value="0"></progress>
       </div>
     </div>
 
-    <!-- LocalForgeプロジェクト用ボタン -->
+    <!-- LocalForge project buttons -->
     <div class="resume-actions" id="resume-lf-actions" style="display:none;">
-      <button class="btn btn-primary" id="continue-generation-btn">
-        ▶ 生成を続行
+      <button class="btn btn-primary" id="continue-generation-btn" data-i18n="continue_gen_btn">
+        ▶ Continue generation
       </button>
-      <button class="btn btn-secondary" id="modify-plan-btn">
-        ✎ プランを変更
+      <button class="btn btn-secondary" id="modify-plan-btn" data-i18n="modify_plan_btn">
+        ✎ Modify plan
       </button>
     </div>
 
-    <!-- 外部プロジェクト用ボタン -->
+    <!-- Foreign project buttons -->
     <div class="resume-actions" id="resume-foreign-actions" style="display:none;">
-      <button class="btn btn-primary" id="view-full-report-btn">
-        📄 フルレポートを表示
+      <button class="btn btn-primary" id="view-full-report-btn" data-i18n="view_report_btn">
+        📄 Full report
       </button>
-      <button class="btn btn-secondary" id="continue-qa-btn">
-        💬 Q&Aを続ける
+      <button class="btn btn-secondary" id="continue-qa-btn" data-i18n="continue_qa_btn">
+        💬 Continue Q&amp;A
       </button>
-      <button class="btn btn-secondary" id="generate-new-files-btn">
-        ✦ 新しいファイルを生成
+      <button class="btn btn-secondary" id="generate-new-files-btn" data-i18n="gen_new_files_btn">
+        ✦ Generate new files
       </button>
     </div>
 
-    <!-- ファイル状態テーブル -->
+    <!-- File status table -->
     <div class="resume-file-table-container">
       <table class="resume-file-table">
         <thead>
           <tr>
-            <th>状態</th>
-            <th>ファイルパス</th>
+            <th data-i18n="status_col_th">Status</th>
+            <th data-i18n="filepath_col_th">File path</th>
           </tr>
         </thead>
         <tbody id="resume-file-table-body">
@@ -64,15 +64,15 @@
       </table>
     </div>
 
-    <!-- 生成進捗（再開時） -->
+    <!-- Generation progress (on resume) -->
     <div class="resume-generation-section" id="resume-generation-section" style="display:none;">
       <div class="generation-header">
-        <h3>生成再開中...</h3>
-        <button class="btn btn-danger" id="resume-cancel-btn">✕ キャンセル</button>
+        <h3 data-i18n="resuming_h3">Resuming…</h3>
+        <button class="btn btn-danger" id="resume-cancel-btn" data-i18n="resume_cancel_btn">✕ Cancel</button>
       </div>
       <div class="progress-container">
         <progress id="resume-gen-progress" max="100" value="0"></progress>
-        <span class="progress-label" id="resume-gen-progress-label">準備中...</span>
+        <span class="progress-label" id="resume-gen-progress-label" data-i18n="preparing_label">Preparing…</span>
       </div>
       <pre class="stream-output" id="resume-stream-output"></pre>
     </div>

@@ -211,6 +211,8 @@ class ProjectConfig(BaseModel):
     enable_rag: bool = True
     # コンテキストピン留めされたパス（プロジェクト相対、ファイルまたはフォルダ）
     context_pinned: List[str] = Field(default_factory=list)
+    # UI and LLM output language: "en" | "ja" | "it"
+    language: str = "en"
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)

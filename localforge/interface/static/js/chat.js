@@ -35,7 +35,7 @@ function loadChatHistory(entries) {
 
   const divider = document.createElement("div");
   divider.className = "chat-history-divider";
-  divider.innerHTML = `<span>— 過去の Q&A (${entries.length}件) —</span>`;
+  divider.innerHTML = `<span>${t("qa_history_divider_prefix")}${entries.length}${t("qa_history_divider_suffix")}</span>`;
   historyEl.appendChild(divider);
 
   entries.forEach(entry => {
@@ -130,7 +130,7 @@ async function sendChatMessage(question) {
 
   const aEl = document.createElement("div");
   aEl.className = "chat-a md-body";
-  aEl.textContent = "回答生成中...";
+  aEl.textContent = t("qa_answer_generating");
   turn.appendChild(aEl);
 
   historyEl.appendChild(turn);
@@ -168,16 +168,15 @@ async function sendChatMessage(question) {
         enableChat();
         _unlockUI();
 
-        // Q&Aをディスクに保存（エラーは無視してUIをブロックしない）
         apiRequest("/api/explain/qa-save", "POST", { question, answer: answerBuffer })
-          .catch(e => console.warn("Q&A保存エラー:", e.message));
+          .catch(e => console.warn("Q&A save error:", e.message));
 
         // 入力フィールドにフォーカスを戻す
         const input = document.getElementById("chat-input");
         if (input) input.focus();
       },
       onError: (err) => {
-        aEl.innerHTML = `<span style="color:var(--danger)">[エラー: ${escapeHtml(String(err))}]</span>`;
+        aEl.innerHTML = `<span style="color:var(--danger)">[${t("error_occurred")}: ${escapeHtml(String(err))}]</span>`;
         aEl.style.color = "";
         _chatSending = false;
         enableChat();

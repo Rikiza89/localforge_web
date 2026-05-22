@@ -55,7 +55,7 @@ function _updatePinStatusBar() {
   if (!bar || !txt) return;
   if (_pinnedPaths.size > 0) {
     bar.style.display = "flex";
-    txt.textContent = `📎 ${_pinnedPaths.size}件ピン留め`;
+    txt.textContent = t("pin_count_label", { n: _pinnedPaths.size });
   } else {
     bar.style.display = "none";
   }
@@ -68,7 +68,7 @@ async function _savePinnedToServer() {
   try {
     await apiRequest("/api/project/pinned", "POST", { paths: [..._pinnedPaths] });
   } catch (e) {
-    console.warn("ピン留め保存エラー:", e.message);
+    console.warn("Pin save error:", e.message);
   }
 }
 
@@ -102,7 +102,7 @@ async function loadPinnedFromServer() {
     });
     if (_pinModeActive) refreshFileTree();
   } catch (e) {
-    console.warn("ピン留め読み込みエラー:", e.message);
+    console.warn("Pin load error:", e.message);
   }
 }
 
@@ -157,7 +157,7 @@ function _togglePin(path, isDir, childPaths) {
 function renderFileTree(nodes, container) {
   container.innerHTML = "";
   if (!nodes || nodes.length === 0) {
-    container.innerHTML = '<div class="empty-state">ファイルがありません</div>';
+    container.innerHTML = `<div class="empty-state">${t("no_files")}</div>`;
     return;
   }
   const ul = buildTreeList(nodes, 0);
@@ -375,7 +375,7 @@ async function showFileContent(filePath) {
     content.innerHTML = '<pre class="code-block">' + escapeHtml(data.content) + "</pre>";
     modal.style.display = "flex";
   } catch (err) {
-    showAlert(`ファイルの読み込みに失敗しました: ${err.message}`, "error");
+    showAlert(`${t("file_load_error")}: ${err.message}`, "error");
   }
 }
 
@@ -392,18 +392,18 @@ async function openFileEditor(filePath) {
 
     if (!modal || !title || !content) return;
 
-    title.textContent = `✏ 編集: ${filePath}`;
+    title.textContent = t("edit_modal_title_prefix") + filePath;
 
     const toolbar = document.createElement("div");
     toolbar.className = "modal-edit-toolbar";
 
     const saveBtn = document.createElement("button");
     saveBtn.className = "btn btn-primary btn-sm";
-    saveBtn.textContent = "保存";
+    saveBtn.textContent = t("save_done").replace(" ✓", "");
 
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "btn btn-secondary btn-sm";
-    cancelBtn.textContent = "キャンセル";
+    cancelBtn.textContent = t("json_cancel_btn");
 
     const statusSpan = document.createElement("span");
     statusSpan.style.marginLeft = "auto";
@@ -429,17 +429,17 @@ async function openFileEditor(filePath) {
 
     saveBtn.addEventListener("click", async () => {
       saveBtn.disabled = true;
-      statusSpan.textContent = "保存中...";
+      statusSpan.textContent = t("saving");
       try {
         await apiRequest("/api/project/save-file", "POST", { path: filePath, content: textarea.value });
-        statusSpan.textContent = "保存完了 ✓";
+        statusSpan.textContent = t("save_done");
         statusSpan.style.color = "var(--success)";
-        showAlert(`保存しました: ${filePath}`, "success");
+        showAlert(`${t("save_done")}: ${filePath}`, "success");
         refreshFileTree();
       } catch (err) {
-        statusSpan.textContent = "保存失敗";
+        statusSpan.textContent = t("save_fail");
         statusSpan.style.color = "var(--danger)";
-        showAlert(`保存エラー: ${err.message}`, "error");
+        showAlert(`${t("save_fail")}: ${err.message}`, "error");
       } finally {
         saveBtn.disabled = false;
       }
@@ -449,18 +449,19 @@ async function openFileEditor(filePath) {
       modal.style.display = "none";
     });
   } catch (err) {
-    showAlert(`ファイルの読み込みに失敗しました: ${err.message}`, "error");
+    showAlert(`${t("file_load_error")}: ${err.message}`, "error");
   }
 }
 
 /**
- * 単一ファイルをAIで説明するストリームを開始する。
+ * Explain a single file with AI.
+ */
  * @param {string} filePath - 説明するファイルのパス
  */
 async function explainSingleFile(filePath) {
   try {
     const data = await apiRequest(`/api/project/file-content?path=${encodeURIComponent(filePath)}`);
-    const question = `このファイル (${filePath}) の役割・構造・重要なポイントを詳しく説明してください:\n\n${data.content.slice(0, 1000)}`;
+    const question = `Explain the role, structure and key points of this file (${filePath}):\n\n${data.content.slice(0, 1000)}`;
 
     const modal = document.getElementById("file-modal");
     const title = document.getElementById("modal-title");
@@ -468,9 +469,9 @@ async function explainSingleFile(filePath) {
 
     if (!modal || !title || !content) return;
 
-    title.textContent = `説明: ${filePath}`;
+    title.textContent = t("explain_modal_title_prefix") + filePath;
     content.className = "modal-content md-body";
-    content.innerHTML = "説明を生成中...";
+    content.innerHTML = t("qa_answer_generating");
     modal.style.display = "flex";
 
     let explainBuf = "";
@@ -484,12 +485,12 @@ async function explainSingleFile(filePath) {
           explainBuf += token;
           content.innerHTML = _renderMd(explainBuf);
         },
-        onDone: () => { updateStatusBar("説明完了"); },
-        onError: (err) => { content.innerHTML += `<p style="color:var(--danger)">[エラー: ${escapeHtml(String(err))}]</p>`; },
+        onDone: () => { updateStatusBar(t("report_done")); },
+        onError: (err) => { content.innerHTML += `<p style="color:var(--danger)">[${t("error_occurred")}: ${escapeHtml(String(err))}]</p>`; },
       }
     );
   } catch (err) {
-    showAlert(`ファイル説明に失敗しました: ${err.message}`, "error");
+    showAlert(`${t("file_explain_error")}: ${err.message}`, "error");
   }
 }
 
@@ -498,9 +499,9 @@ async function explainSingleFile(filePath) {
  * @param {string} filePath - 再生成するファイルパス
  */
 async function triggerRegenerateFile(filePath) {
-  if (!confirm(`${filePath} を再生成しますか？`)) return;
+  if (!confirm(`${filePath}${t("regen_confirm_suffix")}`)) return;
 
-  updateStatusBar(`再生成中: ${filePath}`);
+  updateStatusBar(`${filePath}…`);
 
   await startPostStream(
     "/api/generate/regenerate",
@@ -508,16 +509,16 @@ async function triggerRegenerateFile(filePath) {
     null,
     {
       onFileWritten: (path) => {
-        showAlert(`ファイルを再生成しました: ${path}`, "success");
+        showAlert(`${t("regen_done")}: ${path}`, "success");
         refreshFileTree();
       },
       onWarning: (msg) => {
         showAlert(msg, "warning", 8000);
       },
-      onDone: () => { updateStatusBar("再生成完了"); },
+      onDone: () => { updateStatusBar(t("regen_done")); },
       onError: (err) => {
-        showAlert(`再生成エラー: ${err}`, "error");
-        updateStatusBar("エラーが発生しました");
+        showAlert(`${t("error_occurred")}: ${err}`, "error");
+        updateStatusBar(t("error_occurred"));
       },
     }
   );
@@ -534,7 +535,7 @@ async function refreshFileTree() {
       renderFileTree(data.file_tree, container);
     }
   } catch (err) {
-    console.warn("ファイルツリー更新エラー:", err.message);
+    console.warn("File tree refresh error:", err.message);
   }
 }
 

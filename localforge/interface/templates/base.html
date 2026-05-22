@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,90 +8,88 @@
 </head>
 <body>
   <div class="app-layout">
-    <!-- ヘッダーバー -->
+    <!-- Header bar -->
     <header class="header-bar">
       <div class="header-logo">
         <span class="logo-diamond">◆</span>
         <span class="logo-text">LocalForge</span>
       </div>
       <div class="header-controls">
-        <!-- Ollama モデルセレクタ -->
-        <select id="model-selector" class="model-select" title="使用するOllamaモデル">
-          <option value="">モデル読み込み中...</option>
+        <!-- Ollama model selector -->
+        <select id="model-selector" class="model-select" data-i18n-title="model_selector_title">
+          <option value="" data-i18n="model_loading">Loading models…</option>
         </select>
-        <button class="btn btn-secondary btn-sm" id="unload-model-btn" title="現在のモデルをVRAMから解放">
-          ⏏ 解放
-        </button>
-        <button class="icon-btn" id="theme-toggle" title="テーマを切り替え">🌓</button>
-        <button class="icon-btn" id="show-logs-btn" title="生成ログを表示">📋</button>
-        <span class="project-path" id="project-path">プロジェクト未選択</span>
-        <button class="btn btn-secondary" id="open-project-btn" title="フォルダを開く">
-          📁 フォルダを開く
-        </button>
-        <button class="btn btn-danger" id="global-stop-btn" style="display:none" title="生成を停止">
-          ⏹ 停止
-        </button>
-        <button class="btn btn-warning btn-sm" id="rollback-btn" style="display:none" title="最後のチェックポイントにロールバック">
-          ⎌ 元に戻す
-        </button>
+        <button class="btn btn-secondary btn-sm" id="unload-model-btn" data-i18n="unload_btn" data-i18n-title="unload_btn_title">⏏ Unload</button>
+        <button class="icon-btn" id="theme-toggle" data-i18n-title="toggle_theme">🌓</button>
+        <button class="icon-btn" id="show-logs-btn" data-i18n-title="show_logs">📋</button>
+        <!-- Language selector -->
+        <select id="lang-select" class="lang-select" title="Language / 言語 / Lingua">
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+          <option value="it">Italiano</option>
+        </select>
+        <span class="project-path" id="project-path" data-i18n="no_project">No project selected</span>
+        <button class="btn btn-secondary" id="open-project-btn" data-i18n="open_folder">📁 Open folder</button>
+        <button class="btn btn-danger" id="global-stop-btn" style="display:none" data-i18n="stop_btn">⏹ Stop</button>
+        <button class="btn btn-warning btn-sm" id="rollback-btn" style="display:none" data-i18n="rollback_btn">⎌ Rollback</button>
       </div>
     </header>
 
-    <!-- モードタブバー -->
+    <!-- Mode tab bar -->
     <nav class="tab-bar">
       <button class="tab-btn active" data-tab="generate" id="tab-generate">Generate</button>
       <button class="tab-btn" data-tab="resume" id="tab-resume">Resume</button>
       <button class="tab-btn" data-tab="explain" id="tab-explain">Explain</button>
     </nav>
 
-    <!-- ファイルツリー（左サイドバー） -->
+    <!-- File tree (left sidebar) -->
     <aside class="file-tree-panel" id="left-sidebar">
-      <!-- ワークスペースバー -->
+      <!-- Workspace bar -->
       <div class="workspace-bar" id="workspace-bar" style="display:none;">
         <div class="workspace-bar-header">
-          <span class="workspace-bar-label">🔗 ワークスペース</span>
-          <button class="icon-btn workspace-add-btn" id="workspace-add-btn" title="プロジェクトを追加">＋</button>
+          <span class="workspace-bar-label" data-i18n="workspace_label">🔗 Workspace</span>
+          <button class="icon-btn workspace-add-btn" id="workspace-add-btn">＋</button>
         </div>
         <div class="workspace-projects" id="workspace-projects"></div>
       </div>
 
       <div class="panel-header">
-        <span>ファイルツリー</span>
+        <span data-i18n="file_tree">File tree</span>
         <div class="panel-header-actions">
-          <button class="icon-btn pin-toggle-btn" id="pin-mode-btn" title="ピン留めモードを切り替え">📎</button>
-          <button class="icon-btn" id="refresh-tree-btn" title="ツリーを更新">↻</button>
+          <button class="icon-btn pin-toggle-btn" id="pin-mode-btn" data-i18n-title="toggle_pin_mode">📎</button>
+          <button class="icon-btn" id="refresh-tree-btn" data-i18n-title="refresh_tree">↻</button>
         </div>
       </div>
 
-      <!-- ピン留めステータスバー -->
+      <!-- Pin status bar -->
       <div class="pin-status-bar" id="pin-status-bar" style="display:none;">
-        <span id="pin-status-text">0件ピン留め</span>
-        <button class="btn-link" id="pin-clear-btn">クリア</button>
+        <span id="pin-status-text">0 pinned</span>
+        <button class="btn-link" id="pin-clear-btn" data-i18n="clear_btn">Clear</button>
       </div>
 
       <div class="file-tree-container" id="file-tree">
-        <div class="empty-state">フォルダを開いてください</div>
+        <div class="empty-state" data-i18n="open_folder_hint">Open a folder to get started</div>
       </div>
     </aside>
 
     <div class="resizer resizer-left" id="resizer-left"></div>
 
-    <!-- メインワークスペース -->
+    <!-- Main workspace -->
     <main class="main-workspace">
-      <!-- ブロックアラート -->
+      <!-- Alert container -->
       <div id="alert-container"></div>
 
-      <!-- Generateタブ -->
+      <!-- Generate tab -->
       <div class="tab-content active" id="tab-content-generate">
         {% include "partials/plan_viewer.html" %}
       </div>
 
-      <!-- Resumeタブ -->
+      <!-- Resume tab -->
       <div class="tab-content" id="tab-content-resume">
         {% include "partials/resume_panel.html" %}
       </div>
 
-      <!-- Explainタブ -->
+      <!-- Explain tab -->
       <div class="tab-content" id="tab-content-explain">
         {% include "partials/report_viewer.html" %}
       </div>
@@ -99,106 +97,106 @@
 
     <div class="resizer resizer-right" id="resizer-right"></div>
 
-    <!-- コンテキストパネル（右サイドバー） -->
+    <!-- Context panel (right sidebar) -->
     <aside class="context-panel" id="right-sidebar">
-      <div class="panel-header">コンテキスト</div>
+      <div class="panel-header" data-i18n="context_panel">Context</div>
       <div class="context-section">
-        <div class="section-label">context.md</div>
+        <div class="section-label" data-i18n="context_md_label">context.md</div>
         <pre class="context-content" id="context-md-content">—</pre>
       </div>
       <div class="context-section">
-        <div class="section-label">ProjectIndex</div>
+        <div class="section-label" data-i18n="project_index_label">ProjectIndex</div>
         <div class="index-summary" id="index-summary">
-          <div class="empty-state">未インデックス</div>
+          <div class="empty-state" data-i18n="not_indexed">Not indexed</div>
         </div>
       </div>
       <div class="context-section">
-        <div class="section-label">Git ログ</div>
+        <div class="section-label" data-i18n="git_log_label">Git log</div>
         <div class="git-log" id="git-log-list">
           <div class="empty-state">—</div>
         </div>
       </div>
 
-      <!-- CPU スレッドマネージャー -->
+      <!-- CPU thread manager -->
       <div class="context-section">
-        <div class="section-label">CPU スレッド</div>
+        <div class="section-label" data-i18n="cpu_threads_label">CPU threads</div>
         <div id="cpu-thread-panel">
           <div class="cpu-thread-info">
-            <span id="cpu-core-label" class="text-muted">— コア</span>
-            <span id="cpu-thread-badge" class="cpu-thread-badge">自動</span>
+            <span id="cpu-core-label" class="text-muted">—</span>
+            <span id="cpu-thread-badge" class="cpu-thread-badge" data-i18n="cpu_auto">Auto</span>
           </div>
           <input type="range" id="cpu-thread-slider" class="cpu-slider"
-                 min="1" max="8" value="4" title="スレッド数を調整">
+                 min="1" max="8" value="4">
           <div class="cpu-slider-meta">
             <span class="text-muted">1</span>
-            <span id="cpu-slider-value" class="font-mono" style="font-size:11px;">— スレッド</span>
+            <span id="cpu-slider-value" class="font-mono" style="font-size:11px;">—</span>
             <span id="cpu-max-label" class="text-muted">8</span>
           </div>
           <div class="cpu-thread-actions">
-            <button class="btn btn-primary btn-sm" id="cpu-apply-btn">適用</button>
-            <button class="btn btn-secondary btn-sm" id="cpu-auto-btn">自動に戻す</button>
+            <button class="btn btn-primary btn-sm" id="cpu-apply-btn" data-i18n="apply_btn">Apply</button>
+            <button class="btn btn-secondary btn-sm" id="cpu-auto-btn" data-i18n="reset_auto_btn">Reset to auto</button>
           </div>
         </div>
       </div>
     </aside>
 
-    <!-- ステータスバー -->
+    <!-- Status bar -->
     <footer class="status-bar">
-      <span class="status-message" id="status-message">待機中</span>
+      <span class="status-message" id="status-message" data-i18n="waiting">Waiting</span>
       <span class="status-vram" id="status-vram"></span>
       <span class="status-tokens" id="status-tokens"></span>
       <span class="status-git" id="status-git"></span>
-      <span class="checkpoint-badge" id="checkpoint-badge" style="display:none" title="最後の生成チェックポイント"></span>
+      <span class="checkpoint-badge" id="checkpoint-badge" style="display:none"></span>
       <span class="status-port">:7331</span>
     </footer>
   </div>
 
-  <!-- Ollamaライブ出力 & プロセスログパネル（固定位置オーバーレイ、右端） -->
+  <!-- Ollama live output & process log panel (fixed position overlay, right edge) -->
   <div id="ollama-panel" class="ollama-panel collapsed">
-    <button id="ollama-panel-toggle" class="ollama-panel-tab" title="Ollamaライブ出力を開く/閉じる">
+    <button id="ollama-panel-toggle" class="ollama-panel-tab">
       <span class="ollama-stream-dot"></span>
       <span class="ollama-tab-label">Ollama</span>
     </button>
     <div class="ollama-panel-body">
-      <!-- パネル内タブ -->
+      <!-- Panel inner tabs -->
       <div class="ollama-inner-tabs">
-        <button class="ollama-inner-tab active" data-inner-tab="live" id="inner-tab-live">ライブ出力</button>
+        <button class="ollama-inner-tab active" data-inner-tab="live" id="inner-tab-live" data-i18n="ollama_live_tab">Live output</button>
         <button class="ollama-inner-tab" data-inner-tab="processlog" id="inner-tab-processlog">
-          プロセスログ
+          <span data-i18n="process_log_tab">Process log</span>
           <span class="process-log-badge" id="process-log-badge" style="display:none">●</span>
         </button>
       </div>
 
-      <!-- ライブ出力タブ -->
+      <!-- Live output tab -->
       <div class="ollama-inner-content" id="inner-content-live">
         <div class="ollama-panel-header">
-          <span class="ollama-panel-title">Ollamaライブ出力</span>
+          <span class="ollama-panel-title" data-i18n="ollama_live_title">Ollama live output</span>
           <div class="ollama-panel-actions">
-            <button id="ollama-thinking-toggle" class="btn btn-secondary btn-sm" title="思考トークンを表示">思考を表示</button>
-            <button id="ollama-clear-btn" class="btn btn-secondary btn-sm" title="クリア">クリア</button>
+            <button id="ollama-thinking-toggle" class="btn btn-secondary btn-sm" data-i18n="show_thinking">Show thinking</button>
+            <button id="ollama-clear-btn" class="btn btn-secondary btn-sm" data-i18n="clear_btn">Clear</button>
           </div>
         </div>
         <div id="ollama-output-normal" class="ollama-output"></div>
         <div id="ollama-output-thinking" class="ollama-output ollama-thinking hidden">
-          <div class="ollama-thinking-label">— 思考トークン —</div>
+          <div class="ollama-thinking-label">— thinking —</div>
           <div id="ollama-thinking-content"></div>
         </div>
       </div>
 
-      <!-- プロセスログタブ -->
+      <!-- Process log tab -->
       <div class="ollama-inner-content hidden" id="inner-content-processlog">
         <div class="ollama-panel-header">
-          <span class="ollama-panel-title">プロセスログ</span>
+          <span class="ollama-panel-title" data-i18n="process_log_tab">Process log</span>
           <div class="ollama-panel-actions">
-            <button id="processlog-clear-btn" class="btn btn-secondary btn-sm" title="ログをクリア">クリア</button>
+            <button id="processlog-clear-btn" class="btn btn-secondary btn-sm" data-i18n="clear_btn">Clear</button>
           </div>
         </div>
-        <!-- フェーズタイムライン -->
+        <!-- Phase timeline -->
         <div id="process-phase-list" class="process-phase-list"></div>
-        <!-- プロンプトプレビュー（折りたたみ可能） -->
+        <!-- Prompt preview (collapsible) -->
         <details class="prompt-preview-details" id="prompt-preview-details" style="display:none">
           <summary class="prompt-preview-summary">
-            送信プロンプトのプレビュー
+            <span data-i18n="prompt_preview_summary">Sent prompt preview</span>
             <span id="prompt-token-badge" class="prompt-token-badge"></span>
           </summary>
           <pre id="prompt-preview-content" class="prompt-preview-content"></pre>
@@ -207,22 +205,22 @@
     </div>
   </div>
 
-  <!-- ファイル内容モーダル -->
+  <!-- File content modal -->
   <div class="modal-overlay" id="file-modal" style="display:none;">
     <div class="modal">
       <div class="modal-header">
-        <span id="modal-title">ファイル内容</span>
+        <span id="modal-title" data-i18n="file_content_title">File content</span>
         <button class="modal-close" id="modal-close">✕</button>
       </div>
       <div class="modal-content" id="modal-content"></div>
     </div>
   </div>
 
-  <!-- 生成ログモーダル -->
+  <!-- Generation log modal -->
   <div class="modal-overlay" id="logs-modal" style="display:none;">
     <div class="modal">
       <div class="modal-header">
-        <span>生成ログ & トークン使用量</span>
+        <span data-i18n="gen_log_modal_title">Generation logs &amp; token usage</span>
         <button class="modal-close" id="logs-modal-close">✕</button>
       </div>
       <div class="modal-content">
@@ -230,12 +228,12 @@
         <table class="resume-file-table" id="logs-table">
           <thead>
             <tr>
-              <th>日時</th>
-              <th>モデル</th>
-              <th>操作</th>
-              <th>推定トークン</th>
-              <th>時間(ms)</th>
-              <th>状態</th>
+              <th data-i18n="log_col_date">Date</th>
+              <th data-i18n="log_col_model">Model</th>
+              <th data-i18n="log_col_operation">Operation</th>
+              <th data-i18n="log_col_tokens">Est. tokens</th>
+              <th data-i18n="log_col_time">Time (ms)</th>
+              <th data-i18n="log_col_status">Status</th>
             </tr>
           </thead>
           <tbody id="logs-tbody"></tbody>
@@ -244,16 +242,17 @@
     </div>
   </div>
 
-  <!-- 右クリックコンテキストメニュー -->
+  <!-- Right-click context menu -->
   <div class="context-menu" id="context-menu" style="display:none;">
     <ul>
-      <li data-action="view">ファイル内容を表示</li>
-      <li data-action="edit-file">✏ 直接編集</li>
-      <li data-action="regenerate">このファイルを再生成</li>
-      <li data-action="explain-file">このファイルを説明</li>
+      <li data-action="view" data-i18n="ctx_menu_view">View file content</li>
+      <li data-action="edit-file" data-i18n="ctx_menu_edit">✏ Direct edit</li>
+      <li data-action="regenerate" data-i18n="ctx_menu_regen">Regenerate this file</li>
+      <li data-action="explain-file" data-i18n="ctx_menu_explain">Explain this file</li>
     </ul>
   </div>
 
+  <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
   <script src="{{ url_for('static', filename='js/purify.min.js') }}"></script>
   <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
   <script>

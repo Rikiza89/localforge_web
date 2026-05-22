@@ -111,7 +111,7 @@ const OllamaPanel = (() => {
     const el = _thinkingEl();
     const btn = document.getElementById("ollama-thinking-toggle");
     if (el) el.classList.toggle("hidden", !_thinkingVisible);
-    if (btn) btn.textContent = _thinkingVisible ? "思考を隠す" : "思考を表示";
+    if (btn) btn.textContent = _thinkingVisible ? t("hide_thinking") : t("show_thinking");
   }
 
   function _switchInnerTab(tabName) {
@@ -379,12 +379,12 @@ function startStream(url, outputEl, handlers) {
     _idleTimer = setTimeout(() => {
       if (!_closed) {
         if (_noReconnect) {
-          console.warn("SSEアイドルタイムアウト — noReconnectのため接続を終了します");
+          console.warn("SSE idle timeout — closing (noReconnect)");
           _closed = true;
           if (es) es.close();
-          if (handlers.onError) handlers.onError("接続がタイムアウトしました。再試行してください。");
+          if (handlers.onError) handlers.onError(typeof t === "function" ? t("connection_timeout") : "Connection timed out.");
         } else {
-          console.warn("SSEアイドルタイムアウト — 再接続します");
+          console.warn("SSE idle timeout — reconnecting");
           if (es) es.close();
           es = _open();
         }
@@ -408,12 +408,12 @@ function startStream(url, outputEl, handlers) {
     source.onmessage = (event) => {
       let data;
       try { data = JSON.parse(event.data); }
-      catch (e) { console.warn("SSEデータのJSONパースエラー:", event.data); return; }
+      catch (e) { console.warn("SSE JSON parse error:", event.data); return; }
       _dispatch(data);
     };
     source.onerror = () => {
       source.close();
-      if (!_closed && handlers.onError) handlers.onError("SSE接続エラーが発生しました。");
+      if (!_closed && handlers.onError) handlers.onError(typeof t === "function" ? t("sse_error") : "SSE connection error.");
     };
     _resetIdle();
     return source;

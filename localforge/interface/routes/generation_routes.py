@@ -155,6 +155,10 @@ def stream_plan():
     max_files = _parse_int_param("max_files")
     min_files = _parse_int_param("min_files")
 
+    language = (project.config.language or "en").lower()
+    if language not in ("en", "ja", "it"):
+        language = "en"
+
     gen = generation_svc.stream_plan(
         root=root,
         model=model,
@@ -169,6 +173,7 @@ def stream_plan():
         workspace_summaries=workspace_summaries or None,
         max_files=max_files,
         min_files=min_files,
+        language=language,
     )
     return _sse_response(gen)
 
@@ -261,12 +266,16 @@ def stream_generation():
 
     root = project.root
     context_md = project_svc.get_context_md(root)
+    language = (project.config.language or "en").lower()
+    if language not in ("en", "ja", "it"):
+        language = "en"
 
     gen = generation_svc.stream_all_files(
         root=root,
         plan=plan,
         model=model,
         context_md=context_md,
+        language=language,
     )
 
     def _update_ctx():
@@ -350,6 +359,9 @@ def stream_resume_generation():
     context_md = project_svc.get_context_md(root)
     progress = project_svc.get_generation_progress(root)
     start_from = progress.get("start_from", 0)
+    language = (project.config.language or "en").lower()
+    if language not in ("en", "ja", "it"):
+        language = "en"
 
     gen = generation_svc.stream_all_files(
         root=root,
@@ -357,6 +369,7 @@ def stream_resume_generation():
         model=model,
         context_md=context_md,
         start_from=start_from,
+        language=language,
     )
 
     def _update_ctx():
@@ -430,8 +443,10 @@ def regenerate_file():
 
     root = project.root
     context_md = project_svc.get_context_md(root)
+    language = (project.config.language or "en").lower()
+    if language not in ("en", "ja", "it"):
+        language = "en"
 
-    # プランを読み込み、ファイルが含まれていない場合はインデックスから合成する
     plan = project_svc.load_generation_plan(root)
     if not plan or not any(f.path == file_path for f in plan.files):
         plan = _synthesize_plan_for_file(root, file_path)
@@ -442,6 +457,7 @@ def regenerate_file():
         model=model,
         context_md=context_md,
         file_path=file_path,
+        language=language,
     )
 
     def _update_ctx():

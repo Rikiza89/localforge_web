@@ -14,6 +14,7 @@ from flask import Blueprint, current_app, jsonify, request
 from localforge.application.project_service import ProjectService
 from localforge.domain.exceptions import LocalForgeError
 from localforge.infrastructure.ollama_client import OllamaClient
+from localforge.interface.messages import msg
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ def open_project():
         "banner": banner_messages.get(mode, ""),
         "file_tree": [_node_to_dict(n) for n in project.file_tree],
         "model": project.config.model,
+        "language": project.config.language or "en",
     })
 
 
@@ -503,6 +505,35 @@ def get_pinned():
         return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
 
     return jsonify({"pinned": project_svc.get_pinned_context(project.root)})
+
+
+@bp.route("/language", methods=["POST"])
+def set_language():
+    """
+    Set the project language (en | ja | it) and persist to config.json.
+
+    Request JSON:
+        language (str): language code
+
+    Response JSON:
+        language: saved language code
+    """
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "No project is open"}), 400
+
+    data = request.get_json(silent=True) or {}
+    language = data.get("language", "").strip().lower()
+    if language not in ("en", "ja", "it"):
+        return jsonify({"error": "InvalidLanguage", "message": "Use: en, ja, it"}), 400
+
+    try:
+        project.config.language = language
+        project_svc.save_config(project.root, project.config)
+        return jsonify({"language": language})
+    except Exception as exc:
+        return _error_response(exc)
 
 
 @bp.route("/pinned", methods=["POST"])

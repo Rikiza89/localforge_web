@@ -48,10 +48,10 @@ function _applyRagButtonState(ragReady) {
   const migrateBtn = document.getElementById("migrate-vector-btn");
   if (!buildBtn) return;
   if (ragReady) {
-    buildBtn.textContent = "⚙ RAG再インデックス";
+    buildBtn.textContent = t("rag_reindex");
     if (migrateBtn) migrateBtn.style.display = "none";
   } else {
-    buildBtn.textContent = "⚙ インデックス構築";
+    buildBtn.textContent = t("build_index_btn");
     if (migrateBtn) { migrateBtn.style.display = ""; migrateBtn.disabled = false; }
   }
 }
@@ -121,7 +121,7 @@ function _setCheckpoint(hash) {
   if (badge) {
     badge.textContent = hash;
     badge.style.display = "";
-    badge.title = `チェックポイント: ${hash} — ロールバック可能`;
+    badge.title = t("checkpoint_title", { hash });
   }
   if (rollbackBtn) rollbackBtn.style.display = "";
 }
@@ -150,20 +150,20 @@ async function _loadCheckpointFromServer() {
 
 async function _doRollback() {
   if (!_lastCheckpointHash) return;
-  if (!confirm(`チェックポイント ${_lastCheckpointHash} にロールバックしますか？\n⚠ この操作は元に戻せません。`)) return;
+  if (!confirm(t("rollback_confirm", { hash: _lastCheckpointHash }))) return;
   try {
     const res = await apiRequest("/api/git/rollback", "POST", { hash: _lastCheckpointHash });
     if (res.ok) {
-      showAlert(`ロールバック完了: ${_lastCheckpointHash}`, "success");
+      showAlert(t("rollback_done_msg", { hash: _lastCheckpointHash }), "success");
       _clearCheckpoint();
       refreshFileTree();
       refreshContextPanel();
       refreshGitLog();
     } else {
-      showAlert(`ロールバック失敗: ${res.message}`, "error");
+      showAlert(t("rollback_fail_msg", { msg: res.message }), "error");
     }
   } catch (err) {
-    showAlert(`ロールバックエラー: ${err.message}`, "error");
+    showAlert(t("rollback_error_msg", { msg: err.message }), "error");
   }
 }
 
@@ -233,7 +233,7 @@ function _resetProjectUI() {
 }
 
 async function openProject(pathOverride = null) {
-  updateStatusBar("フォルダを選択中...");
+  updateStatusBar(t("folder_selecting"));
   try {
     const body = pathOverride ? { path: pathOverride } : null;
     const data = await apiRequest("/api/project/open", "POST", body);
@@ -290,24 +290,29 @@ async function openProject(pathOverride = null) {
     // チェックポイント状態を復元
     await _loadCheckpointFromServer();
 
-    // ステータスバーを更新
+    // Sync i18n to project language
+    if (data.language && typeof initI18n === "function") {
+      initI18n(data.language);
+      const langSel = document.getElementById("lang-select");
+      if (langSel) langSel.value = data.language;
+      const reportLangSel = document.getElementById("report-language-select");
+      if (reportLangSel) reportLangSel.value = data.language;
+    }
+
     await refreshProjectStatus();
-    updateStatusBar(`プロジェクトを開きました: ${data.project_root}`);
+    updateStatusBar(t("project_opened_prefix") + data.project_root);
 
   } catch (err) {
     if (err.message && err.message.includes("NoFolderSelected")) {
-      // ネイティブダイアログが使えない環境（Docker等）ではパス入力にフォールバック
-      const typed = prompt(
-        "フォルダのパスを入力してください:\n例: /projects/my-app"
-      );
+      const typed = prompt(t("folder_path_prompt"));
       if (typed && typed.trim()) {
         await openProject(typed.trim());
       } else {
-        updateStatusBar("フォルダ選択がキャンセルされました");
+        updateStatusBar(t("folder_cancelled"));
       }
     } else {
-      showAlert(`プロジェクトを開けませんでした: ${err.message}`, "error");
-      updateStatusBar("エラーが発生しました");
+      showAlert(`${t("error_occurred")}: ${err.message}`, "error");
+      updateStatusBar(t("error_occurred"));
     }
   }
 }
@@ -327,7 +332,7 @@ async function refreshProjectStatus() {
       gitEl.textContent = `⎇ ${data.git_branch} ✓`;
     }
   } catch (e) {
-    console.warn("ステータス更新エラー:", e.message);
+    console.warn("Status update error:", e.message);
   }
 }
 
@@ -345,13 +350,13 @@ async function refreshContextPanel() {
     console.warn("コンテキスト更新エラー:", e.message);
   }
 
-  // ProjectIndexサマリー
+  // ProjectIndex summary
   try {
     const summary = await apiRequest("/api/explain/summary");
     const summaryEl = document.getElementById("index-summary");
     if (summaryEl) {
       summaryEl.innerHTML = `
-        <div class="index-stat"><span>ファイル数</span><span>${summary.indexed_files} / ${summary.total_files}</span></div>
+        <div class="index-stat"><span>${t("files_stat_label")}</span><span>${summary.indexed_files} / ${summary.total_files}</span></div>
         <div class="index-stat" style="margin-top:6px; color:var(--text-muted); font-size:11px;">${(summary.summary || "").slice(0, 120)}...</div>
       `;
     }
@@ -360,7 +365,7 @@ async function refreshContextPanel() {
     _indexBuilt = true;
     _applyRagButtonState(summary.rag_ready === true);
   } catch (e) {
-    // インデックスが存在しない場合はスキップ
+    // skip if no index
   }
 }
 
@@ -375,7 +380,7 @@ async function refreshGitLog() {
 
     const commits = data.commits || [];
     if (commits.length === 0) {
-      logEl.innerHTML = '<div class="empty-state">コミットなし</div>';
+      logEl.innerHTML = `<div class="empty-state">${t("no_commits")}</div>`;
       return;
     }
 
@@ -406,7 +411,7 @@ async function loadModels() {
     const models = data.models || [];
 
     select.innerHTML = models.length === 0
-      ? '<option value="">モデルなし（Ollamaを起動してください）</option>'
+      ? `<option value="">${t("model_none")}</option>`
       : models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
 
     // 現在の選択を反映
@@ -415,7 +420,7 @@ async function loadModels() {
       if (status.model) select.value = status.model;
     }
   } catch (err) {
-    select.innerHTML = '<option value="">Ollama接続エラー</option>';
+    select.innerHTML = `<option value="">${t("model_error")}</option>`;
   }
 }
 
@@ -426,20 +431,16 @@ async function checkOllamaHealth() {
   try {
     const data = await apiRequest("/api/project/ollama-status");
     if (!data.available) {
-      _showOllamaWarning(data.error || "Ollamaサーバーに接続できません。");
+      _showOllamaWarning(data.error || t("ollama_not_connected"));
       return;
     }
     if (data.models.length === 0) {
-      _showOllamaWarning(
-        "Ollamaは起動していますがモデルがありません。" +
-        " ターミナルで ollama pull <モデル名> を実行してください。"
-      );
+      _showOllamaWarning(t("ollama_no_models"));
       return;
     }
-    // 正常: ステータスバーにモデル数を表示
-    updateStatusBar(`Ollama OK — ${data.models.length} モデル利用可能`);
+    updateStatusBar(t("ollama_ok", { n: data.models.length }));
   } catch (err) {
-    _showOllamaWarning("Ollamaヘルスチェックに失敗しました: " + err.message);
+    _showOllamaWarning(t("ollama_health_error") + ": " + err.message);
   }
 }
 
@@ -448,8 +449,8 @@ async function checkOllamaHealth() {
  * @param {string} message
  */
 function _showOllamaWarning(message) {
-  updateStatusBar("⚠ Ollama 未接続");
-  showAlert("⚠ Ollama: " + message, "error", 0); // timeout=0 → 自動消去しない
+  updateStatusBar(t("ollama_not_connected"));
+  showAlert("⚠ Ollama: " + message, "error", 0);
 }
 
 // =========================================================================
@@ -474,14 +475,14 @@ async function _syncModelToProject() {
  */
 async function generatePlan() {
   if (!_currentProjectRoot) {
-    showAlert("先にフォルダを開いてください。", "warning");
+    showAlert(t("open_folder_first"), "warning");
     return;
   }
 
   const promptEl = document.getElementById("generate-prompt");
   const prompt = promptEl ? promptEl.value.trim() : "";
   if (!prompt) {
-    showAlert("プロンプトを入力してください。", "warning");
+    showAlert(t("enter_prompt"), "warning");
     return;
   }
 
@@ -497,9 +498,8 @@ async function generatePlan() {
   }
 
   _currentPlanText = "";
-  updateStatusBar("プランを生成中...");
+  updateStatusBar(t("plan_generating"));
 
-  // UIで選択中のモデルをプロジェクト設定に同期する
   await _syncModelToProject();
 
   // Read optional file-count hints
@@ -522,16 +522,15 @@ async function generatePlan() {
         _unlockUI();
         if (planStream) planStream.style.display = "none";
         renderPlanTree(_currentPlanText);
-        updateStatusBar("プラン生成完了");
+        updateStatusBar(t("plan_done"));
 
-        // JSONエディタに内容をセット
         const textarea = document.getElementById("plan-json-textarea");
         if (textarea) textarea.value = _currentPlanText;
       },
       onError: (err) => {
         _unlockUI();
-        showAlert(`プラン生成エラー: ${err}`, "error");
-        updateStatusBar("エラーが発生しました");
+        showAlert(`${t("plan_done")} error: ${err}`, "error");
+        updateStatusBar(t("error_occurred"));
       },
     }
   );
@@ -627,9 +626,9 @@ async function approvePlanAndGenerate() {
 
   try {
     const data = await apiRequest("/api/generate/approve", "POST", { plan_json: planJson });
-    showAlert(`プランを承認しました: ${data.plan.file_count}ファイル`, "success");
+    showAlert(`${t("approve_btn")}: ${data.plan.file_count} files`, "success");
   } catch (err) {
-    showAlert(`プラン承認エラー: ${err.message}`, "error");
+    showAlert(`${t("error_occurred")}: ${err.message}`, "error");
     return;
   }
 
@@ -644,21 +643,19 @@ async function approvePlanAndGenerate() {
   if (genSection) genSection.style.display = "flex";
   if (genStream) genStream.textContent = "";
 
-  updateStatusBar("ファイルを生成中...");
+  updateStatusBar(t("files_generating"));
 
-  // UIで選択中のモデルをプロジェクト設定に同期する
   await _syncModelToProject();
 
-  // 新ブランチで生成するか確認
   const branchToggle = document.getElementById("gen-branch-toggle");
   if (branchToggle && branchToggle.checked) {
     try {
       const branchRes = await apiRequest("/api/git/branch", "POST", {});
       if (branchRes.branch) {
-        showAlert(`新ブランチ「${branchRes.branch}」で生成します`, "success", 3000);
+        showAlert(`Branch: ${branchRes.branch}`, "success", 3000);
       }
     } catch (e) {
-      console.warn("ブランチ作成エラー:", e.message);
+      console.warn("Branch creation error:", e.message);
     }
   }
 
@@ -673,8 +670,7 @@ async function approvePlanAndGenerate() {
       if (progressLabel) {
         progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
       }
-      updateStatusBar(`生成中: ${currentFile} (${done}/${total})`);
-      // Clear the output area for each new file so tokens don't accumulate across files
+      updateStatusBar(t("gen_progress_status", { file: currentFile, done, total }));
       if (genStream) genStream.textContent = "";
       if (genFileHeader && currentFile) {
         genFileHeader.style.display = "flex";
@@ -708,8 +704,8 @@ async function approvePlanAndGenerate() {
     },
     onDone: () => {
       _unlockUI();
-      updateStatusBar("ファイル生成完了");
-      showAlert("すべてのファイルを生成しました！", "success");
+      updateStatusBar(t("files_done"));
+      showAlert(t("files_all_done"), "success");
       if (genSection) genSection.style.display = "none";
       refreshFileTree();
       refreshContextPanel();
@@ -717,8 +713,8 @@ async function approvePlanAndGenerate() {
     },
     onError: (err) => {
       _unlockUI();
-      showAlert(`生成エラー: ${err}`, "error");
-      updateStatusBar("エラーが発生しました");
+      showAlert(`${t("error_occurred")}: ${err}`, "error");
+      updateStatusBar(t("error_occurred"));
     },
   });
   _lockUI(() => _es.close());
@@ -734,7 +730,7 @@ async function approvePlanAndGenerate() {
  */
 async function buildIndex() {
   if (!_currentProjectRoot) {
-    showAlert("先にフォルダを開いてください。", "warning");
+    showAlert(t("open_folder_first"), "warning");
     return;
   }
 
@@ -746,7 +742,7 @@ async function buildIndex() {
   const reportBtn = document.getElementById("generate-report-btn");
 
   if (progressContainer) progressContainer.style.display = "block";
-  updateStatusBar("インデックスを構築中...");
+  updateStatusBar(t("index_building"));
 
   const _es = startStream("/api/explain/index", null, {
     onProgress: (done, total, currentFile) => {
@@ -757,10 +753,10 @@ async function buildIndex() {
       if (progressLabel) {
         progressLabel.textContent = total > 0
           ? `${done} / ${total}: ${currentFile}`
-          : "インデックス構築中...";
+          : t("indexing_label");
       }
       if (total > 0 && currentFile) {
-        updateStatusBar(`インデックス構築中: ${currentFile} (${done}/${total})`);
+        updateStatusBar(t("index_progress_status", { file: currentFile, done, total }));
       }
     },
     onDone: async () => {
@@ -770,30 +766,28 @@ async function buildIndex() {
       const histBtn = document.getElementById("report-history-btn");
       if (histBtn) histBtn.disabled = false;
       _indexBuilt = true;
-      updateStatusBar("インデックス構築完了");
+      updateStatusBar(t("index_done"));
       _applyRagButtonState(true);
       refreshContextPanel();
       await _loadReportSections();
       _initSectionSelector();
 
-      // セクション選択パネルを表示
       const sectionPanel = document.getElementById("section-selector-panel");
       if (sectionPanel) sectionPanel.style.display = "";
 
-      // 保存済みレポートがあればロードしてQ&Aをそのまま有効化する
       const hasReport = await loadSavedReport();
       if (hasReport) {
         enableChat();
-        showAlert("インデックス完了 — 保存済みレポートを読み込みました。Q&Aで質問できます。", "success");
+        showAlert(t("index_complete_with_report"), "success");
       } else {
-        showAlert("インデックスが完成しました。「レポート生成」を押してください。", "success");
+        showAlert(t("index_complete_no_report"), "success");
       }
     },
     onError: (err) => {
       _unlockUI();
       if (progressContainer) progressContainer.style.display = "none";
-      showAlert(`インデックス構築エラー: ${err}`, "error");
-      updateStatusBar("エラーが発生しました");
+      showAlert(`${t("index_done")} error: ${err}`, "error");
+      updateStatusBar(t("error_occurred"));
     },
   });
   _lockUI(() => _es.close());
@@ -804,7 +798,7 @@ async function buildIndex() {
  */
 async function migrateVectorIndex() {
   if (!_currentProjectRoot) {
-    showAlert("先にフォルダを開いてください。", "warning");
+    showAlert(t("open_folder_first"), "warning");
     return;
   }
 
@@ -815,7 +809,7 @@ async function migrateVectorIndex() {
 
   if (progressContainer) progressContainer.style.display = "block";
   if (migrateBtn) migrateBtn.disabled = true;
-  updateStatusBar("RAGベクトルインデックス移行中...");
+  updateStatusBar(t("rag_migrating"));
 
   const _es = startStream("/api/explain/migrate-vector", null, {
     onProgress: (done, total, currentFile) => {
@@ -825,24 +819,24 @@ async function migrateVectorIndex() {
       }
       if (progressLabel) {
         progressLabel.textContent = total > 0
-          ? `RAG移行: ${done} / ${total}: ${currentFile}`
-          : "RAGベクトルインデックス移行中...";
+          ? `RAG: ${done} / ${total}: ${currentFile}`
+          : t("rag_migrating");
       }
       if (total > 0 && currentFile) {
-        updateStatusBar(`RAG移行中: ${currentFile} (${done}/${total})`);
+        updateStatusBar(t("index_progress_status", { file: currentFile, done, total }));
       }
     },
     onDone: () => {
       _unlockUI();
       if (progressContainer) progressContainer.style.display = "none";
-      updateStatusBar("RAGベクトルインデックス移行完了");
-      showAlert("RAG移行完了 — セマンティック検索が有効になりました。", "success");
+      updateStatusBar(t("rag_done"));
+      showAlert(t("rag_done"), "success");
     },
     onError: (err) => {
       _unlockUI();
       if (progressContainer) progressContainer.style.display = "none";
-      showAlert(`RAG移行エラー: ${err}`, "error");
-      updateStatusBar("エラーが発生しました");
+      showAlert(`${t("error_occurred")}: ${err}`, "error");
+      updateStatusBar(t("error_occurred"));
     },
   });
   _lockUI(() => _es.close());
@@ -984,20 +978,20 @@ function _updateSavedPlanBanner(plan, progress) {
   const hasPartialProgress = isApproved && completed > 0 && !isComplete;
 
   if (isComplete) {
-    if (bannerText) bannerText.textContent = `プランは完了しています（全${total}ファイル生成済み）。新しいプロンプトを入力してください。`;
+    if (bannerText) bannerText.textContent = t("plan_complete_msg", { total });
     if (bannerActions) bannerActions.style.display = "none";
   } else if (hasPartialProgress) {
-    if (bannerText) bannerText.textContent = `生成が中断されています（${completed}/${total} 完了）。続きから再開するか、最初から生成できます。`;
+    if (bannerText) bannerText.textContent = t("plan_interrupted_msg", { done: completed, total });
     if (resumeBtn) resumeBtn.style.display = "";
-    if (restartBtn) { restartBtn.style.display = ""; restartBtn.textContent = "▶ 最初から生成"; }
+    if (restartBtn) { restartBtn.style.display = ""; restartBtn.textContent = t("restart_gen_btn"); }
     if (bannerActions) bannerActions.style.display = "flex";
   } else if (isApproved) {
-    if (bannerText) bannerText.textContent = "プランが承認済みです。生成を開始するか、新しいプロンプトで再生成できます。";
+    if (bannerText) bannerText.textContent = t("plan_approved_msg");
     if (resumeBtn) resumeBtn.style.display = "none";
-    if (restartBtn) { restartBtn.style.display = ""; restartBtn.textContent = "▶ 生成開始"; }
+    if (restartBtn) { restartBtn.style.display = ""; restartBtn.textContent = t("restart_gen_btn"); }
     if (bannerActions) bannerActions.style.display = "flex";
   } else {
-    if (bannerText) bannerText.textContent = "保存済みプランを読み込みました。承認して生成を続行するか、新しいプロンプトを入力してください。";
+    if (bannerText) bannerText.textContent = t("plan_loaded_msg");
     if (bannerActions) bannerActions.style.display = "none";
   }
 
@@ -1052,7 +1046,7 @@ async function _runSavedPlan(endpoint, statusText, successText) {
     onDone: () => {
       _unlockUI();
       updateStatusBar(successText);
-      showAlert("すべてのファイルを生成しました！", "success");
+      showAlert(t("files_all_done"), "success");
       if (genSection) genSection.style.display = "none";
       refreshFileTree();
       refreshContextPanel();
@@ -1060,34 +1054,27 @@ async function _runSavedPlan(endpoint, statusText, successText) {
     },
     onError: (err) => {
       _unlockUI();
-      showAlert(`エラー: ${err}`, "error");
-      updateStatusBar("エラーが発生しました");
+      showAlert(`${t("error_occurred")}: ${err}`, "error");
+      updateStatusBar(t("error_occurred"));
     },
   });
   _lockUI(() => _es.close());
   _cancelGenStream = _es;
 }
 
-/**
- * 保存済みプランの生成を続きから再開する（前回中断した箇所から）。
- */
 async function _resumeFromSavedPlan() {
-  await _runSavedPlan("/api/generate/resume", "生成を再開中...", "生成再開完了");
+  await _runSavedPlan("/api/generate/resume", t("resuming_status"), t("resume_done"));
 }
 
-/**
- * 保存済みプランの生成を最初から（全ファイル）やり直す。
- */
 async function _restartFromSavedPlan() {
-  await _runSavedPlan("/api/generate/start", "ファイルを生成中...", "ファイル生成完了");
+  await _runSavedPlan("/api/generate/start", t("files_generating"), t("files_done"));
 }
 
 function _showPartialBanner(done, total) {
   const banner = document.getElementById("report-partial-banner");
   const text = document.getElementById("report-partial-text");
   if (banner) banner.style.display = "flex";
-  if (text) text.textContent = `部分レポート: ${done}/${total} セクション完了 — 残りを生成するか最初から再生成できます。`;
-  // resume_from をグローバルに記憶
+  if (text) text.textContent = t("partial_report_msg", { done, total });
   window._reportResumeFrom = done;
 }
 
@@ -1118,7 +1105,7 @@ function generateReport(opts = {}) {
 
   let currentSectionEl = null;
   const _renderedSections = new Set();
-  updateStatusBar("レポートを生成中...");
+  updateStatusBar(t("report_generating"));
 
   // SSEエンドポイントにパラメータを付加
   const params = new URLSearchParams();
@@ -1142,13 +1129,11 @@ function generateReport(opts = {}) {
     onSection: (name, idx, total) => {
       if (!reportOutput) return;
 
-      const countStr = (idx && total) ? ` (${idx}/${total})` : "";
-      updateStatusBar(`レポート生成中: ${name}${countStr}`);
+      updateStatusBar(idx && total ? t("report_section_status", { name, idx, total }) : `${t("report_generating")}: ${name}`);
 
       if (_renderedSections.has(name)) {
-        // 重複セクション = 予期しない再接続。安全に終了。
         _ctrl.close();
-        showAlert("予期しないストリーム再起動を検出しました。「続きから生成」で再試行できます。", "warning");
+        showAlert(t("report_regen_stream_error"), "warning");
         _unlockUI();
         return;
       }
@@ -1175,20 +1160,19 @@ function generateReport(opts = {}) {
       }
     },
     onProgress: (done, total, currentFile) => {
-      updateStatusBar(`レポート生成中: ${currentFile} ✓ (${done}/${total})`);
+      updateStatusBar(t("report_section_status", { name: currentFile, idx: done, total }) + " ✓");
     },
     onDone: () => {
       _unlockUI();
-      updateStatusBar("レポート生成完了");
-      showAlert("レポートが完成しました！Q&Aで質問できます。", "success");
+      updateStatusBar(t("report_done"));
+      showAlert(t("report_complete"), "success");
       _hideSavedReportBanner();
       enableChat();
     },
     onError: (err) => {
       _unlockUI();
-      showAlert(`レポート生成エラー: ${err}`, "error");
-      updateStatusBar("エラーが発生しました");
-      // 部分的に保存されたレポートを再ロードしてバナーを更新
+      showAlert(`${t("error_occurred")}: ${err}`, "error");
+      updateStatusBar(t("error_occurred"));
       loadSavedReport();
     },
   });
@@ -1250,7 +1234,7 @@ async function loadResumeState() {
     }
 
   } catch (err) {
-    showAlert(`再開状態の読み込みエラー: ${err.message}`, "error");
+    showAlert(`${t("resume_state_error")}: ${err.message}`, "error");
   }
 }
 
@@ -1266,9 +1250,8 @@ async function continueGeneration() {
   if (genSection) genSection.style.display = "flex";
   if (genStream) genStream.textContent = "";
 
-  updateStatusBar("生成を再開中...");
+  updateStatusBar(t("resuming_status"));
 
-  // UIで選択中のモデルをプロジェクト設定に同期する
   await _syncModelToProject();
 
   const _es = startStream("/api/generate/resume", genStream, {
@@ -1280,21 +1263,21 @@ async function continueGeneration() {
       if (progressLabel) {
         progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
       }
-      updateStatusBar(`再開中: ${currentFile} (${done}/${total})`);
+      updateStatusBar(t("resume_progress_status", { file: currentFile, done, total }));
       if (genStream) genStream.textContent = "";
     },
     onFileWritten: () => refreshFileTree(),
     onDone: () => {
       _unlockUI();
-      updateStatusBar("生成再開完了");
-      showAlert("すべてのファイルを生成しました！", "success");
+      updateStatusBar(t("resume_done"));
+      showAlert(t("files_all_done"), "success");
       if (genSection) genSection.style.display = "none";
       refreshFileTree();
     },
     onError: (err) => {
       _unlockUI();
-      showAlert(`再開エラー: ${err}`, "error");
-      updateStatusBar("エラーが発生しました");
+      showAlert(`${t("error_occurred")}: ${err}`, "error");
+      updateStatusBar(t("error_occurred"));
     },
   });
   _lockUI(() => _es.close());
@@ -1319,7 +1302,7 @@ async function loadCpuThreadInfo() {
     const coreLbl = document.getElementById("cpu-core-label");
 
     if (maxLbl)  maxLbl.textContent  = _cpuCount;
-    if (coreLbl) coreLbl.textContent = `${_cpuCount} コア`;
+    if (coreLbl) coreLbl.textContent = `${_cpuCount} core`;
     if (slider) {
       slider.max   = _cpuCount;
       slider.value = data.num_thread ?? _cpuCount;
@@ -1340,12 +1323,12 @@ function _updateCpuUI(numThread) {
   const valueEl = document.getElementById("cpu-slider-value");
 
   if (numThread === null || numThread === undefined) {
-    if (badge)   { badge.textContent = "自動"; badge.className = "cpu-thread-badge"; }
-    if (valueEl) valueEl.textContent = "自動設定";
+    if (badge)   { badge.textContent = t("cpu_auto"); badge.className = "cpu-thread-badge"; }
+    if (valueEl) valueEl.textContent = t("cpu_auto");
   } else {
     const pct = Math.round((numThread / _cpuCount) * 100);
-    if (badge)   { badge.textContent = `${numThread} スレッド`; badge.className = "cpu-thread-badge active"; }
-    if (valueEl) valueEl.textContent = `${numThread} スレッド (${pct}%)`;
+    if (badge)   { badge.textContent = `${numThread} thr`; badge.className = "cpu-thread-badge active"; }
+    if (valueEl) valueEl.textContent = `${numThread} thr (${pct}%)`;
   }
 }
 
@@ -1358,12 +1341,12 @@ async function applyCpuThread(numThread) {
     const data = await apiRequest("/api/project/num-thread", "POST", { num_thread: numThread });
     _updateCpuUI(data.num_thread);
     const msg = data.num_thread !== null
-      ? `CPUスレッドを ${data.num_thread} に設定しました`
-      : "CPUスレッドを自動設定に戻しました";
+      ? `${t("cpu_applied")}: ${data.num_thread}`
+      : t("cpu_auto_set");
     updateStatusBar(msg);
     showAlert(msg, "success", 3000);
   } catch (err) {
-    showAlert(`CPUスレッド設定エラー: ${err.message}`, "error");
+    showAlert(`${t("error_occurred")}: ${err.message}`, "error");
   }
 }
 
@@ -1424,7 +1407,7 @@ function _updateSectionCount() {
   const checkboxes = document.querySelectorAll("#section-checkboxes input[type=checkbox]");
   const checked = Array.from(checkboxes).filter(cb => cb.checked).length;
   const badge = document.getElementById("section-selector-count");
-  if (badge) badge.textContent = `${checked}/${REPORT_SECTIONS.length} 選択中`;
+  if (badge) badge.textContent = t("sections_selected_badge", { checked, total: REPORT_SECTIONS.length });
 }
 
 /** チェック済みセクションのインデックスを返す。全選択の場合はnullを返す。 */
@@ -1444,13 +1427,13 @@ async function openReportHistory() {
 
   const list = document.getElementById("history-panel-list");
   if (!list) return;
-  list.innerHTML = "<p>読み込み中...</p>";
+  list.innerHTML = `<p>${t("history_loading")}</p>`;
 
   try {
     const data = await apiRequest("/api/explain/report-history");
     const history = data.history || [];
     if (history.length === 0) {
-      list.innerHTML = "<p class='history-empty'>履歴がありません。</p>";
+      list.innerHTML = `<p class='history-empty'>${t("history_empty_p")}</p>`;
       return;
     }
     list.innerHTML = "";
@@ -1460,7 +1443,7 @@ async function openReportHistory() {
       item.dataset.id = entry.id;
 
       const date = new Date(entry.created_at).toLocaleString();
-      const badge = entry.partial ? " <span class='badge-partial'>部分</span>" : "";
+      const badge = entry.partial ? ` <span class='badge-partial'>${t("history_partial_badge")}</span>` : "";
       const sections = `${entry.sections_done}/${entry.sections_total}`;
 
       item.innerHTML = `
@@ -1469,11 +1452,11 @@ async function openReportHistory() {
         </label>
         <div class="history-item-body">
           <div class="history-item-date">${date}${badge}</div>
-          <div class="history-item-meta">モデル: ${escapeHtml(entry.model || "不明")} | ${sections}セクション</div>
+          <div class="history-item-meta">${t("history_model_prefix")}${escapeHtml(entry.model || "?")} | ${sections}${t("history_sections_suffix")}</div>
         </div>
         <div class="history-item-actions">
-          <button class="btn btn-sm btn-secondary history-load-btn" data-id="${entry.id}">読込</button>
-          <button class="btn btn-sm btn-ghost history-delete-btn" data-id="${entry.id}" title="削除">✕</button>
+          <button class="btn btn-sm btn-secondary history-load-btn" data-id="${entry.id}">${t("history_load_btn")}</button>
+          <button class="btn btn-sm btn-ghost history-delete-btn" data-id="${entry.id}">✕</button>
         </div>
       `;
       list.appendChild(item);
@@ -1492,7 +1475,7 @@ async function openReportHistory() {
 
     _updateCompareButton();
   } catch (e) {
-    list.innerHTML = `<p class='history-empty'>エラー: ${escapeHtml(e.message)}</p>`;
+    list.innerHTML = `<p class='history-empty'>${t("error_occurred")}: ${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -1509,20 +1492,20 @@ async function _loadHistoricalReport(reportId) {
     if (reportOutput) reportOutput.innerHTML = _renderMd(data.content);
     const panel = document.getElementById("report-history-panel");
     if (panel) panel.style.display = "none";
-    showAlert("履歴レポートを読み込みました。", "success", 3000);
+    showAlert(t("history_loaded"), "success", 3000);
   } catch (e) {
-    showAlert(`レポート読込エラー: ${e.message}`, "error");
+    showAlert(`${t("error_occurred")}: ${e.message}`, "error");
   }
 }
 
 async function _deleteHistoricalReport(reportId) {
-  if (!confirm("このレポートを削除しますか？")) return;
+  if (!confirm(t("history_delete_confirm"))) return;
   try {
     await apiRequest(`/api/explain/report-history/${reportId}`, "DELETE");
-    showAlert("削除しました。", "success", 2000);
-    openReportHistory(); // 一覧を再読み込み
+    showAlert(t("deleted"), "success", 2000);
+    openReportHistory();
   } catch (e) {
-    showAlert(`削除エラー: ${e.message}`, "error");
+    showAlert(`${t("error_occurred")}: ${e.message}`, "error");
   }
 }
 
@@ -1576,8 +1559,8 @@ function _renderCompareSection(sectionsA, sectionsB, sectionName, idA, idB) {
   if (titleA) titleA.textContent = idA;
   if (titleB) titleB.textContent = idB;
 
-  if (colA) colA.innerHTML = _renderMd(sectionsA[sectionName] || "_このセクションは含まれていません_");
-  if (colB) colB.innerHTML = _renderMd(sectionsB[sectionName] || "_このセクションは含まれていません_");
+  if (colA) colA.innerHTML = _renderMd(sectionsA[sectionName] || t("compare_not_in_report"));
+  if (colB) colB.innerHTML = _renderMd(sectionsB[sectionName] || t("compare_not_in_report"));
 }
 
 /** report.md 文字列をセクション名→内容の辞書にパースする。 */
@@ -1635,11 +1618,11 @@ async function showGenerationLogs() {
       usageByModel[l.model] = (usageByModel[l.model] || 0) + (l.prompt_tokens_estimated || 0);
     });
 
-    summaryEl.innerHTML = "<strong>モデル別推定トークン使用量:</strong><br>" +
-      Object.entries(usageByModel).map(([m, t]) => `${escapeHtml(m)}: ${t} tokens`).join("<br>");
+    summaryEl.innerHTML = `<strong>${t("gen_log_by_model")}</strong><br>` +
+      Object.entries(usageByModel).map(([m, tok]) => `${escapeHtml(m)}: ${tok} tokens`).join("<br>");
 
   } catch (err) {
-    showAlert(`ログの取得に失敗しました: ${err.message}`, "error");
+    showAlert(`${t("log_fetch_error")}: ${err.message}`, "error");
   }
 }
 
@@ -1657,7 +1640,30 @@ document.addEventListener("DOMContentLoaded", async () => {
   const openBtn = document.getElementById("open-project-btn");
   if (openBtn) openBtn.addEventListener("click", openProject);
 
-  // モデル変更
+  // Language selector
+  const langSel = document.getElementById("lang-select");
+  if (langSel) {
+    langSel.addEventListener("change", async () => {
+      const lang = langSel.value;
+      if (typeof setLanguage === "function") setLanguage(lang);
+      // Sync report language selector
+      const reportLangSel = document.getElementById("report-language-select");
+      if (reportLangSel) reportLangSel.value = lang;
+      if (_currentProjectRoot) {
+        try {
+          await apiRequest("/api/project/language", "POST", { language: lang });
+        } catch (e) {
+          console.warn("Language save error:", e.message);
+        }
+      }
+      // Re-apply dynamic labels that use t()
+      _applyRagButtonState(_indexBuilt);
+      _updateSectionCount();
+      updateStatusBar(t("ready_status"));
+    });
+  }
+
+  // Model change
   const modelSelect = document.getElementById("model-selector");
   if (modelSelect) {
     modelSelect.addEventListener("change", async () => {
@@ -1665,29 +1671,29 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!model || !_currentProjectRoot) return;
       try {
         await apiRequest("/api/project/model", "POST", { model });
-        updateStatusBar(`モデルを変更しました: ${model}`);
+        updateStatusBar(`${t("model_changed")}: ${model}`);
       } catch (err) {
-        showAlert(`モデル変更エラー: ${err.message}`, "error");
+        showAlert(`${t("error_occurred")}: ${err.message}`, "error");
       }
     });
   }
 
-  // モデルアンロードボタン
+  // Model unload button
   const unloadBtn = document.getElementById("unload-model-btn");
   if (unloadBtn) {
     unloadBtn.addEventListener("click", async () => {
       const model = modelSelect ? modelSelect.value : null;
       if (!model) {
-        showAlert("アンロードするモデルが選択されていません。", "warning");
+        showAlert(t("model_no_selection"), "warning");
         return;
       }
       try {
-        updateStatusBar(`${model} をアンロード中...`);
+        updateStatusBar(`${model}…`);
         await apiRequest("/api/project/unload", "POST", { model });
-        updateStatusBar(`${model} をアンロードしました`);
-        showAlert(`${model} をVRAMから解放しました`, "success");
+        updateStatusBar(`${model} ${t("unload_btn")}`);
+        showAlert(`${model} ${t("unload_btn")}`, "success");
       } catch (err) {
-        showAlert(`アンロード失敗: ${err.message}`, "error");
+        showAlert(`${t("error_occurred")}: ${err.message}`, "error");
       }
     });
   }
@@ -1743,18 +1749,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (cancelGenBtn) {
     cancelGenBtn.addEventListener("click", async () => {
       await apiRequest("/api/generate/cancel", "POST");
-      updateStatusBar("生成をキャンセルしました");
+      updateStatusBar(t("cancelled"));
     });
   }
 
-  // グローバル停止ボタン
+  // Global stop button
   const globalStopBtn = document.getElementById("global-stop-btn");
   if (globalStopBtn) {
     globalStopBtn.addEventListener("click", () => {
       if (_activeCancel) _activeCancel();
       apiRequest("/api/generate/cancel", "POST").catch(() => {});
       _unlockUI();
-      updateStatusBar("生成を停止しました");
+      updateStatusBar(t("stopped"));
     });
   }
 
@@ -1771,7 +1777,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     generateReportBtn.addEventListener("click", () => {
       const indices = _getSelectedSectionIndices();
       const modelOverride = (document.getElementById("report-model-override") || {}).value || "";
-      const lang = (document.getElementById("report-language-select") || {}).value || "ja";
+      const reportLangSel = document.getElementById("report-language-select");
+      const lang = (reportLangSel && reportLangSel.value) || (typeof getLanguage === "function" ? getLanguage() : "en");
       generateReport({
         sectionIndices: indices,
         model: modelOverride || undefined,
@@ -1875,7 +1882,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (resumeCancelBtn) {
     resumeCancelBtn.addEventListener("click", async () => {
       await apiRequest("/api/generate/cancel", "POST");
-      updateStatusBar("生成をキャンセルしました");
+      updateStatusBar(t("cancelled"));
     });
   }
 
@@ -1884,20 +1891,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     modifyPlanBtn.addEventListener("click", () => switchTab("generate"));
   }
 
-  // Gitコミットボタン（ステータスバーダブルクリックで簡易コミット）
+  // Git commit (double-click status bar)
   const statusBar = document.querySelector(".status-bar");
   if (statusBar) {
     statusBar.addEventListener("dblclick", async () => {
       if (!_currentProjectRoot) return;
       try {
         const result = await apiRequest("/api/git/commit", "POST", {
-          message: "LocalForge: 変更をコミット"
+          message: "LocalForge: commit changes"
         });
-        showAlert(`コミット完了: ${result.hash}`, "success");
+        showAlert(`${t("commit_done")}: ${result.hash}`, "success");
         refreshGitLog();
         refreshProjectStatus();
       } catch (err) {
-        showAlert(`コミットエラー: ${err.message}`, "error");
+        showAlert(`${t("error_occurred")}: ${err.message}`, "error");
       }
     });
   }
@@ -1909,7 +1916,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const val = parseInt(cpuSlider.value);
       const pct = Math.round((val / _cpuCount) * 100);
       const valueEl = document.getElementById("cpu-slider-value");
-      if (valueEl) valueEl.textContent = `${val} スレッド (${pct}%)`;
+      if (valueEl) valueEl.textContent = `${val} thr (${pct}%)`;
     });
   }
 
@@ -1968,7 +1975,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Q&Aモードトグル
   if (typeof initChatModeToggle === "function") initChatModeToggle();
 
-  updateStatusBar("LocalForge 準備完了 — フォルダを開いてください");
+  updateStatusBar(t("ready_status"));
 });
 
 /**

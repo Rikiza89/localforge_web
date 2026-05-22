@@ -505,6 +505,7 @@ class ExplanationService:
         history: List[Message],
         project_index: "ProjectIndex",
         pinned_paths: Optional[List[str]] = None,
+        language: str = "en",
     ) -> Generator[dict, None, None]:
         """超高速Q&Aモード: ゼロディスクリード、サマリーのみ、レポートセクションと同等速度。"""
         import threading as _threading
@@ -548,6 +549,7 @@ class ExplanationService:
             conversation_history=history[-2:],
             pinned_contents=[(p, s) for p, s in pinned_summaries] if pinned_summaries else None,
             mode="ultra",
+            language=language,
         )
 
         yield {"prompt_preview": prompt[:500], "prompt_tokens": tokens}
@@ -599,6 +601,7 @@ class ExplanationService:
         workspace_roots: Optional[List[tuple[Path, str]]] = None,
         pinned_paths: Optional[List[str]] = None,
         mode: str = "precise",
+        language: str = "en",
     ) -> Generator[dict, None, None]:
         """
         Q&A質問への回答をSSEイベントとしてストリーミング生成する。
@@ -625,7 +628,7 @@ class ExplanationService:
             yield from self._stream_answer_ultra(
                 root=root, model=model, question=question,
                 history=history, project_index=project_index,
-                pinned_paths=pinned_paths,
+                pinned_paths=pinned_paths, language=language,
             )
             return
 
@@ -862,6 +865,7 @@ class ExplanationService:
             pinned_depth_map=_pinned_depth_map if pinned_paths else None,
             direct_pinned_set=_direct_pinned_set if pinned_paths else None,
             mode=mode,
+            language=language,
         )
 
         # プロンプトのプレビューを送信（最初の 1000 文字 + 末尾 200 文字）

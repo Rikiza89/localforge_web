@@ -73,6 +73,26 @@ def _pinned_label(path: str, depth: int, direct_pinned_set: Optional[Set[str]]) 
     return f"[AUTO-INCLUDED: transitive import (depth {depth})]"
 
 
+_SUPPORTED_LANGUAGES: frozenset[str] = frozenset({"ja", "en", "it"})
+
+
+def _lang_instruction(language: str) -> str:
+    """Return a language directive appended to prompts for non-default languages."""
+    if language == "it":
+        return (
+            "\n\n[ISTRUZIONE LINGUA]: Rispondi e genera TUTTO il contenuto in ITALIANO. "
+            "Commenti nel codice, docstring, messaggi di errore, testo dell'interfaccia utente "
+            "e qualsiasi altra stringa visibile all'utente devono essere scritti in italiano."
+        )
+    if language == "en":
+        return (
+            "\n\n[LANGUAGE INSTRUCTION]: Respond and generate ALL content in ENGLISH. "
+            "Code comments, docstrings, error messages, UI text, and any other user-visible "
+            "strings must be written in English."
+        )
+    return ""  # Japanese is the default; prompts are already written in Japanese
+
+
 class ContextService:
     """
     LLMへのコンテキスト（プロンプト）を組み立てるサービスクラス。
@@ -130,6 +150,7 @@ class ContextService:
         workspace_summaries: Optional[List[tuple[str, str]]] = None,
         max_files: Optional[int] = None,
         min_files: Optional[int] = None,
+        language: str = "ja",
     ) -> str:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
@@ -240,7 +261,7 @@ class ContextService:
             "```"
         )
 
-        prompt = "\n\n".join(parts)
+        prompt = "\n\n".join(parts) + _lang_instruction(language)
         return self._guard_budget(prompt, "generate_plan"), _estimate_tokens(prompt)
 
     def build_file_generation_prompt(
@@ -250,6 +271,7 @@ class ContextService:
         context_md: str,
         plan_json: str,
         dependency_contents: List[tuple[str, str]],
+        language: str = "ja",
     ) -> str:
         """
         個別ファイル生成のプロンプトを組み立てる。
@@ -296,7 +318,7 @@ class ContextService:
             " マークダウンのコードブロック（```）は使用せず、ファイルの内容だけを出力してください。"
         )
 
-        prompt = "\n\n".join(parts)
+        prompt = "\n\n".join(parts) + _lang_instruction(language)
         return self._guard_budget(prompt, f"generate_file:{target_file}"), _estimate_tokens(prompt)
 
     def max_chunk_chars(self) -> int:
@@ -459,6 +481,7 @@ class ContextService:
         file_path: str,
         content: str,
         extension: str,
+        language: str = "ja",
     ) -> str:
         """
         ファイルサマリー生成のプロンプトを組み立てる。
@@ -480,6 +503,7 @@ class ContextService:
             "3. 外部モジュールや他ファイルとの依存関係（インポート/エクスポート）\n"
             "4. 特筆すべきアルゴリズム、データ構造、または状態管理のロジック\n"
             "これらをマークダウン形式の箇条書きで、詳細かつ具体的に記述してください。"
+            + _lang_instruction(language)
         )
         return self._guard_budget(prompt, f"file_summary:{file_path}")
 
@@ -595,6 +619,12 @@ class ContextService:
 
         if language == "en":
             lang_rule = "- LANGUAGE: Write all content in English."
+        elif language == "it":
+            lang_rule = (
+                "- LINGUA / LANGUAGE: Scrivi TUTTO il contenuto in ITALIANO (Italian). "
+                "Write ALL output in Italian. "
+                "The guidance above is structural instruction only — your written content MUST be in Italian."
+            )
         else:
             # Bilingual — stated in both languages so the model cannot miss it
             # even after processing a long English guidance block.
@@ -664,6 +694,7 @@ class ContextService:
         top_summaries: List[tuple[str, str]],
         pinned_contents: Optional[List[tuple[str, str]]] = None,
         conversation_history: Optional[List[Message]] = None,
+        language: str = "ja",
     ) -> tuple[str, int]:
         """超高速Q&A用プロンプト。レポートセクションと同じ構造: 概要+サマリー+質問+1行指示。"""
         parts = [f"プロジェクト概要:\n{project_index_json}"]
@@ -686,6 +717,7 @@ class ContextService:
         parts.append(
             f"質問: {question}\n\n"
             "コードベースに基づいて簡潔に回答してください。具体的なファイル名・クラス名・関数名を使うこと。"
+            + _lang_instruction(language)
         )
 
         prompt = "\n\n".join(parts)
@@ -700,6 +732,7 @@ class ContextService:
         full_contents: List[tuple[str, str]],
         conversation_history: List[Message],
         pinned_contents: Optional[List[tuple[str, str]]] = None,
+        language: str = "ja",
     ) -> tuple[str, int]:
         """高速Q&A用の軽量プロンプト。whitelist・RULE 1-5・サマリー省略で最小トークン数を実現。"""
         parts = [f"プロジェクト概要:\n{project_index_json}"]
@@ -726,6 +759,7 @@ class ContextService:
             "コードベースに基づいて簡潔に回答してください。\n"
             "1. 具体的なクラス名・関数名・ファイルパスを使うこと。\n"
             "2. コンテキストにない情報は正直に述べ、推測は '[推測]' と明示すること。\n"
+            + _lang_instruction(language)
         )
         parts.append(instructions)
 
@@ -746,6 +780,7 @@ class ContextService:
         pinned_depth_map: Optional[Dict[str, int]] = None,
         direct_pinned_set: Optional[Set[str]] = None,
         mode: str = "precise",
+        language: str = "ja",
     ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
@@ -770,6 +805,7 @@ class ContextService:
                 top_summaries=top_summaries,
                 pinned_contents=pinned_contents,
                 conversation_history=conversation_history,
+                language=language,
             )
 
         # ── Fast mode: lightweight prompt — no whitelist, compact rules, minimal summaries ──
@@ -781,6 +817,7 @@ class ContextService:
                 full_contents=full_contents,
                 conversation_history=conversation_history,
                 pinned_contents=pinned_contents,
+                language=language,
             )
 
         parts = [f"プロジェクト概要:\n{project_index_json}"]
@@ -935,6 +972,8 @@ class ContextService:
 
         # 指示文 — 反ハルシネーション・パスロック・提案ルール
         instructions = (
+            _lang_instruction(language) + "\n\n" if language != "ja" else ""
+        ) + (
             f"質問: {question}\n\n"
             "=== STRICT RULES — YOU MUST FOLLOW ALL OF THESE ===\n"
             "RULE 1 — PATH LOCK: Reference ONLY file paths from the AUTHORIZED FILE PATHS list above. "

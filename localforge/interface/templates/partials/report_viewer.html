@@ -1,58 +1,61 @@
-<!-- 説明レポートとQ&Aチャットコンポーネント -->
+<!-- Explanation report and Q&A chat component -->
 <div class="report-viewer">
   <div class="workspace-header">
-    <h2>Explain — コードベース分析</h2>
+    <h2 data-i18n="explain_title">Explain — Codebase Analysis</h2>
     <div class="explain-actions">
-      <button class="btn btn-primary" id="build-index-btn">⚙ インデックス構築</button>
-      <button class="btn btn-secondary" id="migrate-vector-btn" disabled title="既存インデックスをRAGベクトル検索に移行する">
-        ⬡ RAG移行
+      <button class="btn btn-primary" id="build-index-btn" data-i18n="build_index_btn">⚙ Build index</button>
+      <button class="btn btn-secondary" id="migrate-vector-btn" disabled data-i18n="rag_migrate_btn">
+        ⬡ RAG migration
       </button>
-      <button class="btn btn-secondary" id="generate-report-btn" disabled>
-        ✦ レポート生成
+      <button class="btn btn-secondary" id="generate-report-btn" disabled data-i18n="gen_report_btn">
+        ✦ Generate report
       </button>
-      <button class="btn btn-secondary" id="report-history-btn" disabled title="過去のレポート履歴">
-        🕐 履歴
+      <button class="btn btn-secondary" id="report-history-btn" disabled data-i18n="history_btn">
+        🕐 History
       </button>
     </div>
   </div>
 
-  <!-- インデックス進捗バー（sticky） -->
+  <!-- Index progress bar (sticky) -->
   <div class="index-progress-container sticky-progress" id="index-progress-container" style="display:none;">
     <div class="progress-row">
-      <span id="index-progress-label">インデックス構築中...</span>
+      <span id="index-progress-label" data-i18n="indexing_label">Building index…</span>
       <progress id="index-progress" max="100" value="0"></progress>
     </div>
   </div>
 
-  <!-- 部分レポートバナー -->
+  <!-- Partial report banner -->
   <div id="report-partial-banner" class="report-partial-banner" style="display:none;">
     <span id="report-partial-text"></span>
     <div class="report-partial-actions">
-      <button class="btn btn-sm btn-primary" id="report-resume-btn">▶ 続きから生成</button>
-      <button class="btn btn-sm btn-secondary" id="report-regen-btn">↺ 最初から再生成</button>
+      <button class="btn btn-sm btn-primary" id="report-resume-btn">▶ Resume</button>
+      <button class="btn btn-sm btn-secondary" id="report-regen-btn">↺ Regenerate</button>
       <button class="btn btn-sm btn-ghost" id="report-partial-dismiss">✕</button>
     </div>
   </div>
 
-  <!-- セクション選択パネル -->
+  <!-- Section selector panel -->
   <details id="section-selector-panel" class="section-selector-panel" style="display:none;">
     <summary class="section-selector-summary">
-      <span>📋 生成するセクションを選択</span>
+      <span data-i18n="select_sections_summary">📋 Select sections to generate</span>
       <span id="section-selector-count" class="section-count-badge"></span>
     </summary>
     <div class="section-selector-body">
       <div class="section-selector-controls">
-        <button class="btn btn-sm btn-ghost" id="sections-select-all">すべて選択</button>
-        <button class="btn btn-sm btn-ghost" id="sections-deselect-all">すべて解除</button>
-        <label class="section-model-label">言語:
+        <button class="btn btn-sm btn-ghost" id="sections-select-all" data-i18n="select_all_btn">Select all</button>
+        <button class="btn btn-sm btn-ghost" id="sections-deselect-all" data-i18n="deselect_all_btn">Deselect all</button>
+        <label class="section-model-label">
+          <span data-i18n="language_label">Language:</span>
           <select id="report-language-select" class="report-model-select">
-            <option value="ja" selected>日本語</option>
             <option value="en">English</option>
+            <option value="ja">日本語</option>
+            <option value="it">Italiano</option>
           </select>
         </label>
-        <label class="section-model-label">モデル:
+        <label class="section-model-label">
+          <span data-i18n="model_override_label">Model:</span>
           <select id="report-model-override" class="report-model-select">
-            <option value="">プロジェクト設定を使用</option>
+            <option value="" data-i18n="model_project_default">Use project setting</option>
           </select>
         </label>
       </div>
@@ -60,62 +63,63 @@
     </div>
   </details>
 
-  <!-- レポート出力エリア -->
+  <!-- Report output area -->
   <div class="report-output" id="report-output">
     <div class="empty-state report-empty">
-      <p>「インデックス構築」を実行してからレポートを生成してください。</p>
+      <p data-i18n="report_empty_p">Run "Build index" then generate a report.</p>
     </div>
   </div>
 
-  <!-- 履歴パネル（スライドイン） -->
+  <!-- History panel (slide-in) -->
   <div id="report-history-panel" class="report-history-panel" style="display:none;">
     <div class="history-panel-header">
-      <h3>レポート履歴</h3>
-      <button class="btn btn-sm btn-ghost" id="history-panel-close">✕</button>
+      <h3 data-i18n="report_history_h3">Report history</h3>
+      <button class="btn btn-sm btn-ghost" id="history-panel-close" data-i18n="history_close_btn">✕</button>
     </div>
     <div id="history-panel-list" class="history-panel-list">
-      <p class="history-empty">履歴がありません。</p>
+      <p class="history-empty" data-i18n="history_empty_p">No history.</p>
     </div>
     <div class="history-panel-footer">
-      <button class="btn btn-sm btn-secondary" id="history-compare-btn" disabled>⇆ 選択した2件を比較</button>
+      <button class="btn btn-sm btn-secondary" id="history-compare-btn" disabled data-i18n="history_compare_btn">⇆ Compare selected (2)</button>
     </div>
   </div>
 
-  <!-- 比較ビュー -->
+  <!-- Compare view -->
   <div id="report-compare-view" class="report-compare-view" style="display:none;">
     <div class="compare-header">
-      <h3>レポート比較</h3>
+      <h3 data-i18n="report_compare_h3">Report comparison</h3>
       <div class="compare-nav">
-        <label>セクション:
+        <label>
+          <span data-i18n="compare_section_label">Section:</span>
           <select id="compare-section-select" class="compare-section-select"></select>
         </label>
       </div>
-      <button class="btn btn-sm btn-ghost" id="compare-close-btn">✕ 閉じる</button>
+      <button class="btn btn-sm btn-ghost" id="compare-close-btn" data-i18n="compare_close_btn">✕ Close</button>
     </div>
     <div class="compare-columns">
       <div class="compare-col">
-        <div class="compare-col-header" id="compare-col-a-title">レポートA</div>
+        <div class="compare-col-header" id="compare-col-a-title">Report A</div>
         <div class="compare-col-body md-body" id="compare-col-a"></div>
       </div>
       <div class="compare-divider"></div>
       <div class="compare-col">
-        <div class="compare-col-header" id="compare-col-b-title">レポートB</div>
+        <div class="compare-col-header" id="compare-col-b-title">Report B</div>
         <div class="compare-col-body md-body" id="compare-col-b"></div>
       </div>
     </div>
   </div>
 
-  <!-- Q&Aチャットエリア（レポート完了後に有効化） -->
+  <!-- Q&A chat area (activated after report is complete) -->
   <div class="chat-section" id="chat-section">
     <div class="chat-divider">
-      <span>Q&amp;A チャット</span>
+      <span data-i18n="qa_chat_span">Q&amp;A Chat</span>
     </div>
     <div class="chat-history" id="chat-history"></div>
     <div class="chat-mode-row">
-      <div class="chat-mode-toggle" id="chat-mode-toggle" title="超高速: サマリーのみ (レポートと同等速度) / 高速: 軽量ファイル読み込み / 精密: フルコンテキスト+依存関係展開">
-        <button class="chat-mode-btn active" id="chat-mode-ultra" type="button">⚡⚡ 超高速</button>
-        <button class="chat-mode-btn" id="chat-mode-fast" type="button">⚡ 高速</button>
-        <button class="chat-mode-btn" id="chat-mode-precise" type="button">🎯 精密</button>
+      <div class="chat-mode-toggle" id="chat-mode-toggle">
+        <button class="chat-mode-btn active" id="chat-mode-ultra" type="button" data-i18n="ultra_mode_btn">⚡⚡ Ultra</button>
+        <button class="chat-mode-btn" id="chat-mode-fast" type="button" data-i18n="fast_mode_btn">⚡ Fast</button>
+        <button class="chat-mode-btn" id="chat-mode-precise" type="button" data-i18n="precise_mode_btn">🎯 Precise</button>
       </div>
     </div>
     <div class="chat-input-row">
@@ -123,10 +127,10 @@
         type="text"
         id="chat-input"
         class="chat-input"
-        placeholder="このプロジェクトについて質問してください..."
+        data-i18n-placeholder="chat_placeholder"
         disabled
       >
-      <button class="btn btn-primary" id="chat-send" disabled>送信 ↵</button>
+      <button class="btn btn-primary" id="chat-send" disabled data-i18n="send_btn">Send ↵</button>
     </div>
   </div>
 </div>

@@ -173,6 +173,7 @@ class GenerationService:
         workspace_summaries: Optional[List[tuple[str, str]]] = None,
         max_files: Optional[int] = None,
         min_files: Optional[int] = None,
+        language: str = "en",
     ) -> Generator[dict, None, None]:
         """
         ユーザープロンプトからプロジェクト生成プランをストリーミング生成する。
@@ -206,6 +207,7 @@ class GenerationService:
             workspace_summaries=workspace_summaries,
             max_files=max_files,
             min_files=min_files,
+            language=language,
         )
 
         start_time = time.time()
@@ -311,6 +313,7 @@ class GenerationService:
         model: str,
         context_md: str,
         start_from: Optional[int] = None,
+        language: str = "en",
     ) -> Generator[dict, None, None]:
         """
         プランに基づいてすべてのファイルを順次生成・書き込みする。
@@ -559,6 +562,7 @@ class GenerationService:
                     context_md=context_md,
                     plan_json=plan_json,
                     dependency_contents=dependency_contents,
+                    language=language,
                 )
                 log_entry = GenerationLogEntry(
                     mode="generate", model=model, operation=operation,
@@ -630,6 +634,7 @@ class GenerationService:
         model: str,
         context_md: str,
         file_path: str,
+        language: str = "en",
     ) -> Generator[dict, None, None]:
         """
         単一ファイルを再生成してSSEでストリーミングする。
@@ -768,6 +773,7 @@ class GenerationService:
                 context_md=context_md,
                 plan_json=plan.model_dump_json(indent=2),
                 dependency_contents=dependency_contents,
+                language=language,
             )
             file_content_parts: List[str] = []
             try:

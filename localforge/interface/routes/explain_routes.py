@@ -118,9 +118,9 @@ def stream_report():
     except ValueError:
         resume_from = 0
 
-    language = request.args.get("lang", "ja").strip().lower()
-    if language not in ("ja", "en"):
-        language = "ja"
+    language = request.args.get("lang", "").strip().lower() or project.config.language or "en"
+    if language not in ("ja", "en", "it"):
+        language = "en"
 
     gen = explanation_svc.stream_report(
         root=root,
@@ -168,6 +168,9 @@ def ask_question():
         mode = "ultra"
     model = project.config.model
     root = project.root
+    language = (data.get("lang") or project.config.language or "en").strip().lower()
+    if language not in ("ja", "en", "it"):
+        language = "en"
 
     # ワークスペースプロジェクトと ピン留めコンテキストを解決して渡す
     workspace_roots = project_svc.get_workspace_roots(root)
@@ -181,6 +184,7 @@ def ask_question():
         workspace_roots=workspace_roots or None,
         pinned_paths=pinned_paths or None,
         mode=mode,
+        language=language,
     )
     return _sse_response(gen)
 
