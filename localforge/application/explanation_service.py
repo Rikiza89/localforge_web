@@ -569,20 +569,29 @@ class ExplanationService:
         # トークン予算は build_qa_prompt 内で管理する。
         pinned_chunk_contents: List[tuple[str, str]] = []
         pinned_base_chunks: List = []
+        _pinned_depth_map: dict = {}
+        _direct_pinned_set: set = set()
         if pinned_paths:
             yield {"phase": "ピン留めファイル解決中", "detail": f"{len(pinned_paths)} 件のパスを展開中"}
             yield {"status": f"ピン留めファイルを展開中... ({len(pinned_paths)} 件)"}
             try:
-                # ピン留めの場合は依存関係をより深く (max_total=40) 展開する
-                pinned_chunks, _ = self._analysis.resolve_pinned_chunks(
+                # ピン留めの場合は依存関係をより深く (max_total=40, max_depth=10) 展開する
+                pinned_chunks, _pdep, _pinned_depth_map = self._analysis.resolve_pinned_chunks(
                     root, pinned_paths, chunks, max_total=40
                 )
+                _direct_pinned_set = {p for p, d in _pinned_depth_map.items() if d == 0}
                 pinned_base_chunks = pinned_chunks
-                yield {"phase": "ピン留めファイル解決中", "detail": f"依存関係を含む {len(pinned_chunks)} ファイルを取得"}
+                yield {"phase": "ピン留めファイル解決中", "detail": f"依存関係を含む {len(pinned_chunks)} ファイルを取得 (直接: {len(_direct_pinned_set)})"}
 
                 def _read_pinned(pc):
-                    fp = root / pc.path
-                    content = self._read_file_cached(fp, max_chars=-1)  # -1 = full file
+                    depth = _pinned_depth_map.get(pc.path, 0)
+                    if depth <= 1:
+                        max_chars = -1  # full file for directly pinned and direct imports
+                    elif depth <= 4:
+                        max_chars = 6000
+                    else:
+                        max_chars = 1500
+                    content = self._read_file_cached(root / pc.path, max_chars=max_chars)
                     if content is None:
                         logger.warning("ピン留めファイル読み込みエラー: %s", pc.path)
                     return (pc.path, content) if content is not None else None
@@ -610,7 +619,7 @@ class ExplanationService:
                         return None
                     ws_chunks = ws_idx.file_chunks
                     ws_top = self._analysis.get_top_chunks_semantic(ws_chunks, question, top_n=5)
-                    ws_exp_chunks, _ = self._analysis.expand_with_dependencies(
+                    ws_exp_chunks, _, _ws_depth = self._analysis.expand_with_dependencies(
                         ws_chunks, [c.path for c in ws_top], max_total=8
                     )
                     ws_summaries = [(c.path, c.summary or "") for c in ws_exp_chunks if c.summary]
@@ -678,15 +687,16 @@ class ExplanationService:
         else:
             base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
 
-        # ── Phase E: 依存関係展開 (BFS 5 hop, カスタムインポートのみ) ──
+        # ── Phase E: 依存関係展開 (BFS 10 hop, カスタムインポートのみ) ──
         # CPU専用: max_total を絞ってプロンプトサイズを抑制する
         _dep_max = 40 if pinned_base_chunks else (10 if _is_cpu else 20)
-        yield {"phase": "依存関係展開中", "detail": f"{len(base_chunks)} ファイルから最大 {_dep_max} ファイルに展開 (5 hop BFS)"}
+        yield {"phase": "依存関係展開中", "detail": f"{len(base_chunks)} ファイルから最大 {_dep_max} ファイルに展開 (10 hop BFS)"}
         yield {"status": f"依存関係を展開中... ({len(base_chunks)} → 最大 {_dep_max} ファイル)"}
-        top_chunks, dep_map = self._analysis.expand_with_dependencies(
+        top_chunks, dep_map, _phase_e_depth = self._analysis.expand_with_dependencies(
             chunks,
             [c.path for c in base_chunks],
             max_total=_dep_max,
+            max_depth=10,
         )
         yield {"phase": "依存関係展開中", "detail": f"展開後 {len(top_chunks)} ファイル確定"}
 
@@ -728,6 +738,8 @@ class ExplanationService:
             dep_map=dep_map,
             pinned_contents=pinned_chunk_contents or None,
             workspace_projects=workspace_project_data or None,
+            pinned_depth_map=_pinned_depth_map if pinned_paths else None,
+            direct_pinned_set=_direct_pinned_set if pinned_paths else None,
         )
 
         # プロンプトのプレビューを送信（最初の 1000 文字 + 末尾 200 文字）

@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from localforge.domain.exceptions import TokenBudgetExceededWarning
 from localforge.domain.models import FileChunk, GenerationPlan, Message, ProjectIndex
@@ -31,6 +32,31 @@ def _estimate_tokens(text: str) -> int:
         推定トークン数
     """
     return int(len(text.split()) * _WORDS_TO_TOKENS)
+
+
+_DOC_EXTENSIONS: Set[str] = {".md", ".rst", ".txt", ".pdf", ".adoc", ".org"}
+_DOC_DIRS: Set[str] = {"doc", "docs", "spec", "documentation", "specifications", "wiki"}
+_BACKTICK_PATH_RE = re.compile(r"`([^`\s]{3,80})`")
+
+
+def _is_doc_file(path: str) -> bool:
+    """Return True if the path looks like a documentation/spec file."""
+    from pathlib import PurePosixPath
+    p = PurePosixPath(path.replace("\\", "/"))
+    if p.suffix.lower() in _DOC_EXTENSIONS:
+        return True
+    return any(part.lower() in _DOC_DIRS for part in p.parts[:-1])
+
+
+def _pinned_label(path: str, depth: int, direct_pinned_set: Optional[Set[str]]) -> str:
+    """Return the context label for a pinned file entry."""
+    if _is_doc_file(path):
+        return "[DOCUMENTATION — GROUND TRUTH]"
+    if direct_pinned_set is not None and path in direct_pinned_set:
+        return "[USER-PINNED]"
+    if depth <= 1:
+        return "[AUTO-INCLUDED: direct import]"
+    return f"[AUTO-INCLUDED: transitive import (depth {depth})]"
 
 
 class ContextService:
@@ -633,6 +659,8 @@ class ContextService:
         dep_map: Optional[Dict[str, List[str]]] = None,
         pinned_contents: Optional[List[tuple[str, str]]] = None,
         workspace_projects: Optional[List[Dict[str, object]]] = None,
+        pinned_depth_map: Optional[Dict[str, int]] = None,
+        direct_pinned_set: Optional[Set[str]] = None,
     ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
@@ -648,19 +676,14 @@ class ContextService:
         Returns:
             (プロンプト文字列, 推定トークン数)
         """
-        # 固定コスト部分: 質問・概要・依存関係マップ・指示文
-        instructions = (
-            f"質問: {question}\n\n"
-            "あなたはシニアソフトウェアアーキテクトとして、上記のコードベースに基づいて極めて詳細かつ網羅的に回答してください。\n"
-            "以下のルールに厳密に従ってください：\n"
-            "1. 抽象的な説明を避け、具体的なクラス名、関数名、変数名、データ構造を明記すること。\n"
-            "2. 情報を引用する際は、必ず正確なファイルパス（例: `src/main.py`）を併記すること。上記の依存関係マップに記載されたパスのみを使用し、推測しないこと。\n"
-            "3. 対象コンポーネントが他のどのファイル・モジュールに依存しているか、また何から依存されているか（依存関係）を依存関係マップに基づいて説明すること。\n"
-            "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
-            "5. 提供されたコンテキスト内に情報が不足している場合は、推測で補わず「〇〇の詳細はコンテキストにありません」と正直に述べること。\n"
-        )
-
         parts = [f"プロジェクト概要:\n{project_index_json}"]
+        _pinned_added: List[tuple[str, str]] = []
+        _injected_paths: List[str] = []
+        _doc_mentioned_paths: List[str] = []
+
+        # ピン留めがある場合はサマリーを8件に絞り、ファイル内容注入のトークン予算を確保する
+        if pinned_contents and len(top_summaries) > 8:
+            top_summaries = top_summaries[:8]
 
         # 依存関係マップ — ファイル間の実際のインポート関係をLLMに提示する
         if dep_map:
@@ -711,7 +734,8 @@ class ContextService:
                     parts.append("\n".join(lines))
 
         # 会話履歴 — O(n) トリミング。各メッセージのトークン数を事前計算し差分更新する。
-        _instr_tokens = _estimate_tokens(instructions)
+        # 指示文のトークン数を事前推定（実際のinstances変数はコンテンツ注入後に確定する）
+        _instr_tokens = _estimate_tokens(question) + 350  # fixed rule text ≈ 350 tokens
         _parts_tokens = _estimate_tokens("\n\n".join(parts))
         if conversation_history:
             history_msgs = list(conversation_history[-10:])
@@ -736,28 +760,37 @@ class ContextService:
         _fixed_cost = _parts_tokens + _instr_tokens + 200
         available = max(self._token_limit - _fixed_cost, 0)
 
-        # ピン留めファイルを優先して注入（予算内）
+        # ピン留めファイルを優先して注入（予算内）— 深さに応じたラベルと文書区別付き
         if pinned_contents:
-            pinned_added: List[tuple[str, str]] = []
             for p, c in pinned_contents:
                 fc_text = f"--- {p} ---\n{c}"
                 cost = _estimate_tokens(fc_text)
                 if cost <= available:
-                    pinned_added.append((p, c))
+                    _pinned_added.append((p, c))
                     available -= cost
                 else:
-                    # ファイルが大きすぎる場合は先頭部分のみ注入して警告
                     _chars_budget = max(available * 3, 500)
-                    pinned_added.append((p, c[:_chars_budget]))
+                    _pinned_added.append((p, c[:_chars_budget]))
                     available = 0
                     logger.warning(
                         "ピン留めファイル [%s] がトークン予算を超過。先頭 %d 文字のみ注入。",
                         p, _chars_budget,
                     )
                     break
-            if pinned_added:
-                pin_texts = "\n".join(f"--- {p} ---\n{c}" for p, c in pinned_added)
-                parts.append(f"[ピン留めコンテキスト — ユーザーが選択したファイル]\n{pin_texts}")
+            if _pinned_added:
+                pin_texts_list: List[str] = []
+                for p, c in _pinned_added:
+                    depth = pinned_depth_map.get(p, 0) if pinned_depth_map else 0
+                    label = _pinned_label(p, depth, direct_pinned_set)
+                    pin_texts_list.append(f"{label}\n--- {p} ---\n{c}")
+                    _injected_paths.append(p)
+                    if _is_doc_file(p):
+                        for m in _BACKTICK_PATH_RE.finditer(c):
+                            candidate = m.group(1)
+                            if "/" in candidate or "." in candidate:
+                                _doc_mentioned_paths.append(candidate)
+                pin_texts = "\n\n".join(pin_texts_list)
+                parts.append(f"[ピン留めコンテキスト — ユーザーが選択したファイルと自動展開された依存関係]\n{pin_texts}")
 
         # 残予算でその他ファイルを注入
         for fc_path, fc_content in full_contents:
@@ -767,13 +800,55 @@ class ContextService:
             cost = _estimate_tokens(fc_text)
             if cost <= available:
                 parts.append(f"ファイル内容:\n{fc_text}")
+                _injected_paths.append(fc_path)
                 available -= cost
             else:
-                # 残予算に収まる分だけ先頭を注入
                 _chars = max(available * 3, 200)
                 parts.append(f"ファイル内容:\n--- {fc_path} ---\n{fc_content[:_chars]}\n...[予算超過により切り詰め]")
+                _injected_paths.append(fc_path)
                 available = 0
                 break
+
+        # パスホワイトリスト — LLMが参照できるファイルパスの完全なリスト
+        _all_paths = sorted(set(_injected_paths))
+        if _all_paths:
+            whitelist_lines = [
+                "AUTHORIZED FILE PATHS — You MUST use ONLY these exact paths verbatim.",
+                "Never invent, guess, abbreviate, or modify any file path:",
+            ]
+            for _ap in _all_paths:
+                whitelist_lines.append(f"  • {_ap}")
+            if _doc_mentioned_paths:
+                _uniq_doc_paths = sorted(set(_doc_mentioned_paths))
+                whitelist_lines.append(
+                    "Documentation also explicitly references: "
+                    + ", ".join(f"`{dp}`" for dp in _uniq_doc_paths)
+                )
+            parts.append("\n".join(whitelist_lines))
+
+        # 指示文 — 強化された反ハルシネーション・パスロックルール
+        instructions = (
+            f"質問: {question}\n\n"
+            "=== STRICT RULES — YOU MUST FOLLOW ALL OF THESE ===\n"
+            "RULE 1 — PATH LOCK: Reference ONLY file paths from the AUTHORIZED FILE PATHS list above. "
+            "Copy paths VERBATIM, character-for-character. Never invent, shorten, or guess paths.\n"
+            "RULE 2 — NO HALLUCINATION: If information is not present in the provided context, "
+            "state explicitly: 'この情報はコンテキストにありません' — do NOT fabricate or infer.\n"
+            "RULE 3 — DOCUMENTATION IS AUTHORITATIVE: Files labeled [DOCUMENTATION — GROUND TRUTH] "
+            "define the canonical rules, structure, and conventions. Always follow them strictly. "
+            "Never contradict documentation.\n"
+            "RULE 4 — CITE SOURCES: When referencing code, always include the exact file path. "
+            "Use the exact class names, function names, and variable names from the context.\n"
+            "RULE 5 — DEPENDENCY FIDELITY: Only describe import relationships shown in the "
+            "dependency map. Never invent new import or dependency relationships.\n"
+            "=== END RULES ===\n\n"
+            "あなたはシニアソフトウェアアーキテクトとして、上記のコードベースに基づいて極めて詳細かつ網羅的に回答してください。\n"
+            "1. 抽象的な説明を避け、具体的なクラス名、関数名、変数名、データ構造を明記すること。\n"
+            "2. AUTHORIZED FILE PATHS に記載されたパスのみを使用し、推測しないこと。\n"
+            "3. 対象コンポーネントの依存関係を依存関係マップに基づいて説明すること。\n"
+            "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
+            "5. 提供されたコンテキスト内に情報が不足している場合は、推測で補わず正直に述べること。\n"
+        )
 
         parts.append(instructions)
 

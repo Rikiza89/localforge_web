@@ -1018,8 +1018,8 @@ class AnalysisService:
         chunks: List[FileChunk],
         selected_paths: List[str],
         max_total: int = 20,
-        max_depth: int = 5,
-    ) -> tuple[List[FileChunk], Dict[str, List[str]]]:
+        max_depth: int = 10,
+    ) -> tuple[List[FileChunk], Dict[str, List[str]], Dict[str, int]]:
         """
         Expand a set of selected file chunks with their transitive import dependencies
         up to max_depth levels deep (BFS).
@@ -1034,11 +1034,12 @@ class AnalysisService:
             chunks: all FileChunks from the project index
             selected_paths: initially selected file paths
             max_total: maximum number of chunks to return
-            max_depth: how many import hops to follow (default 5)
+            max_depth: how many import hops to follow (default 10)
 
         Returns:
-            (expanded_chunks, dep_map) where dep_map maps each path to the list
-            of project files it imports (for display in the Q&A prompt).
+            (expanded_chunks, dep_map, depth_map) where dep_map maps each path to the
+            list of project files it imports, and depth_map maps each path to its BFS
+            hop count (0 = directly selected, 1 = direct import, 2+ = transitive).
         """
         from localforge.infrastructure.dependency_resolver import build_imported_by
 
@@ -1047,6 +1048,7 @@ class AnalysisService:
 
         seen: Set[str] = set(selected_paths)
         ordered: List[str] = [p for p in selected_paths if p in chunk_map]
+        depth_map: Dict[str, int] = {p: 0 for p in ordered}
 
         # BFS frontier: paths added at the previous depth level
         frontier: List[str] = list(ordered)
@@ -1066,11 +1068,13 @@ class AnalysisService:
                         seen.add(dep)
                         ordered.append(dep)
                         next_frontier.append(dep)
+                        depth_map[dep] = _depth + 1
                 for rev in imported_by.get(path, []):
                     if rev not in seen and rev in chunk_map and len(ordered) < max_total:
                         seen.add(rev)
                         ordered.append(rev)
                         next_frontier.append(rev)
+                        depth_map[rev] = _depth + 1
             frontier = next_frontier
 
         result_chunks = [chunk_map[p] for p in ordered if p in chunk_map]
@@ -1081,7 +1085,7 @@ class AnalysisService:
             if chunk.imports_resolved:
                 dep_map[chunk.path] = chunk.imports_resolved
 
-        return result_chunks, dep_map
+        return result_chunks, dep_map, depth_map
 
     def load_chunks_for_roots(
         self,
@@ -1110,7 +1114,7 @@ class AnalysisService:
         pinned_paths: List[str],
         chunks: List[FileChunk],
         max_total: int = 30,
-    ) -> Tuple[List[FileChunk], Dict[str, List[str]]]:
+    ) -> Tuple[List[FileChunk], Dict[str, List[str]], Dict[str, int]]:
         """
         ピン留めパス（ファイルまたはフォルダ）をチャンクに解決し、
         import依存関係を自動展開して返す。
@@ -1125,7 +1129,8 @@ class AnalysisService:
             max_total: 最大返却チャンク数
 
         Returns:
-            (expanded_chunks, dep_map)
+            (expanded_chunks, dep_map, depth_map) — depth_map maps each path to its
+            BFS hop count (0 = directly pinned by user, 1+ = auto-included via imports)
         """
         chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
         resolved_files: List[str] = []
