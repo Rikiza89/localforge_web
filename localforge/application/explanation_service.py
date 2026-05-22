@@ -514,9 +514,12 @@ class ExplanationService:
         pinned_paths: Optional[List[str]] = None,
     ) -> Generator[dict, None, None]:
         """超高速Q&Aモード: ゼロディスクリード、サマリーのみ、レポートセクションと同等速度。"""
+        import threading as _threading
         chunks = project_index.file_chunks
 
-        getattr(self._llm, "preload_model_async", lambda m: None)(model)
+        _preload_event: _threading.Event = getattr(
+            self._llm, "preload_model_async", lambda m: _threading.Event()
+        )(model)
 
         yield {"phase": "超高速モード", "detail": "サマリーのみでコンテキストを構築中"}
 
@@ -555,6 +558,18 @@ class ExplanationService:
         )
 
         yield {"prompt_preview": prompt[:500], "prompt_tokens": tokens}
+
+        # Wait for the preload to finish before sending the prompt.
+        # This eliminates the queue gap where Ollama would otherwise receive
+        # the real prompt while still processing the empty preload request.
+        if not _preload_event.is_set():
+            yield {"phase": "Ollamaモデルロード中", "detail": f"{model} をRAMに読み込み中（コンテキスト構築と並行）"}
+            while not _preload_event.wait(timeout=1.0):
+                if is_cancelled():
+                    yield {"done": True}
+                    return
+                yield {"status": f"Ollamaがモデルをロード中... ({model})"}
+
         yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
 
         answer_tokens: List[str] = []
@@ -622,12 +637,15 @@ class ExplanationService:
             return
 
         # Fire model warm-up immediately — phases A-G run in parallel with model loading.
-        # By the time context assembly finishes the model is already in RAM (or much
-        # further along), so the wait at stream_completion is greatly reduced.
+        # Capture the Event so we can wait for it before sending the real prompt,
+        # eliminating the Ollama queue gap.
+        import threading as _threading
         _model_was_cold = getattr(self._llm, "is_model_loaded", lambda m: None)(model) is False
         if _model_was_cold:
             yield {"status": f"モデルをバックグラウンドでプリロード中... ({model})"}
-        getattr(self._llm, "preload_model_async", lambda m: None)(model)
+        _preload_event: _threading.Event = getattr(
+            self._llm, "preload_model_async", lambda m: _threading.Event()
+        )(model)
 
         chunks = project_index.file_chunks
         chunk_map = {c.path: c for c in chunks}
@@ -869,18 +887,19 @@ class ExplanationService:
             _num_ctx = _CPU_NUM_CTX
             _num_predict = -1
 
-        # Check model load status — if still not loaded the preload thread is racing
-        # Ollama's queue so the wait here is reduced by however long preprocessing took.
-        model_loaded = getattr(self._llm, "is_model_loaded", lambda m: None)(model)
-        if model_loaded is False:
-            if _model_was_cold:
-                yield {"phase": "Ollamaモデルロード中", "detail": f"プリロード中... コンテキスト準備と並行してRAMに読み込んでいます"}
-            else:
-                yield {"phase": "Ollamaモデルロード中", "detail": f"{model} をRAMに読み込み中"}
-            yield {"status": f"Ollamaがモデルをロード中... ({model}) — 最初のトークンが来るまでお待ちください"}
-        else:
-            yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})" + (f"  [num_ctx={_num_ctx}, num_predict={_num_predict}]" if _is_cpu else "")}
-            yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
+        # Wait for preload to complete before sending the prompt.
+        # This guarantees the model is in RAM with no Ollama queue gap.
+        # The event is set by the preload thread regardless of success/failure.
+        if not _preload_event.is_set():
+            yield {"phase": "Ollamaモデルロード中", "detail": f"{model} をRAMに読み込み中（コンテキスト構築と並行）"}
+            while not _preload_event.wait(timeout=1.0):
+                if is_cancelled():
+                    yield {"done": True}
+                    return
+                yield {"status": f"Ollamaがモデルをロード中... ({model})"}
+
+        yield {"phase": "Ollama生成中", "detail": f"推定 {tokens} トークン送信 → Ollama ({model})" + (f"  [num_ctx={_num_ctx}, num_predict={_num_predict}]" if _is_cpu else "")}
+        yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
 
         start_time = time.time()
         answer_tokens: List[str] = []
