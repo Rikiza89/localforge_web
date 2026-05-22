@@ -81,6 +81,25 @@ async function loadPinnedFromServer() {
     _pinnedPaths.clear();
     (data.pinned || []).forEach(p => _pinnedPaths.add(p));
     _updatePinStatusBar();
+    // Apply pinned class to already-rendered tree nodes without a full re-render.
+    // This handles the case where the tree was rendered before pinned paths were
+    // loaded (e.g., on app restart where renderFileTree runs before this call).
+    document.querySelectorAll(".tree-node[data-path]").forEach(nodeEl => {
+      nodeEl.classList.toggle("pinned", _pinnedPaths.has(nodeEl.dataset.path));
+    });
+    document.querySelectorAll(".tree-pin-check[data-path]").forEach(cb => {
+      const path = cb.dataset.path;
+      const nodeEl = cb.closest(".tree-node");
+      const isDir = nodeEl && nodeEl.dataset.isDir === "true";
+      if (isDir) {
+        const childPaths = Array.from(
+          nodeEl.parentElement.querySelectorAll(".tree-node:not([data-is-dir='true'])[data-path]")
+        ).map(el => el.dataset.path);
+        cb.checked = childPaths.length > 0 && childPaths.every(p => _pinnedPaths.has(p));
+      } else {
+        cb.checked = _pinnedPaths.has(path);
+      }
+    });
     if (_pinModeActive) refreshFileTree();
   } catch (e) {
     console.warn("ピン留め読み込みエラー:", e.message);
