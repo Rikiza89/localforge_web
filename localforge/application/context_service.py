@@ -36,6 +36,14 @@ def _estimate_tokens(text: str) -> int:
 
 _DOC_EXTENSIONS: Set[str] = {".md", ".rst", ".txt", ".pdf", ".adoc", ".org", ".docx", ".xlsx"}
 _DOC_DIRS: Set[str] = {"doc", "docs", "spec", "documentation", "specifications", "wiki"}
+# Japanese doc-dir suffixes and English suffix variants matched against each folder name
+_DOC_DIR_SUFFIXES: tuple = (
+    # Japanese
+    "設計書", "詳細設計", "基本設計", "ドキュメント", "機能", "定義", "仕様書", "仕様",
+    # English suffix variants: ***-doc, ***_doc, ***-docs, ***_docs, ***-spec, ***_spec
+    "-doc", "_doc", "-docs", "_docs", "-spec", "_spec",
+    "-documentation", "_documentation", "-wiki", "_wiki",
+)
 _BACKTICK_PATH_RE = re.compile(r"`([^`\s]{3,80})`")
 
 
@@ -45,7 +53,13 @@ def _is_doc_file(path: str) -> bool:
     p = PurePosixPath(path.replace("\\", "/"))
     if p.suffix.lower() in _DOC_EXTENSIONS:
         return True
-    return any(part.lower() in _DOC_DIRS for part in p.parts[:-1])
+    for part in p.parts[:-1]:
+        lpart = part.lower()
+        if lpart in _DOC_DIRS:
+            return True
+        if any(lpart.endswith(s) for s in _DOC_DIR_SUFFIXES):
+            return True
+    return False
 
 
 def _pinned_label(path: str, depth: int, direct_pinned_set: Optional[Set[str]]) -> str:
