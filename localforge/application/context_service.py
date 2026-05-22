@@ -826,14 +826,17 @@ class ContextService:
                 )
             parts.append("\n".join(whitelist_lines))
 
-        # 指示文 — 強化された反ハルシネーション・パスロックルール
+        # 指示文 — 反ハルシネーション・パスロック・提案ルール
         instructions = (
             f"質問: {question}\n\n"
             "=== STRICT RULES — YOU MUST FOLLOW ALL OF THESE ===\n"
             "RULE 1 — PATH LOCK: Reference ONLY file paths from the AUTHORIZED FILE PATHS list above. "
             "Copy paths VERBATIM, character-for-character. Never invent, shorten, or guess paths.\n"
-            "RULE 2 — NO HALLUCINATION: If information is not present in the provided context, "
-            "state explicitly: 'この情報はコンテキストにありません' — do NOT fabricate or infer.\n"
+            "RULE 2 — FACT vs PROPOSAL SEPARATION: Clearly separate what EXISTS in the codebase "
+            "from what you are PROPOSING. "
+            "If specific implementation details are not in the provided context, first state: "
+            "'この情報はコンテキストにありません' — then continue with a '## 提案 (Proposal)' section. "
+            "Never present a proposal as if it were existing code.\n"
             "RULE 3 — DOCUMENTATION IS AUTHORITATIVE: Files labeled [DOCUMENTATION — GROUND TRUTH] "
             "define the canonical rules, structure, and conventions. Always follow them strictly. "
             "Never contradict documentation.\n"
@@ -847,7 +850,13 @@ class ContextService:
             "2. AUTHORIZED FILE PATHS に記載されたパスのみを使用し、推測しないこと。\n"
             "3. 対象コンポーネントの依存関係を依存関係マップに基づいて説明すること。\n"
             "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
-            "5. 提供されたコンテキスト内に情報が不足している場合は、推測で補わず正直に述べること。\n"
+            "5. コンテキストにない情報は正直に述べること。ただし実装方法を問う質問の場合は、"
+            "コンテキストから読み取れる設計パターン・既存クラス・アーキテクチャに基づいた提案を"
+            "'## 提案 (Proposal)' セクションとして追加すること。提案セクションには:\n"
+            "   a) 再利用すべき既存モジュール・クラス（AUTHORIZED FILE PATHS から引用）を明記する。\n"
+            "   b) 既存の設計ルール（ピン留めドキュメントや既存コードのパターン）に厳密に従う。\n"
+            "   c) 仮定や推測は明示的にラベルを付けて示す（例: '[仮定] ...'）。\n"
+            "   d) 提案はあくまで参考であり、既存コードではないことを冒頭で明示する。\n"
         )
 
         parts.append(instructions)
