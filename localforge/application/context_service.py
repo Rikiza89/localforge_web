@@ -34,7 +34,7 @@ def _estimate_tokens(text: str) -> int:
     return int(len(text.split()) * _WORDS_TO_TOKENS)
 
 
-_DOC_EXTENSIONS: Set[str] = {".md", ".rst", ".txt", ".pdf", ".adoc", ".org"}
+_DOC_EXTENSIONS: Set[str] = {".md", ".rst", ".txt", ".pdf", ".adoc", ".org", ".docx", ".xlsx"}
 _DOC_DIRS: Set[str] = {"doc", "docs", "spec", "documentation", "specifications", "wiki"}
 _BACKTICK_PATH_RE = re.compile(r"`([^`\s]{3,80})`")
 
