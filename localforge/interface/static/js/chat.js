@@ -11,6 +11,9 @@ let _chatHistory = [];
 // 送信中フラグ
 let _chatSending = false;
 
+// Q&Aモード: "ultra" | "fast" | "precise"
+let _chatMode = "ultra";
+
 /**
  * チャット履歴をリセットする。
  */
@@ -18,6 +21,66 @@ function resetChatHistory() {
   _chatHistory = [];
   const historyEl = document.getElementById("chat-history");
   if (historyEl) historyEl.innerHTML = "";
+}
+
+/**
+ * 過去のQ&A履歴をチャット表示エリアに読み込む（表示専用、_chatHistoryには追加しない）。
+ * @param {Array<{timestamp: string, question: string, answer: string}>} entries
+ */
+function loadChatHistory(entries) {
+  if (!entries || entries.length === 0) return;
+
+  const historyEl = document.getElementById("chat-history");
+  if (!historyEl) return;
+
+  const divider = document.createElement("div");
+  divider.className = "chat-history-divider";
+  divider.innerHTML = `<span>— 過去の Q&A (${entries.length}件) —</span>`;
+  historyEl.appendChild(divider);
+
+  entries.forEach(entry => {
+    const turn = document.createElement("div");
+    turn.className = "chat-turn chat-turn-history";
+
+    const tsEl = document.createElement("div");
+    tsEl.className = "chat-turn-ts";
+    tsEl.textContent = entry.timestamp;
+
+    const qEl = document.createElement("div");
+    qEl.className = "chat-q";
+    qEl.textContent = entry.question;
+
+    const aEl = document.createElement("div");
+    aEl.className = "chat-a md-body";
+    aEl.innerHTML = _renderMd(entry.answer);
+
+    turn.appendChild(tsEl);
+    turn.appendChild(qEl);
+    turn.appendChild(aEl);
+    historyEl.appendChild(turn);
+  });
+}
+
+/**
+ * Q&Aモードトグルを初期化する。
+ */
+function initChatModeToggle() {
+  const ultraBtn = document.getElementById("chat-mode-ultra");
+  const fastBtn = document.getElementById("chat-mode-fast");
+  const preciseBtn = document.getElementById("chat-mode-precise");
+  if (!ultraBtn || !fastBtn || !preciseBtn) return;
+
+  function _applyMode(m) {
+    _chatMode = m;
+    ultraBtn.classList.toggle("active", m === "ultra");
+    fastBtn.classList.toggle("active", m === "fast");
+    preciseBtn.classList.toggle("active", m === "precise");
+  }
+
+  ultraBtn.addEventListener("click", () => _applyMode("ultra"));
+  fastBtn.addEventListener("click", () => _applyMode("fast"));
+  preciseBtn.addEventListener("click", () => _applyMode("precise"));
+  _applyMode(_chatMode);
 }
 
 /**
@@ -85,6 +148,7 @@ async function sendChatMessage(question) {
     {
       question,
       history: _chatHistory.slice(-10).map(m => ({ role: m.role, content: m.content })),
+      mode: _chatMode,
     },
     null,
     {

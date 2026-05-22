@@ -4,6 +4,18 @@
     <h2>Generate — プロジェクトを生成・改善</h2>
   </div>
 
+  <!-- 保存済みプランバナー -->
+  <div class="saved-plan-banner" id="saved-plan-banner" style="display:none;">
+    <div class="saved-plan-banner-body">
+      <span id="saved-plan-banner-text">保存済みプランを読み込みました。承認して生成を続行するか、新しいプロンプトを入力してください。</span>
+      <div class="saved-plan-banner-actions" id="saved-plan-banner-actions" style="display:none;">
+        <button class="btn btn-primary btn-sm" id="resume-generation-btn">↺ 続きから再開</button>
+        <button class="btn btn-secondary btn-sm" id="restart-generation-btn">▶ 生成開始</button>
+      </div>
+    </div>
+    <button class="btn-link" id="dismiss-plan-banner-btn">✕ 閉じる</button>
+  </div>
+
   <!-- プロンプト入力エリア -->
   <div class="prompt-section">
     <label for="generate-prompt" class="field-label">プロジェクトの説明・改善要求</label>
@@ -13,6 +25,18 @@
       placeholder="例（新規）: FlaskとSQLiteを使ったTodoアプリを作ってください。&#10;例（改善）: エラーハンドリングを改善して、型ヒントを追加してください。&#10;例（質問）: このプロジェクトの問題点を分析して改善プランを作成してください。"
       rows="5"
     ></textarea>
+    <div class="plan-file-count-row">
+      <label class="file-count-label" title="生成するファイルの最小数をLLMへのヒントとして渡します（空=制限なし）">
+        最小ファイル数
+        <input type="number" id="plan-min-files" class="file-count-input"
+               min="1" max="200" placeholder="制限なし">
+      </label>
+      <label class="file-count-label" title="生成するファイルの最大数をLLMへのヒントとして渡します（空=制限なし）">
+        最大ファイル数
+        <input type="number" id="plan-max-files" class="file-count-input"
+               min="1" max="200" placeholder="制限なし">
+      </label>
+    </div>
     <div class="prompt-actions">
       <button class="btn btn-primary" id="generate-plan-btn">
         ✦ プランを生成
@@ -66,6 +90,7 @@
       <span class="progress-label" id="progress-label">準備中...</span>
     </div>
     <div class="stream-output-container">
+      <div class="gen-file-header" id="gen-current-file-header" style="display:none;"></div>
       <pre class="stream-output" id="generation-stream-output"></pre>
     </div>
   </div>

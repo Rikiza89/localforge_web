@@ -163,6 +163,22 @@ def get_status():
     return jsonify(project_svc.get_project_status())
 
 
+@bp.route("/generation-progress", methods=["GET"])
+def get_generation_progress():
+    """
+    現在のプランの生成進捗を返す。
+
+    Response JSON:
+        has_plan, total, completed, start_from, completed_files, pending_files
+    """
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+    progress = project_svc.get_generation_progress(project.root)
+    return jsonify(progress)
+
+
 @bp.route("/models", methods=["GET"])
 def list_models():
     """

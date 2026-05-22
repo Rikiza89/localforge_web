@@ -29,6 +29,41 @@ _LOCALFORGE_DIR = ".localforge"
 _cancel_flag: bool = False
 
 
+def _sanitize_path(raw: str) -> str:
+    """
+    LLMが出力したファイルパスをプロジェクトルート相対の安全なパスに正規化する。
+    絶対パス・..セグメント・NULバイトを含むパスは空文字列を返す（拒否）。
+
+    Args:
+        raw: LLMが出力した生パス文字列
+
+    Returns:
+        正規化済みの相対パス。安全でない場合は空文字列。
+    """
+    if not raw or "\x00" in raw:
+        return ""
+    stripped = raw.strip()
+    # 絶対パス（/ や Windows の C:\ 形式）は即座に拒否
+    if stripped.startswith("/") or (len(stripped) >= 2 and stripped[1] == ":"):
+        return ""
+    # 先頭の ./ を除去
+    p = Path(stripped)
+    if p.is_absolute():
+        return ""
+    # ".." セグメントを検出
+    if any(part == ".." for part in p.parts):
+        return ""
+    normalized = str(p)
+    if not normalized or normalized == ".":
+        return ""
+    return normalized
+
+
+def is_cancelled() -> bool:
+    """現在キャンセルが要求されているかを返す。"""
+    return _cancel_flag
+
+
 def request_cancel() -> None:
     """生成キャンセルを要求する（グローバルフラグを設定）。"""
     global _cancel_flag
@@ -72,6 +107,59 @@ class GenerationService:
         self._llm = llm
         self._context = context
 
+    def generate_context_md(self, root: Path, model: str, plan: "GenerationPlan", project_svc: object) -> None:
+        """
+        完成したプランからcontext.mdを一括生成して保存する。
+        バックグラウンドスレッドで呼び出すことを前提とした非ストリーミング実装。
+
+        Args:
+            root: プロジェクトルート
+            model: 使用するOllamaモデル名
+            plan: 完了済みGenerationPlan
+            project_svc: save_context_md(root, content)を持つProjectServiceインスタンス
+        """
+        try:
+            plan_json = plan.model_dump_json(indent=2)
+            prompt = self._context.build_context_from_plan_prompt(plan_json)
+            tokens = []
+            for token in self._llm.stream_completion(model, prompt, keep_alive="2h"):
+                tokens.append(token)
+            content = "".join(tokens).strip()
+            if content:
+                project_svc.save_context_md(root, content)
+                logger.info("context.md を生成しました (%d 文字): %s", len(content), root)
+        except Exception as exc:
+            logger.warning("context.md 生成エラー: %s", exc)
+
+    def update_context_md_incremental(self, root: Path, model: str, file_path: str, project_svc: object) -> None:
+        """
+        単一ファイル再生成後にcontext.mdをインクリメンタル更新する。
+        バックグラウンドスレッドで呼び出すことを前提とした非ストリーミング実装。
+
+        Args:
+            root: プロジェクトルート
+            model: 使用するOllamaモデル名
+            file_path: 再生成したファイルの相対パス
+            project_svc: get_context_md / save_context_md を持つProjectServiceインスタンス
+        """
+        try:
+            fp = root / file_path
+            if not fp.exists():
+                return
+            lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+            first_200 = "\n".join(lines[:200])
+            existing = project_svc.get_context_md(root)
+            prompt = self._context.build_context_update_prompt(existing, file_path, first_200)
+            tokens = []
+            for token in self._llm.stream_completion(model, prompt, keep_alive="2h"):
+                tokens.append(token)
+            content = "".join(tokens).strip()
+            if content:
+                project_svc.save_context_md(root, content)
+                logger.info("context.md をインクリメンタル更新しました [%s]: %s", file_path, root)
+        except Exception as exc:
+            logger.warning("context.md インクリメンタル更新エラー: %s", exc)
+
     def stream_plan(
         self,
         root: Path,
@@ -85,6 +173,8 @@ class GenerationService:
         project_index_json: Optional[str] = None,
         pinned_contents: Optional[List[tuple[str, str]]] = None,
         workspace_summaries: Optional[List[tuple[str, str]]] = None,
+        max_files: Optional[int] = None,
+        min_files: Optional[int] = None,
     ) -> Generator[dict, None, None]:
         """
         ユーザープロンプトからプロジェクト生成プランをストリーミング生成する。
@@ -116,6 +206,8 @@ class GenerationService:
             project_index_json=project_index_json,
             pinned_contents=pinned_contents,
             workspace_summaries=workspace_summaries,
+            max_files=max_files,
+            min_files=min_files,
         )
 
         start_time = time.time()
@@ -180,20 +272,37 @@ class GenerationService:
             raise PlanParseError(f"プランJSONのパースに失敗しました: {exc}") from exc
 
         try:
-            return GenerationPlan(
+            raw_files = data.get("files", [])
+            validated_files: list[PlannedFile] = []
+            skipped: list[str] = []
+            for f in raw_files:
+                raw_path = f.get("path", "").strip()
+                safe_path = _sanitize_path(raw_path)
+                if not safe_path:
+                    skipped.append(raw_path or "<空>")
+                    logger.warning("プランパスを拒否しました（安全でないパス）: %r", raw_path)
+                    continue
+                validated_files.append(PlannedFile(
+                    path=safe_path,
+                    description=f.get("description", ""),
+                    dependencies=[
+                        s for d in f.get("dependencies", [])
+                        if (s := _sanitize_path(str(d)))
+                    ],
+                    action=f.get("action", "create"),
+                    modification_notes=f.get("modification_notes"),
+                ))
+            plan = GenerationPlan(
                 project_name=data.get("project_name", "unnamed"),
                 description=data.get("description", ""),
-                files=[
-                    PlannedFile(
-                        path=f.get("path", ""),
-                        description=f.get("description", ""),
-                        dependencies=f.get("dependencies", []),
-                        action=f.get("action", "create"),
-                        modification_notes=f.get("modification_notes"),
-                    )
-                    for f in data.get("files", [])
-                ],
+                files=validated_files,
             )
+            if skipped:
+                logger.warning(
+                    "プランから %d 個の安全でないパスを除外しました: %s",
+                    len(skipped), skipped,
+                )
+            return plan
         except (KeyError, TypeError, ValueError) as exc:
             raise PlanParseError(f"プランの構造が無効です: {exc}") from exc
 
@@ -267,6 +376,25 @@ class GenerationService:
                         pass
 
             file_path = root / planned_file.path
+            # パス traversal 防御: 解決済みパスがプロジェクトルート内に収まることを確認する
+            try:
+                resolved_file = file_path.resolve()
+                resolved_root = root.resolve()
+                if not resolved_file.is_relative_to(resolved_root):
+                    logger.error(
+                        "パス traversal を検出してスキップ: %s → %s",
+                        planned_file.path, resolved_file,
+                    )
+                    yield {
+                        "warning": f"スキップ: プロジェクト外パス — {planned_file.path}",
+                        "status": f"⚠ スキップ: {planned_file.path}",
+                    }
+                    continue
+            except Exception as exc:
+                logger.error("パス検証エラー: %s — %s", planned_file.path, exc)
+                yield {"warning": f"スキップ: パス検証エラー — {planned_file.path}"}
+                continue
+
             # ファイルが既に存在する場合は action="create" でも修正路に昇格する
             file_exists_on_disk = file_path.exists()
             is_modify = planned_file.action == "modify" or (

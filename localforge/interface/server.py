@@ -79,6 +79,8 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
         template_folder="templates",
         static_folder="static",
     )
+    # ランダムなシークレットキーを生成する（セッション未使用だが念のため明示設定）
+    app.config["SECRET_KEY"] = os.urandom(32)
     app.config["JSON_SORT_KEYS"] = False
     app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
 

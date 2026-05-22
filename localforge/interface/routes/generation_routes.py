@@ -62,6 +62,20 @@ _HEARTBEAT_INTERVAL = 15  # 秒
 _HB = {"heartbeat": True}
 
 
+def _after_done(gen, callback):
+    """Yield all events from gen; call callback() once after done:True is seen."""
+    done_seen = False
+    for event in gen:
+        yield event
+        if event.get("done") and not done_seen:
+            done_seen = True
+    if done_seen:
+        try:
+            callback()
+        except Exception as exc:
+            logger.warning("post-generation callback error: %s", exc)
+
+
 def _sse_response(generator):
     """
     SSEレスポンスを生成する。
@@ -211,6 +225,20 @@ def stream_plan():
     except Exception as exc:
         logger.warning("ワークスペースサマリー取得エラー: %s", exc)
 
+    # Optional file-count constraints from the UI
+    def _parse_int_param(name: str) -> "int | None":
+        val = data.get(name, None)
+        if val is None:
+            return None
+        try:
+            n = int(val)
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    max_files = _parse_int_param("max_files")
+    min_files = _parse_int_param("min_files")
+
     gen = generation_svc.stream_plan(
         root=root,
         model=model,
@@ -223,6 +251,8 @@ def stream_plan():
         project_index_json=project_index_json,
         pinned_contents=pinned_contents or None,
         workspace_summaries=workspace_summaries or None,
+        max_files=max_files,
+        min_files=min_files,
     )
     return _sse_response(gen)
 
@@ -255,6 +285,22 @@ def approve_plan():
         return _error_response(exc, 400)
     except LocalForgeError as exc:
         return _error_response(exc)
+
+    # Path safety check at approval time (defense-in-depth before any file is written)
+    root_resolved = project.root.resolve()
+    for f in plan.files:
+        try:
+            candidate = (project.root / f.path).resolve()
+            if not candidate.is_relative_to(root_resolved):
+                return jsonify({
+                    "error": "UnsafePath",
+                    "message": f"プロジェクト外を指すパスが含まれています: {f.path}",
+                }), 400
+        except Exception:
+            return jsonify({
+                "error": "InvalidPath",
+                "message": f"無効なパスが含まれています: {f.path}",
+            }), 400
 
     plan.approved = True
     project_svc.save_generation_plan(project.root, plan)
@@ -306,7 +352,105 @@ def stream_generation():
         model=model,
         context_md=context_md,
     )
-    return _sse_response(gen)
+
+    def _update_ctx():
+        threading.Thread(
+            target=generation_svc.generate_context_md,
+            args=(root, model, plan, project_svc),
+            daemon=True,
+        ).start()
+
+    return _sse_response(_after_done(gen, _update_ctx))
+
+
+@bp.route("/plan/saved", methods=["GET"])
+def get_saved_plan():
+    """
+    保存済みプラン（.localforge/plan.json）を返す。
+
+    Response JSON:
+        plan: {project_name, description, approved, files: [{path, description, action, modification_notes, exists}]}
+    """
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    plan = project_svc.load_generation_plan(project.root)
+    if not plan:
+        return jsonify({"error": "NoPlan", "message": "保存済みプランが見つかりません"}), 404
+
+    root = project.root
+    files = []
+    for f in plan.files:
+        files.append({
+            "path": f.path,
+            "description": f.description,
+            "action": f.action,
+            "modification_notes": f.modification_notes,
+            "exists": (root / f.path).exists(),
+        })
+
+    return jsonify({
+        "plan": {
+            "project_name": plan.project_name,
+            "description": plan.description,
+            "approved": plan.approved,
+            "files": files,
+        }
+    })
+
+
+@bp.route("/resume", methods=["GET"])
+def stream_resume_generation():
+    """
+    前回中断されたプランの続きからSSEストリーミング生成を再開する。
+    generation_log.jsonlを参照して完了済みファイルをスキップする。
+
+    SSE Events:
+        progress, token, file_written, done, error
+    """
+    project_svc = _get_project_svc()
+    generation_svc = _get_generation_svc()
+    project = project_svc.current_project
+    if not project:
+        def err_gen():
+            yield {"error": "プロジェクトが開かれていません"}
+        return _sse_response(err_gen())
+
+    plan = project_svc.load_generation_plan(project.root)
+    if not plan:
+        def err_gen():
+            yield {"error": "承認済みプランが見つかりません"}
+        return _sse_response(err_gen())
+
+    model = project.config.model
+    if not model:
+        def err_gen():
+            yield {"error": "モデルが選択されていません。UIでモデルを選択してください"}
+        return _sse_response(err_gen())
+
+    root = project.root
+    context_md = project_svc.get_context_md(root)
+    progress = project_svc.get_generation_progress(root)
+    start_from = progress.get("start_from", 0)
+
+    gen = generation_svc.stream_all_files(
+        root=root,
+        plan=plan,
+        model=model,
+        context_md=context_md,
+        start_from=start_from,
+    )
+
+    def _update_ctx():
+        threading.Thread(
+            target=generation_svc.generate_context_md,
+            args=(root, model, plan, project_svc),
+            daemon=True,
+        ).start()
+
+    return _sse_response(_after_done(gen, _update_ctx))
 
 
 @bp.route("/logs", methods=["GET"])
@@ -383,7 +527,15 @@ def regenerate_file():
         context_md=context_md,
         file_path=file_path,
     )
-    return _sse_response(gen)
+
+    def _update_ctx():
+        threading.Thread(
+            target=generation_svc.update_context_md_incremental,
+            args=(root, model, file_path, project_svc),
+            daemon=True,
+        ).start()
+
+    return _sse_response(_after_done(gen, _update_ctx))
 
 
 def _synthesize_plan_for_file(root: Path, file_path: str) -> GenerationPlan:

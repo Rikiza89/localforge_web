@@ -1018,8 +1018,8 @@ class AnalysisService:
         chunks: List[FileChunk],
         selected_paths: List[str],
         max_total: int = 20,
-        max_depth: int = 5,
-    ) -> tuple[List[FileChunk], Dict[str, List[str]]]:
+        max_depth: int = 10,
+    ) -> tuple[List[FileChunk], Dict[str, List[str]], Dict[str, int]]:
         """
         Expand a set of selected file chunks with their transitive import dependencies
         up to max_depth levels deep (BFS).
@@ -1034,30 +1034,38 @@ class AnalysisService:
             chunks: all FileChunks from the project index
             selected_paths: initially selected file paths
             max_total: maximum number of chunks to return
-            max_depth: how many import hops to follow (default 5)
+            max_depth: how many import hops to follow (default 10)
 
         Returns:
-            (expanded_chunks, dep_map) where dep_map maps each path to the list
-            of project files it imports (for display in the Q&A prompt).
+            (expanded_chunks, dep_map, depth_map) where dep_map maps each path to the
+            list of project files it imports, and depth_map maps each path to its BFS
+            hop count (0 = directly selected, 1 = direct import, 2+ = transitive).
         """
         from localforge.infrastructure.dependency_resolver import build_imported_by
 
-        chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
+        chunk_map: Dict[str, FileChunk] = {c.path.replace("\\", "/"): c for c in chunks}
         imported_by: Dict[str, List[str]] = build_imported_by(chunks)
 
-        seen: Set[str] = set(selected_paths)
-        ordered: List[str] = [p for p in selected_paths if p in chunk_map]
+        norm_selected = [p.replace("\\", "/").rstrip("/") for p in selected_paths]
+        seen: Set[str] = set(norm_selected)
+        ordered: List[str] = [p for p in norm_selected if p in chunk_map]
+        depth_map: Dict[str, int] = {p: 0 for p in ordered}
 
         # BFS frontier: paths added at the previous depth level
         frontier: List[str] = list(ordered)
 
+        _truncated_at_depth: Optional[int] = None
         for _depth in range(max_depth):
-            if not frontier or len(ordered) >= max_total:
+            if not frontier:
+                break
+            if len(ordered) >= max_total:
+                _truncated_at_depth = _depth
                 break
             next_frontier: List[str] = []
             for path in frontier:
-                if len(ordered) >= max_total:
-                    break
+                # Always finish processing every file in the current frontier so the
+                # depth level is complete, even if we've already reached max_total.
+                # New files are only added while under the cap.
                 chunk = chunk_map.get(path)
                 if chunk is None:
                     continue
@@ -1066,12 +1074,24 @@ class AnalysisService:
                         seen.add(dep)
                         ordered.append(dep)
                         next_frontier.append(dep)
+                        depth_map[dep] = _depth + 1
                 for rev in imported_by.get(path, []):
                     if rev not in seen and rev in chunk_map and len(ordered) < max_total:
                         seen.add(rev)
                         ordered.append(rev)
                         next_frontier.append(rev)
+                        depth_map[rev] = _depth + 1
+            if len(ordered) >= max_total and next_frontier:
+                _truncated_at_depth = _depth + 1
             frontier = next_frontier
+
+        if _truncated_at_depth is not None:
+            logger.warning(
+                "BFS import expansion reached max_total=%d at depth %d — "
+                "some transitive imports may be omitted. "
+                "Raise max_total if you need deeper coverage.",
+                max_total, _truncated_at_depth,
+            )
 
         result_chunks = [chunk_map[p] for p in ordered if p in chunk_map]
 
@@ -1081,7 +1101,7 @@ class AnalysisService:
             if chunk.imports_resolved:
                 dep_map[chunk.path] = chunk.imports_resolved
 
-        return result_chunks, dep_map
+        return result_chunks, dep_map, depth_map
 
     def load_chunks_for_roots(
         self,
@@ -1109,8 +1129,9 @@ class AnalysisService:
         root: Path,
         pinned_paths: List[str],
         chunks: List[FileChunk],
-        max_total: int = 30,
-    ) -> Tuple[List[FileChunk], Dict[str, List[str]]]:
+        max_total: int = 100,
+        max_depth: int = 10,
+    ) -> Tuple[List[FileChunk], Dict[str, List[str]], Dict[str, int]]:
         """
         ピン留めパス（ファイルまたはフォルダ）をチャンクに解決し、
         import依存関係を自動展開して返す。
@@ -1125,9 +1146,10 @@ class AnalysisService:
             max_total: 最大返却チャンク数
 
         Returns:
-            (expanded_chunks, dep_map)
+            (expanded_chunks, dep_map, depth_map) — depth_map maps each path to its
+            BFS hop count (0 = directly pinned by user, 1+ = auto-included via imports)
         """
-        chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
+        chunk_map: Dict[str, FileChunk] = {c.path.replace("\\", "/"): c for c in chunks}
         resolved_files: List[str] = []
         seen: Set[str] = set()
 
@@ -1139,6 +1161,7 @@ class AnalysisService:
             } or not any(
                 c.path.replace("\\", "/") == norm for c in chunks
             )
+            before = len(resolved_files)
             if is_folder:
                 prefix = norm + "/"
                 for c in chunks:
@@ -1152,8 +1175,25 @@ class AnalysisService:
                     seen.add(norm)
                     resolved_files.append(norm)
 
+            if len(resolved_files) == before:
+                logger.warning(
+                    "ピン留めパスをチャンクに解決できませんでした: '%s' "
+                    "(is_folder=%s, インデックスに存在しない可能性があります)",
+                    norm, is_folder,
+                )
+
+        if not resolved_files and pinned_paths:
+            logger.warning(
+                "resolve_pinned_chunks: %d 件のピン留めパスが全て未解決です。"
+                "インデックスを再構築するか、パスを確認してください。"
+                " サンプル pinned_paths=%s  サンプル chunk paths=%s",
+                len(pinned_paths),
+                pinned_paths[:3],
+                [c.path for c in chunks[:3]],
+            )
+
         # import依存関係を展開（expand_with_dependenciesを再利用）
-        return self.expand_with_dependencies(chunks, resolved_files, max_total=max_total)
+        return self.expand_with_dependencies(chunks, resolved_files, max_total=max_total, max_depth=max_depth)
 
     def get_top_chunks_by_keywords(
         self,

@@ -254,16 +254,20 @@ class OllamaClient:
         except requests.RequestException as exc:
             raise OllamaConnectionError(f"Ollamaリクエストに失敗しました: {exc}") from exc
 
-    def preload_model_async(self, model: str) -> None:
-        """Fire-and-forget: start loading the model into RAM in a background thread.
+    def preload_model_async(self, model: str) -> "threading.Event":
+        """Start loading the model into RAM in a background thread.
 
-        Uses a fresh session so the main session is not blocked. Calling this at
-        the start of a pipeline that does expensive preprocessing (file reads,
-        vector search, prompt assembly) lets model loading and preprocessing
-        overlap — reducing first-token latency by up to the preprocessing time.
+        Returns a threading.Event that is set when the preload HTTP call
+        completes (success or failure). Callers can wait on this event before
+        sending the real prompt, guaranteeing the model is in RAM with zero
+        queue gap between the preload response and the first generation token.
+
+        Uses a fresh session so the main session is not blocked.
         """
         import threading
         import requests as _req
+
+        ready = threading.Event()
 
         def _load() -> None:
             try:
@@ -285,8 +289,11 @@ class OllamaClient:
                 logger.debug("バックグラウンドモデルプリロード完了: %s", model)
             except Exception as exc:
                 logger.debug("モデルプリロードエラー（非致命的）: %s", exc)
+            finally:
+                ready.set()
 
         threading.Thread(target=_load, daemon=True).start()
+        return ready
 
     def unload_model(self, model: str) -> None:
         """
@@ -299,19 +306,20 @@ class OllamaClient:
         if not model:
             return
         try:
-            # /api/generate だけでなく /api/chat にも keep_alive: 0 を送ることで、
-            # どちらのAPIで読み込まれたモデルも確実にアンロードする。
+            # Use a fresh session so an active streaming connection on self._session
+            # never blocks the unload POST (keep_alive=0 must reach Ollama immediately).
             payload = {"model": model, "keep_alive": 0}
-            self._session.post(
-                f"{self._base_url}/api/generate",
-                json={**payload, "prompt": ""},
-                timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
-            )
-            self._session.post(
-                f"{self._base_url}/api/chat",
-                json={**payload, "messages": []},
-                timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
-            )
+            with requests.Session() as s:
+                s.post(
+                    f"{self._base_url}/api/generate",
+                    json={**payload, "prompt": ""},
+                    timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
+                )
+                s.post(
+                    f"{self._base_url}/api/chat",
+                    json={**payload, "messages": []},
+                    timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
+                )
             logger.info("モデルをアンロードしました: %s", model)
         except Exception as exc:
             logger.warning("モデルアンロード失敗 (%s): %s", model, exc)

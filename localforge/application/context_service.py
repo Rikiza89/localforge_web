@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from localforge.domain.exceptions import TokenBudgetExceededWarning
 from localforge.domain.models import FileChunk, GenerationPlan, Message, ProjectIndex
@@ -31,6 +32,45 @@ def _estimate_tokens(text: str) -> int:
         推定トークン数
     """
     return int(len(text.split()) * _WORDS_TO_TOKENS)
+
+
+_DOC_EXTENSIONS: Set[str] = {".md", ".rst", ".txt", ".pdf", ".adoc", ".org", ".docx", ".xlsx"}
+_DOC_DIRS: Set[str] = {"doc", "docs", "spec", "documentation", "specifications", "wiki"}
+# Japanese doc-dir suffixes and English suffix variants matched against each folder name
+_DOC_DIR_SUFFIXES: tuple = (
+    # Japanese
+    "設計書", "詳細設計", "基本設計", "ドキュメント", "機能", "定義", "仕様書", "仕様",
+    # English suffix variants: ***-doc, ***_doc, ***-docs, ***_docs, ***-spec, ***_spec
+    "-doc", "_doc", "-docs", "_docs", "-spec", "_spec",
+    "-documentation", "_documentation", "-wiki", "_wiki",
+)
+_BACKTICK_PATH_RE = re.compile(r"`([^`\s]{3,80})`")
+
+
+def _is_doc_file(path: str) -> bool:
+    """Return True if the path looks like a documentation/spec file."""
+    from pathlib import PurePosixPath
+    p = PurePosixPath(path.replace("\\", "/"))
+    if p.suffix.lower() in _DOC_EXTENSIONS:
+        return True
+    for part in p.parts[:-1]:
+        lpart = part.lower()
+        if lpart in _DOC_DIRS:
+            return True
+        if any(lpart.endswith(s) for s in _DOC_DIR_SUFFIXES):
+            return True
+    return False
+
+
+def _pinned_label(path: str, depth: int, direct_pinned_set: Optional[Set[str]]) -> str:
+    """Return the context label for a pinned file entry."""
+    if _is_doc_file(path):
+        return "[DOCUMENTATION — GROUND TRUTH]"
+    if direct_pinned_set is not None and path in direct_pinned_set:
+        return "[USER-PINNED]"
+    if depth <= 1:
+        return "[AUTO-INCLUDED: direct import]"
+    return f"[AUTO-INCLUDED: transitive import (depth {depth})]"
 
 
 class ContextService:
@@ -88,6 +128,8 @@ class ContextService:
         project_index_json: Optional[str] = None,
         pinned_contents: Optional[List[tuple[str, str]]] = None,
         workspace_summaries: Optional[List[tuple[str, str]]] = None,
+        max_files: Optional[int] = None,
+        min_files: Optional[int] = None,
     ) -> str:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
@@ -144,8 +186,36 @@ class ContextService:
         elif "llama3" in model_name.lower():
             parts.append("簡潔かつ正確な回答を心がけてください。")
 
+        # File count constraints
+        count_rules: list[str] = []
+        if max_files is not None and max_files > 0:
+            count_rules.append(f"- ファイル数の上限: 最大 {max_files} ファイルとすること。")
+        if min_files is not None and min_files > 0:
+            count_rules.append(
+                f"- ファイル数の下限: 少なくとも {min_files} ファイルを含めること（要求の範囲内で）。"
+            )
+
+        # Detect test/refactor requests to inject comprehensiveness guidance
+        _test_keywords = ("test", "テスト", "spec", "pytest", "unittest", "coverage")
+        _is_test_request = any(kw in user_prompt.lower() for kw in _test_keywords)
+
+        comprehensiveness = (
+            "- ロジックを含む全ファイルにテストファイルを計画すること。"
+            " ファイル数を人工的に制限しないこと — テストが少なすぎるより網羅的なほうが良い。"
+            " テストフレームワーク（pytest / unittest 等）はプロジェクト既存コードに合わせること。"
+        ) if _is_test_request else (
+            "- ユーザーの要求を完全に実現するために必要なファイルをすべて含めること。"
+            " ファイル数を人工的に制限しないこと。"
+        )
+
+        planning_rules = [comprehensiveness] + count_rules
+
         parts.append(
             f"\nユーザーの要求:\n{user_prompt}\n\n"
+            "【プラン作成ルール】\n"
+            + "\n".join(planning_rules) + "\n"
+            "- すべての path は プロジェクトルートからの相対パスにすること（先頭の / や .. を含めないこと）。\n"
+            "- 依存関係が明確な場合のみ dependencies を設定すること。\n\n"
             "まず、このプランで何をするかを2〜3文のMarkdown形式で簡潔に説明してください"
             "（新規作成ファイル数・修正ファイル数・主な変更点を含む）。\n"
             "その際、プロジェクト全体の一貫性や、技術的な選定理由があればそれも含めてください。\n"
@@ -318,6 +388,34 @@ class ContextService:
             prompt, f"diff_file:{target_file}[{chunk_idx + 1}/{total_chunks}]"
         ), _estimate_tokens(prompt)
 
+    def build_context_from_plan_prompt(self, plan_json: str) -> str:
+        """
+        完成したプランからcontext.mdを一括生成するプロンプトを組み立てる。
+
+        Args:
+            plan_json: 完了済みGenerationPlanのJSON文字列
+
+        Returns:
+            組み立てたプロンプト文字列
+        """
+        prompt = "\n\n".join([
+            f"完成したプロジェクトプラン:\n{plan_json}",
+            (
+                "上記のプランに基づいて、プロジェクトのコンテキストメモ（context.md）を生成してください。\n"
+                "以下の4セクションを含むMarkdown形式で出力してください:\n\n"
+                "## プロジェクト概要\n"
+                "プロジェクトの目的・主要機能・対象ユーザーを簡潔に記述する。\n\n"
+                "## 生成されたファイル一覧\n"
+                "各ファイルのパスと役割を箇条書きで記述する。\n\n"
+                "## アーキテクチャメモ\n"
+                "主要な設計決定・パターン・ファイル間の依存関係を記述する。\n\n"
+                "## 実装メモ\n"
+                "今後の実装・変更時に参照すべき規則・慣習・注意点を記述する。\n\n"
+                "更新後のcontext.md全文のみを出力してください。見出しや本文以外の説明は不要です。"
+            ),
+        ])
+        return self._guard_budget(prompt, "context_from_plan")
+
     def build_context_update_prompt(
         self,
         previous_context: str,
@@ -419,36 +517,139 @@ class ContextService:
         # )
         return self._guard_budget(prompt, f"file_summary:{file_path}")
 
+    # セクション別の具体的な分析指示 — 各セクションで何を書くべきかをLLMに明示する
+    _SECTION_GUIDANCE: dict = {
+        "Project Overview": (
+            "Cover: (1) what the project does and its primary goals, (2) intended users or audience, "
+            "(3) key technologies and language stack, (4) overall architecture style "
+            "(e.g. Clean Architecture, MVC, monolith, microservice), "
+            "(5) any notable design philosophy or constraints. Aim for 300-500 words."
+        ),
+        "Module Map": (
+            "Produce a Markdown table listing every major module/package with columns: "
+            "Module | Layer (domain/application/infrastructure/interface) | Responsibility. "
+            "Then add a short paragraph describing how the layers interact. "
+            "Include sub-packages where meaningful."
+        ),
+        "Entry Points & Startup Flow": (
+            "Describe: (1) the main entry point file and function, "
+            "(2) the initialization sequence step-by-step (dependency injection, config loading, server start, etc.), "
+            "(3) any background threads or processes launched at startup, "
+            "(4) how the app handles shutdown/cleanup. Use a numbered list for the sequence."
+        ),
+        "Data Flow": (
+            "Trace how data moves through the system: "
+            "(1) primary input sources (HTTP request, file, user input), "
+            "(2) processing pipeline (parsing, validation, transformation, business logic), "
+            "(3) storage or output (DB write, file write, HTTP response). "
+            "Give at least one concrete end-to-end example with actual function/method names."
+        ),
+        "Key Interfaces & Contracts": (
+            "Document: (1) all Protocol/interface/abstract class definitions with their method signatures, "
+            "(2) major Pydantic models or data schemas, "
+            "(3) public API contracts (REST endpoints, event schemas). "
+            "Use code blocks for signatures where helpful."
+        ),
+        "External Dependencies": (
+            "Produce a Markdown table: Library | Version (if known) | Purpose | Risk/Notes. "
+            "Group by category (LLM/AI, web framework, storage, utilities). "
+            "Flag any dependencies with known security concerns, heavy resource use, or limited maintenance."
+        ),
+        "Configuration": (
+            "List: (1) all configuration files and their formats, "
+            "(2) all environment variables the app reads, "
+            "(3) the config loading order and override mechanism, "
+            "(4) required vs optional settings and their defaults. "
+            "Use a table for env vars: Name | Default | Description."
+        ),
+        "Test Coverage": (
+            "Describe: (1) testing strategy (unit, integration, e2e), "
+            "(2) test framework(s) used, "
+            "(3) rough coverage estimate if determinable from the codebase, "
+            "(4) what is well-tested vs what is untested or difficult to test, "
+            "(5) any mocking or fixture patterns used. "
+            "Be specific about gaps."
+        ),
+        "Notable Patterns & Design Decisions": (
+            "Identify: (1) architectural patterns used (Repository, Factory, Strategy, etc.) with examples, "
+            "(2) specific design decisions that stand out and the likely reasoning behind them, "
+            "(3) any trade-offs that are evident in the code. "
+            "Reference actual file/class names to ground each point."
+        ),
+        "Potential Issues & Technical Debt": (
+            "List concrete issues sorted by estimated severity (High/Medium/Low): "
+            "for each item state the issue, where it lives (file/function), and a suggested fix direction. "
+            "Include: error handling gaps, performance hotspots, security concerns, "
+            "missing validation, TODO/FIXME comments, and coupling problems."
+        ),
+        "Project Health & Code Quality Analysis": (
+            "Assess: (1) code readability and consistency, "
+            "(2) documentation quality (docstrings, comments, README), "
+            "(3) modularity and separation of concerns (1-5 score with justification), "
+            "(4) test confidence level, "
+            "(5) overall maintainability rating with a brief rationale. "
+            "Be candid — include both strengths and weaknesses."
+        ),
+        "How to Extend This Project": (
+            "Provide a practical guide for the three most common extension scenarios "
+            "(e.g. adding a new API endpoint, adding a new LLM operation, adding a new storage adapter). "
+            "For each: list the exact files to create/modify, describe the minimal changes needed, "
+            "and note any pitfalls or conventions to follow. Use numbered steps."
+        ),
+    }
+
     def build_report_section_prompt(
         self,
         section_name: str,
         project_index_json: str,
         relevant_summaries: List[tuple[str, str]],
+        language: str = "ja",
     ) -> tuple[str, int]:
         """
         レポートセクション生成のプロンプトを組み立てる。
+        セクション別の具体的な指示を注入してレポートの深度と一貫性を高める。
 
         Args:
             section_name: セクション名
             project_index_json: ProjectIndexのJSON文字列
-            relevant_summaries: [(ファイルパス, サマリー)] のリスト
+            relevant_summaries: [(ファイルパス, サマリー)] のリスト（各最大400文字）
+            language: 出力言語 ("ja" = 日本語, "en" = 英語)
 
         Returns:
-            組み立てたプロンプト文字列
+            (プロンプト文字列, 推定トークン数)
         """
         summaries_text = "\n".join(
-            f"- {path}: {summary}" for path, summary in relevant_summaries
+            f"- {path}:\n  {summary}" for path, summary in relevant_summaries
         )
 
+        section_guidance = self._SECTION_GUIDANCE.get(
+            section_name,
+            "Provide a detailed, structured analysis of this section using markdown formatting."
+        )
+
+        if language == "en":
+            lang_rule = "- LANGUAGE: Write all content in English."
+        else:
+            # Bilingual — stated in both languages so the model cannot miss it
+            # even after processing a long English guidance block.
+            lang_rule = (
+                "- 【言語 / LANGUAGE】必ず日本語で記述すること。"
+                " Write ALL output in Japanese (日本語). "
+                "The guidance above is structural instruction only — your written content MUST be in Japanese."
+            )
+
         prompt = (
-            f"プロジェクト概要:\n{project_index_json}\n\n"
-            f"関連ファイルサマリー:\n{summaries_text}\n\n"
-            f"上記の情報を基に、以下のセクションについて詳細な分析を日本語で記述してください。\n"
-            f"セクション: {section_name}\n\n"
-            f"出力ルール:\n"
-            f"- セクションタイトル（見出し行）は出力しないでください。内容のみを出力してください。\n"
-            f"- マークダウン形式で記述してください（本文中の小見出しは ## / ### を使用可）。\n"
-            f"- このセクションの内容のみを出力してください。"
+            f"You are analyzing a software project.\n\n"
+            f"Project metadata:\n{project_index_json}\n\n"
+            f"Most relevant file summaries:\n{summaries_text}\n\n"
+            f"Section to write: **{section_name}**\n\n"
+            f"Specific guidance for this section:\n{section_guidance}\n\n"
+            f"Output rules:\n"
+            f"{lang_rule}\n"
+            f"- Do NOT output the section title/heading — content only.\n"
+            f"- Use Markdown (### subheadings, tables, code blocks, bullet lists as appropriate).\n"
+            f"- Be specific: reference actual file names, class names, and function names from the summaries.\n"
+            f"- Output only the content for this section, nothing else."
         )
         return self._guard_budget(prompt, f"report_section:{section_name}"), _estimate_tokens(prompt)
 
@@ -490,6 +691,82 @@ class ContextService:
         )
         return self._guard_budget(prompt, "qa_file_selection")
 
+    def _build_qa_prompt_ultra(
+        self,
+        question: str,
+        project_index_json: str,
+        top_summaries: List[tuple[str, str]],
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+        conversation_history: Optional[List[Message]] = None,
+    ) -> tuple[str, int]:
+        """超高速Q&A用プロンプト。レポートセクションと同じ構造: 概要+サマリー+質問+1行指示。"""
+        parts = [f"プロジェクト概要:\n{project_index_json}"]
+
+        if pinned_contents:
+            pin_lines = "\n".join(f"- {p}: {s}" for p, s in pinned_contents)
+            parts.append(f"[ピン留めファイル サマリー]\n{pin_lines}")
+
+        if top_summaries:
+            sum_lines = "\n".join(f"- {p}: {s}" for p, s in top_summaries)
+            parts.append(f"関連ファイルサマリー:\n{sum_lines}")
+
+        if conversation_history:
+            hist = "\n".join(
+                f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}"
+                for m in conversation_history[-2:]
+            )
+            parts.append(f"会話履歴:\n{hist}")
+
+        parts.append(
+            f"質問: {question}\n\n"
+            "コードベースに基づいて簡潔に回答してください。具体的なファイル名・クラス名・関数名を使うこと。"
+        )
+
+        prompt = "\n\n".join(parts)
+        estimated = _estimate_tokens(prompt)
+        return self._guard_budget(prompt, "qa_ultra"), estimated
+
+    def _build_qa_prompt_fast(
+        self,
+        question: str,
+        project_index_json: str,
+        top_summaries: List[tuple[str, str]],
+        full_contents: List[tuple[str, str]],
+        conversation_history: List[Message],
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+    ) -> tuple[str, int]:
+        """高速Q&A用の軽量プロンプト。whitelist・RULE 1-5・サマリー省略で最小トークン数を実現。"""
+        parts = [f"プロジェクト概要:\n{project_index_json}"]
+
+        # History — last 3 turns only
+        if conversation_history:
+            history_text = "\n".join(
+                f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}"
+                for m in conversation_history[-3:]
+            )
+            parts.append(f"会話履歴:\n{history_text}")
+
+        # Pinned files (already capped at 800 chars each by the service layer)
+        if pinned_contents:
+            pin_texts = "\n\n".join(f"--- {p} ---\n{c}" for p, c in pinned_contents)
+            parts.append(f"[ピン留めファイル]\n{pin_texts}")
+
+        # Additional file snippets from RAG (top 3, 800 chars each)
+        for fc_path, fc_content in (full_contents or [])[:3]:
+            parts.append(f"--- {fc_path} ---\n{fc_content[:800]}")
+
+        instructions = (
+            f"質問: {question}\n\n"
+            "コードベースに基づいて簡潔に回答してください。\n"
+            "1. 具体的なクラス名・関数名・ファイルパスを使うこと。\n"
+            "2. コンテキストにない情報は正直に述べ、推測は '[推測]' と明示すること。\n"
+        )
+        parts.append(instructions)
+
+        prompt = "\n\n".join(parts)
+        estimated = _estimate_tokens(prompt)
+        return self._guard_budget(prompt, "qa_fast"), estimated
+
     def build_qa_prompt(
         self,
         question: str,
@@ -500,6 +777,9 @@ class ContextService:
         dep_map: Optional[Dict[str, List[str]]] = None,
         pinned_contents: Optional[List[tuple[str, str]]] = None,
         workspace_projects: Optional[List[Dict[str, object]]] = None,
+        pinned_depth_map: Optional[Dict[str, int]] = None,
+        direct_pinned_set: Optional[Set[str]] = None,
+        mode: str = "precise",
     ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
@@ -511,23 +791,40 @@ class ContextService:
             full_contents: ファイルの全内容
             conversation_history: 最近10件の会話履歴
             dep_map: ファイルパス → インポート先パスのリスト（依存関係マップ）
+            mode: "precise" | "fast" | "ultra"
 
         Returns:
             (プロンプト文字列, 推定トークン数)
         """
-        # 固定コスト部分: 質問・概要・依存関係マップ・指示文
-        instructions = (
-            f"質問: {question}\n\n"
-            "あなたはシニアソフトウェアアーキテクトとして、上記のコードベースに基づいて極めて詳細かつ網羅的に回答してください。\n"
-            "以下のルールに厳密に従ってください：\n"
-            "1. 抽象的な説明を避け、具体的なクラス名、関数名、変数名、データ構造を明記すること。\n"
-            "2. 情報を引用する際は、必ず正確なファイルパス（例: `src/main.py`）を併記すること。上記の依存関係マップに記載されたパスのみを使用し、推測しないこと。\n"
-            "3. 対象コンポーネントが他のどのファイル・モジュールに依存しているか、また何から依存されているか（依存関係）を依存関係マップに基づいて説明すること。\n"
-            "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
-            "5. 提供されたコンテキスト内に情報が不足している場合は、推測で補わず「〇〇の詳細はコンテキストにありません」と正直に述べること。\n"
-        )
+        # ── Ultra mode: report-section structure — summaries only, no file reads ──
+        if mode == "ultra":
+            return self._build_qa_prompt_ultra(
+                question=question,
+                project_index_json=project_index_json,
+                top_summaries=top_summaries,
+                pinned_contents=pinned_contents,
+                conversation_history=conversation_history,
+            )
+
+        # ── Fast mode: lightweight prompt — no whitelist, compact rules, minimal summaries ──
+        if mode == "fast":
+            return self._build_qa_prompt_fast(
+                question=question,
+                project_index_json=project_index_json,
+                top_summaries=top_summaries,
+                full_contents=full_contents,
+                conversation_history=conversation_history,
+                pinned_contents=pinned_contents,
+            )
 
         parts = [f"プロジェクト概要:\n{project_index_json}"]
+        _pinned_added: List[tuple[str, str]] = []
+        _injected_paths: List[str] = []
+        _doc_mentioned_paths: List[str] = []
+
+        # ピン留めがある場合はサマリーを8件に絞り、ファイル内容注入のトークン予算を確保する
+        if pinned_contents and len(top_summaries) > 8:
+            top_summaries = top_summaries[:8]
 
         # 依存関係マップ — ファイル間の実際のインポート関係をLLMに提示する
         if dep_map:
@@ -578,7 +875,8 @@ class ContextService:
                     parts.append("\n".join(lines))
 
         # 会話履歴 — O(n) トリミング。各メッセージのトークン数を事前計算し差分更新する。
-        _instr_tokens = _estimate_tokens(instructions)
+        # 指示文のトークン数を事前推定（実際のinstances変数はコンテンツ注入後に確定する）
+        _instr_tokens = _estimate_tokens(question) + 350  # fixed rule text ≈ 350 tokens
         _parts_tokens = _estimate_tokens("\n\n".join(parts))
         if conversation_history:
             history_msgs = list(conversation_history[-10:])
@@ -603,28 +901,37 @@ class ContextService:
         _fixed_cost = _parts_tokens + _instr_tokens + 200
         available = max(self._token_limit - _fixed_cost, 0)
 
-        # ピン留めファイルを優先して注入（予算内）
+        # ピン留めファイルを優先して注入（予算内）— 深さに応じたラベルと文書区別付き
         if pinned_contents:
-            pinned_added: List[tuple[str, str]] = []
             for p, c in pinned_contents:
                 fc_text = f"--- {p} ---\n{c}"
                 cost = _estimate_tokens(fc_text)
                 if cost <= available:
-                    pinned_added.append((p, c))
+                    _pinned_added.append((p, c))
                     available -= cost
                 else:
-                    # ファイルが大きすぎる場合は先頭部分のみ注入して警告
                     _chars_budget = max(available * 3, 500)
-                    pinned_added.append((p, c[:_chars_budget]))
+                    _pinned_added.append((p, c[:_chars_budget]))
                     available = 0
                     logger.warning(
                         "ピン留めファイル [%s] がトークン予算を超過。先頭 %d 文字のみ注入。",
                         p, _chars_budget,
                     )
                     break
-            if pinned_added:
-                pin_texts = "\n".join(f"--- {p} ---\n{c}" for p, c in pinned_added)
-                parts.append(f"[ピン留めコンテキスト — ユーザーが選択したファイル]\n{pin_texts}")
+            if _pinned_added:
+                pin_texts_list: List[str] = []
+                for p, c in _pinned_added:
+                    depth = pinned_depth_map.get(p, 0) if pinned_depth_map else 0
+                    label = _pinned_label(p, depth, direct_pinned_set)
+                    pin_texts_list.append(f"{label}\n--- {p} ---\n{c}")
+                    _injected_paths.append(p)
+                    if _is_doc_file(p):
+                        for m in _BACKTICK_PATH_RE.finditer(c):
+                            candidate = m.group(1)
+                            if "/" in candidate or "." in candidate:
+                                _doc_mentioned_paths.append(candidate)
+                pin_texts = "\n\n".join(pin_texts_list)
+                parts.append(f"[ピン留めコンテキスト — ユーザーが選択したファイルと自動展開された依存関係]\n{pin_texts}")
 
         # 残予算でその他ファイルを注入
         for fc_path, fc_content in full_contents:
@@ -634,13 +941,64 @@ class ContextService:
             cost = _estimate_tokens(fc_text)
             if cost <= available:
                 parts.append(f"ファイル内容:\n{fc_text}")
+                _injected_paths.append(fc_path)
                 available -= cost
             else:
-                # 残予算に収まる分だけ先頭を注入
                 _chars = max(available * 3, 200)
                 parts.append(f"ファイル内容:\n--- {fc_path} ---\n{fc_content[:_chars]}\n...[予算超過により切り詰め]")
+                _injected_paths.append(fc_path)
                 available = 0
                 break
+
+        # パスホワイトリスト — LLMが参照できるファイルパスの完全なリスト
+        _all_paths = sorted(set(_injected_paths))
+        if _all_paths:
+            whitelist_lines = [
+                "AUTHORIZED FILE PATHS — You MUST use ONLY these exact paths verbatim.",
+                "Never invent, guess, abbreviate, or modify any file path:",
+            ]
+            for _ap in _all_paths:
+                whitelist_lines.append(f"  • {_ap}")
+            if _doc_mentioned_paths:
+                _uniq_doc_paths = sorted(set(_doc_mentioned_paths))
+                whitelist_lines.append(
+                    "Documentation also explicitly references: "
+                    + ", ".join(f"`{dp}`" for dp in _uniq_doc_paths)
+                )
+            parts.append("\n".join(whitelist_lines))
+
+        # 指示文 — 反ハルシネーション・パスロック・提案ルール
+        instructions = (
+            f"質問: {question}\n\n"
+            "=== STRICT RULES — YOU MUST FOLLOW ALL OF THESE ===\n"
+            "RULE 1 — PATH LOCK: Reference ONLY file paths from the AUTHORIZED FILE PATHS list above. "
+            "Copy paths VERBATIM, character-for-character. Never invent, shorten, or guess paths.\n"
+            "RULE 2 — FACT vs PROPOSAL SEPARATION: Clearly separate what EXISTS in the codebase "
+            "from what you are PROPOSING. "
+            "If specific implementation details are not in the provided context, first state: "
+            "'この情報はコンテキストにありません' — then continue with a '## 提案 (Proposal)' section. "
+            "Never present a proposal as if it were existing code.\n"
+            "RULE 3 — DOCUMENTATION IS AUTHORITATIVE: Files labeled [DOCUMENTATION — GROUND TRUTH] "
+            "define the canonical rules, structure, and conventions. Always follow them strictly. "
+            "Never contradict documentation.\n"
+            "RULE 4 — CITE SOURCES: When referencing code, always include the exact file path. "
+            "Use the exact class names, function names, and variable names from the context.\n"
+            "RULE 5 — DEPENDENCY FIDELITY: Only describe import relationships shown in the "
+            "dependency map. Never invent new import or dependency relationships.\n"
+            "=== END RULES ===\n\n"
+            "あなたはシニアソフトウェアアーキテクトとして、上記のコードベースに基づいて極めて詳細かつ網羅的に回答してください。\n"
+            "1. 抽象的な説明を避け、具体的なクラス名、関数名、変数名、データ構造を明記すること。\n"
+            "2. AUTHORIZED FILE PATHS に記載されたパスのみを使用し、推測しないこと。\n"
+            "3. 対象コンポーネントの依存関係を依存関係マップに基づいて説明すること。\n"
+            "4. ロジックのフローや実行順序が存在する場合は、ステップ・バイ・ステップで分解して解説すること。\n"
+            "5. コンテキストにない情報は正直に述べること。ただし実装方法を問う質問の場合は、"
+            "コンテキストから読み取れる設計パターン・既存クラス・アーキテクチャに基づいた提案を"
+            "'## 提案 (Proposal)' セクションとして追加すること。提案セクションには:\n"
+            "   a) 再利用すべき既存モジュール・クラス（AUTHORIZED FILE PATHS から引用）を明記する。\n"
+            "   b) 既存の設計ルール（ピン留めドキュメントや既存コードのパターン）に厳密に従う。\n"
+            "   c) 仮定や推測は明示的にラベルを付けて示す（例: '[仮定] ...'）。\n"
+            "   d) 提案はあくまで参考であり、既存コードではないことを冒頭で明示する。\n"
+        )
 
         parts.append(instructions)
 
