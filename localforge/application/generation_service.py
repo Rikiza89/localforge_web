@@ -107,6 +107,59 @@ class GenerationService:
         self._llm = llm
         self._context = context
 
+    def generate_context_md(self, root: Path, model: str, plan: "GenerationPlan", project_svc: object) -> None:
+        """
+        完成したプランからcontext.mdを一括生成して保存する。
+        バックグラウンドスレッドで呼び出すことを前提とした非ストリーミング実装。
+
+        Args:
+            root: プロジェクトルート
+            model: 使用するOllamaモデル名
+            plan: 完了済みGenerationPlan
+            project_svc: save_context_md(root, content)を持つProjectServiceインスタンス
+        """
+        try:
+            plan_json = plan.model_dump_json(indent=2)
+            prompt = self._context.build_context_from_plan_prompt(plan_json)
+            tokens = []
+            for token in self._llm.stream_completion(model, prompt, keep_alive="2h"):
+                tokens.append(token)
+            content = "".join(tokens).strip()
+            if content:
+                project_svc.save_context_md(root, content)
+                logger.info("context.md を生成しました (%d 文字): %s", len(content), root)
+        except Exception as exc:
+            logger.warning("context.md 生成エラー: %s", exc)
+
+    def update_context_md_incremental(self, root: Path, model: str, file_path: str, project_svc: object) -> None:
+        """
+        単一ファイル再生成後にcontext.mdをインクリメンタル更新する。
+        バックグラウンドスレッドで呼び出すことを前提とした非ストリーミング実装。
+
+        Args:
+            root: プロジェクトルート
+            model: 使用するOllamaモデル名
+            file_path: 再生成したファイルの相対パス
+            project_svc: get_context_md / save_context_md を持つProjectServiceインスタンス
+        """
+        try:
+            fp = root / file_path
+            if not fp.exists():
+                return
+            lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
+            first_200 = "\n".join(lines[:200])
+            existing = project_svc.get_context_md(root)
+            prompt = self._context.build_context_update_prompt(existing, file_path, first_200)
+            tokens = []
+            for token in self._llm.stream_completion(model, prompt, keep_alive="2h"):
+                tokens.append(token)
+            content = "".join(tokens).strip()
+            if content:
+                project_svc.save_context_md(root, content)
+                logger.info("context.md をインクリメンタル更新しました [%s]: %s", file_path, root)
+        except Exception as exc:
+            logger.warning("context.md インクリメンタル更新エラー: %s", exc)
+
     def stream_plan(
         self,
         root: Path,

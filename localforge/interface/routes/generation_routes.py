@@ -62,6 +62,20 @@ _HEARTBEAT_INTERVAL = 15  # 秒
 _HB = {"heartbeat": True}
 
 
+def _after_done(gen, callback):
+    """Yield all events from gen; call callback() once after done:True is seen."""
+    done_seen = False
+    for event in gen:
+        yield event
+        if event.get("done") and not done_seen:
+            done_seen = True
+    if done_seen:
+        try:
+            callback()
+        except Exception as exc:
+            logger.warning("post-generation callback error: %s", exc)
+
+
 def _sse_response(generator):
     """
     SSEレスポンスを生成する。
@@ -338,7 +352,15 @@ def stream_generation():
         model=model,
         context_md=context_md,
     )
-    return _sse_response(gen)
+
+    def _update_ctx():
+        threading.Thread(
+            target=generation_svc.generate_context_md,
+            args=(root, model, plan, project_svc),
+            daemon=True,
+        ).start()
+
+    return _sse_response(_after_done(gen, _update_ctx))
 
 
 @bp.route("/plan/saved", methods=["GET"])
@@ -420,7 +442,15 @@ def stream_resume_generation():
         context_md=context_md,
         start_from=start_from,
     )
-    return _sse_response(gen)
+
+    def _update_ctx():
+        threading.Thread(
+            target=generation_svc.generate_context_md,
+            args=(root, model, plan, project_svc),
+            daemon=True,
+        ).start()
+
+    return _sse_response(_after_done(gen, _update_ctx))
 
 
 @bp.route("/logs", methods=["GET"])
@@ -497,7 +527,15 @@ def regenerate_file():
         context_md=context_md,
         file_path=file_path,
     )
-    return _sse_response(gen)
+
+    def _update_ctx():
+        threading.Thread(
+            target=generation_svc.update_context_md_incremental,
+            args=(root, model, file_path, project_svc),
+            daemon=True,
+        ).start()
+
+    return _sse_response(_after_done(gen, _update_ctx))
 
 
 def _synthesize_plan_for_file(root: Path, file_path: str) -> GenerationPlan:

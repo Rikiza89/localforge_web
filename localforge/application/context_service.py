@@ -388,6 +388,34 @@ class ContextService:
             prompt, f"diff_file:{target_file}[{chunk_idx + 1}/{total_chunks}]"
         ), _estimate_tokens(prompt)
 
+    def build_context_from_plan_prompt(self, plan_json: str) -> str:
+        """
+        完成したプランからcontext.mdを一括生成するプロンプトを組み立てる。
+
+        Args:
+            plan_json: 完了済みGenerationPlanのJSON文字列
+
+        Returns:
+            組み立てたプロンプト文字列
+        """
+        prompt = "\n\n".join([
+            f"完成したプロジェクトプラン:\n{plan_json}",
+            (
+                "上記のプランに基づいて、プロジェクトのコンテキストメモ（context.md）を生成してください。\n"
+                "以下の4セクションを含むMarkdown形式で出力してください:\n\n"
+                "## プロジェクト概要\n"
+                "プロジェクトの目的・主要機能・対象ユーザーを簡潔に記述する。\n\n"
+                "## 生成されたファイル一覧\n"
+                "各ファイルのパスと役割を箇条書きで記述する。\n\n"
+                "## アーキテクチャメモ\n"
+                "主要な設計決定・パターン・ファイル間の依存関係を記述する。\n\n"
+                "## 実装メモ\n"
+                "今後の実装・変更時に参照すべき規則・慣習・注意点を記述する。\n\n"
+                "更新後のcontext.md全文のみを出力してください。見出しや本文以外の説明は不要です。"
+            ),
+        ])
+        return self._guard_budget(prompt, "context_from_plan")
+
     def build_context_update_prompt(
         self,
         previous_context: str,
