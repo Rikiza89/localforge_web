@@ -1643,18 +1643,6 @@ async function showGenerationLogs() {
   }
 }
 
-/**
- * UIで選択中のモデルをプロジェクト設定に同期する。
- */
-async function _syncModelToProject() {
-  const modelEl = document.getElementById("model-selector");
-  const model = modelEl ? modelEl.value : null;
-  if (model) {
-    try { await apiRequest("/api/project/model", "POST", { model }); }
-    catch (e) { console.warn("モデル同期エラー:", e.message); }
-  }
-}
-
 // =========================================================================
 // 初期化
 // =========================================================================

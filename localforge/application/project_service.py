@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from localforge.domain.models import (
+    LOCALFORGE_DIR as _LOCALFORGE_DIR,
     FileNode,
     GenerationLogEntry,
     GenerationPlan,
@@ -26,8 +27,6 @@ from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
 
 logger = logging.getLogger(__name__)
-
-from localforge.domain.models import LOCALFORGE_DIR as _LOCALFORGE_DIR
 _CONFIG_FILE = "config.json"
 _CONTEXT_FILE = "context.md"
 _INDEX_JSONL = "index.jsonl"
