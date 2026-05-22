@@ -396,14 +396,3 @@ def get_summary():
     rag_ready = vector.collection_exists(project.root) if vector else False
     summary["rag_ready"] = rag_ready
     return jsonify(summary)
-
-
-@bp.route("/sections", methods=["GET"])
-def get_report_sections():
-    """
-    Return the ordered list of report section names.
-    Used by the frontend to populate the section-selector checkboxes dynamically
-    so the JS and Python lists never diverge.
-    """
-    from localforge.application.explanation_service import REPORT_SECTIONS
-    return jsonify({"sections": REPORT_SECTIONS})
