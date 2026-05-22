@@ -455,7 +455,6 @@ async function openFileEditor(filePath) {
 
 /**
  * Explain a single file with AI.
- */
  * @param {string} filePath - 説明するファイルのパス
  */
 async function explainSingleFile(filePath) {
