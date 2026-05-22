@@ -1043,11 +1043,12 @@ class AnalysisService:
         """
         from localforge.infrastructure.dependency_resolver import build_imported_by
 
-        chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
+        chunk_map: Dict[str, FileChunk] = {c.path.replace("\\", "/"): c for c in chunks}
         imported_by: Dict[str, List[str]] = build_imported_by(chunks)
 
-        seen: Set[str] = set(selected_paths)
-        ordered: List[str] = [p for p in selected_paths if p in chunk_map]
+        norm_selected = [p.replace("\\", "/").rstrip("/") for p in selected_paths]
+        seen: Set[str] = set(norm_selected)
+        ordered: List[str] = [p for p in norm_selected if p in chunk_map]
         depth_map: Dict[str, int] = {p: 0 for p in ordered}
 
         # BFS frontier: paths added at the previous depth level
@@ -1147,7 +1148,7 @@ class AnalysisService:
             (expanded_chunks, dep_map, depth_map) — depth_map maps each path to its
             BFS hop count (0 = directly pinned by user, 1+ = auto-included via imports)
         """
-        chunk_map: Dict[str, FileChunk] = {c.path: c for c in chunks}
+        chunk_map: Dict[str, FileChunk] = {c.path.replace("\\", "/"): c for c in chunks}
         resolved_files: List[str] = []
         seen: Set[str] = set()
 
@@ -1159,6 +1160,7 @@ class AnalysisService:
             } or not any(
                 c.path.replace("\\", "/") == norm for c in chunks
             )
+            before = len(resolved_files)
             if is_folder:
                 prefix = norm + "/"
                 for c in chunks:
@@ -1171,6 +1173,23 @@ class AnalysisService:
                 if norm in chunk_map and norm not in seen:
                     seen.add(norm)
                     resolved_files.append(norm)
+
+            if len(resolved_files) == before:
+                logger.warning(
+                    "ピン留めパスをチャンクに解決できませんでした: '%s' "
+                    "(is_folder=%s, インデックスに存在しない可能性があります)",
+                    norm, is_folder,
+                )
+
+        if not resolved_files and pinned_paths:
+            logger.warning(
+                "resolve_pinned_chunks: %d 件のピン留めパスが全て未解決です。"
+                "インデックスを再構築するか、パスを確認してください。"
+                " サンプル pinned_paths=%s  サンプル chunk paths=%s",
+                len(pinned_paths),
+                pinned_paths[:3],
+                [c.path for c in chunks[:3]],
+            )
 
         # import依存関係を展開（expand_with_dependenciesを再利用）
         return self.expand_with_dependencies(chunks, resolved_files, max_total=max_total)
