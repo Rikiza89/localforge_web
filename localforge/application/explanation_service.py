@@ -16,6 +16,7 @@ from typing import Dict, Generator, List, Optional
 
 from localforge.application.analysis_service import AnalysisService
 from localforge.application.context_service import ContextService
+from localforge.application.generation_service import is_cancelled, reset_cancel
 from localforge.domain.models import FileChunk, GenerationLogEntry, Message, ProjectIndex
 from localforge.infrastructure.disk_cache import DiskCache
 from localforge.infrastructure.ollama_client import OllamaClient
@@ -503,6 +504,84 @@ class ExplanationService:
                 pass
         return True
 
+    def _stream_answer_ultra(
+        self,
+        root: Path,
+        model: str,
+        question: str,
+        history: List[Message],
+        project_index: "ProjectIndex",
+        pinned_paths: Optional[List[str]] = None,
+    ) -> Generator[dict, None, None]:
+        """超高速Q&Aモード: ゼロディスクリード、サマリーのみ、レポートセクションと同等速度。"""
+        chunks = project_index.file_chunks
+
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
+
+        yield {"phase": "超高速モード", "detail": "サマリーのみでコンテキストを構築中"}
+
+        # Pinned: use summary field only, no disk reads
+        pinned_summaries: List[tuple[str, str]] = []
+        if pinned_paths:
+            chunk_map = {c.path.replace("\\", "/"): c for c in chunks}
+            for p in pinned_paths:
+                norm = p.replace("\\", "/").rstrip("/")
+                c = chunk_map.get(norm)
+                if c and c.summary:
+                    pinned_summaries.append((c.path, c.summary))
+                else:
+                    # folder: collect child summaries
+                    prefix = norm + "/"
+                    for c2 in chunks:
+                        cp = c2.path.replace("\\", "/")
+                        if (cp == norm or cp.startswith(prefix)) and c2.summary:
+                            pinned_summaries.append((c2.path, c2.summary))
+
+        # RAG top 3 summaries
+        top_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=3)
+        pinned_set = {p for p, _ in pinned_summaries}
+        rag_summaries = [(c.path, c.summary or "") for c in top_chunks if c.path not in pinned_set and c.summary]
+
+        index_json = self._get_index_json(root, project_index, include_files=False)
+
+        prompt, tokens = self._context.build_qa_prompt(
+            question=question,
+            project_index_json=index_json,
+            top_summaries=rag_summaries,
+            full_contents=[],
+            conversation_history=history[-2:],
+            pinned_contents=[(p, s) for p, s in pinned_summaries] if pinned_summaries else None,
+            mode="ultra",
+        )
+
+        yield {"prompt_preview": prompt[:500], "prompt_tokens": tokens}
+        yield {"status": f"Ollamaが回答を生成中... (推定 {tokens} トークン)"}
+
+        answer_tokens: List[str] = []
+        try:
+            for token in self._llm.stream_completion(model, prompt, keep_alive="2h"):
+                if is_cancelled():
+                    break
+                answer_tokens.append(token)
+                yield {"token": token}
+        except Exception as exc:
+            logger.error("超高速Q&A生成エラー: %s", exc)
+            yield {"error": str(exc)}
+            return
+
+        if answer_tokens:
+            answer = "".join(answer_tokens)
+            _rc = self._get_response_disk_cache(root)
+            pi_path = root / _LOCALFORGE_DIR / "project_index.json"
+            try:
+                _mtime = pi_path.stat().st_mtime
+            except OSError:
+                _mtime = 0.0
+            _key = self._make_response_cache_key(root, question, pinned_paths, history, _mtime)
+            _rc.set(_key, answer)
+
+        yield {"done": True}
+
     def stream_answer(
         self,
         root: Path,
@@ -511,7 +590,7 @@ class ExplanationService:
         history: List[Message],
         workspace_roots: Optional[List[tuple[Path, str]]] = None,
         pinned_paths: Optional[List[str]] = None,
-        fast_mode: bool = False,
+        mode: str = "precise",
     ) -> Generator[dict, None, None]:
         """
         Q&A質問への回答をSSEイベントとしてストリーミング生成する。
@@ -526,9 +605,20 @@ class ExplanationService:
         Yields:
             SSEペイロード辞書（phase, prompt_preview, token, done, error）
         """
+        reset_cancel()
+
         project_index = self._analysis.load_project_index(root)
         if not project_index:
             yield {"error": "ProjectIndexが見つかりません。先にインデックスを構築してください。"}
+            return
+
+        # ── Ultra mode: summaries-only path (same structure as a report section) ──
+        if mode == "ultra":
+            yield from self._stream_answer_ultra(
+                root=root, model=model, question=question,
+                history=history, project_index=project_index,
+                pinned_paths=pinned_paths,
+            )
             return
 
         # Fire model warm-up immediately — phases A-G run in parallel with model loading.
@@ -568,7 +658,7 @@ class ExplanationService:
         # ── Phase A: ピン留めコンテキスト解決 ──
         # ピン留めファイルはユーザーが明示的に選んだもの。全内容を読み込む（文字数上限なし）。
         # トークン予算は build_qa_prompt 内で管理する。
-        # fast_mode では BFS を省略し直接選択ファイルのみを軽量読み込みする。
+        # mode == "fast" では BFS を省略し直接選択ファイルのみを軽量読み込みする。
         pinned_chunk_contents: List[tuple[str, str]] = []
         pinned_base_chunks: List = []
         _pinned_depth_map: dict = {}
@@ -577,7 +667,7 @@ class ExplanationService:
             yield {"phase": "ピン留めファイル解決中", "detail": f"{len(pinned_paths)} 件のパスを展開中"}
             yield {"status": f"ピン留めファイルを展開中... ({len(pinned_paths)} 件)"}
             try:
-                if fast_mode:
+                if mode == "fast":
                     # Fast mode: direct files only, no BFS, 800-char cap
                     pinned_chunks, _pdep, _pinned_depth_map = self._analysis.resolve_pinned_chunks(
                         root, pinned_paths, chunks, max_total=30, max_depth=1
@@ -591,7 +681,7 @@ class ExplanationService:
                 yield {"phase": "ピン留めファイル解決中", "detail": f"依存関係を含む {len(pinned_chunks)} ファイルを取得 (直接: {len(_direct_pinned_set)})"}
 
                 def _read_pinned(pc):
-                    if fast_mode:
+                    if mode == "fast":
                         max_chars = 800
                     else:
                         depth = _pinned_depth_map.get(pc.path, 0)
@@ -615,9 +705,9 @@ class ExplanationService:
                 logger.warning("ピン留めコンテキスト解決エラー: %s", exc)
 
         # ── Phase B: ワークスペース他プロジェクトのコンテキスト ──
-        # fast_mode ではワークスペース展開をスキップする
+        # mode == "fast" ではワークスペース展開をスキップする
         workspace_project_data: List[dict] = []
-        if workspace_roots and not fast_mode:
+        if workspace_roots and not mode == "fast":
             yield {"phase": "ワークスペース検索中", "detail": f"{len(workspace_roots)} プロジェクト"}
             yield {"status": "ワークスペースプロジェクトを検索中..."}
             _max_ws_chars = self._context.max_qa_file_chars() // 2
@@ -672,9 +762,9 @@ class ExplanationService:
 
         # ── Phase D: セマンティック検索で補完 ──
         # CPU専用では top_n を絞ってコンテキストサイズを抑制する（8000+ トークンを防ぐ）
-        # fast_mode では常に top_n=3 に絞る
+        # mode == "fast" では常に top_n=3 に絞る
         _is_cpu = not getattr(self._llm, "cuda_available", False)
-        _top_n = 3 if fast_mode else (5 if _is_cpu else 10)
+        _top_n = 3 if mode == "fast" else (5 if _is_cpu else 10)
         if pinned_base_chunks:
             # ピン留めファイルを起点に、不足分をセマンティック検索で補完
             base_chunks = list(pinned_base_chunks)
@@ -700,9 +790,9 @@ class ExplanationService:
             base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
 
         # ── Phase E: 依存関係展開 (BFS 10 hop, カスタムインポートのみ) ──
-        # fast_mode では BFS を完全にスキップして base_chunks をそのまま使う
+        # mode == "fast" では BFS を完全にスキップして base_chunks をそのまま使う
         # CPU専用: max_total を絞ってプロンプトサイズを抑制する
-        if fast_mode:
+        if mode == "fast":
             top_chunks = base_chunks
             dep_map: Dict[str, List[str]] = {}
             yield {"phase": "依存関係展開スキップ", "detail": f"高速モード: {len(base_chunks)} ファイルをそのまま使用"}
@@ -721,13 +811,13 @@ class ExplanationService:
         # ── Phase F: ファイル内容読み込み ──
         # CPU専用でピン留めなしの場合はフル内容を省略してサマリーのみ使用する。
         # フル内容は prompt を何千トークンも膨らませ、CPU での prefill を数倍遅くする。
-        # fast_mode では 800 文字上限で軽量読み込みする。
-        _inject_full_content = fast_mode or bool(pinned_base_chunks) or not _is_cpu
+        # mode == "fast" では 800 文字上限で軽量読み込みする。
+        _inject_full_content = mode == "fast" or bool(pinned_base_chunks) or not _is_cpu
         full_contents: List[tuple[str, str]] = []
         if _inject_full_content:
             yield {"phase": "ファイル内容読み込み中", "detail": f"{len(top_chunks)} ファイルをディスクから読み込み"}
             yield {"status": f"ファイル内容を読み込み中... ({len(top_chunks)} ファイル)"}
-            _max_chars = 800 if fast_mode else (self._context.max_qa_file_chars() if not _is_cpu else 3000)
+            _max_chars = 800 if mode == "fast" else (self._context.max_qa_file_chars() if not _is_cpu else 3000)
             _pinned_paths_set = {p for p, _ in pinned_chunk_contents}
             _chunks_to_read = [c for c in top_chunks if c.path not in _pinned_paths_set]
 
@@ -748,7 +838,7 @@ class ExplanationService:
         # ── Phase G: プロンプト構築 ──
         yield {"phase": "プロンプト構築中", "detail": "コンテキストを組み立てています"}
         yield {"status": "プロンプトを構築中..."}
-        _history_window = history[-3:] if fast_mode else history[-10:]
+        _history_window = history[-3:] if mode == "fast" else history[-10:]
         prompt, tokens = self._context.build_qa_prompt(
             question=question,
             project_index_json=index_json,
@@ -760,7 +850,7 @@ class ExplanationService:
             workspace_projects=workspace_project_data or None,
             pinned_depth_map=_pinned_depth_map if pinned_paths else None,
             direct_pinned_set=_direct_pinned_set if pinned_paths else None,
-            fast_mode=fast_mode,
+            mode=mode,
         )
 
         # プロンプトのプレビューを送信（最初の 1000 文字 + 末尾 200 文字）
@@ -803,6 +893,8 @@ class ExplanationService:
                 num_predict=_num_predict,
                 keep_alive="2h",
             ):
+                if is_cancelled():
+                    break
                 if not _first_token_received:
                     _first_token_received = True
                     _load_s = time.time() - start_time

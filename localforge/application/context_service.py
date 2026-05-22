@@ -663,6 +663,41 @@ class ContextService:
         )
         return self._guard_budget(prompt, "qa_file_selection")
 
+    def _build_qa_prompt_ultra(
+        self,
+        question: str,
+        project_index_json: str,
+        top_summaries: List[tuple[str, str]],
+        pinned_contents: Optional[List[tuple[str, str]]] = None,
+        conversation_history: Optional[List[Message]] = None,
+    ) -> tuple[str, int]:
+        """超高速Q&A用プロンプト。レポートセクションと同じ構造: 概要+サマリー+質問+1行指示。"""
+        parts = [f"プロジェクト概要:\n{project_index_json}"]
+
+        if pinned_contents:
+            pin_lines = "\n".join(f"- {p}: {s}" for p, s in pinned_contents)
+            parts.append(f"[ピン留めファイル サマリー]\n{pin_lines}")
+
+        if top_summaries:
+            sum_lines = "\n".join(f"- {p}: {s}" for p, s in top_summaries)
+            parts.append(f"関連ファイルサマリー:\n{sum_lines}")
+
+        if conversation_history:
+            hist = "\n".join(
+                f"{'ユーザー' if m.role == 'user' else 'アシスタント'}: {m.content}"
+                for m in conversation_history[-2:]
+            )
+            parts.append(f"会話履歴:\n{hist}")
+
+        parts.append(
+            f"質問: {question}\n\n"
+            "コードベースに基づいて簡潔に回答してください。具体的なファイル名・クラス名・関数名を使うこと。"
+        )
+
+        prompt = "\n\n".join(parts)
+        estimated = _estimate_tokens(prompt)
+        return self._guard_budget(prompt, "qa_ultra"), estimated
+
     def _build_qa_prompt_fast(
         self,
         question: str,
@@ -716,7 +751,7 @@ class ContextService:
         workspace_projects: Optional[List[Dict[str, object]]] = None,
         pinned_depth_map: Optional[Dict[str, int]] = None,
         direct_pinned_set: Optional[Set[str]] = None,
-        fast_mode: bool = False,
+        mode: str = "precise",
     ) -> tuple[str, int]:
         """
         Q&A回答のプロンプトを組み立てる。
@@ -728,12 +763,23 @@ class ContextService:
             full_contents: ファイルの全内容
             conversation_history: 最近10件の会話履歴
             dep_map: ファイルパス → インポート先パスのリスト（依存関係マップ）
+            mode: "precise" | "fast" | "ultra"
 
         Returns:
             (プロンプト文字列, 推定トークン数)
         """
+        # ── Ultra mode: report-section structure — summaries only, no file reads ──
+        if mode == "ultra":
+            return self._build_qa_prompt_ultra(
+                question=question,
+                project_index_json=project_index_json,
+                top_summaries=top_summaries,
+                pinned_contents=pinned_contents,
+                conversation_history=conversation_history,
+            )
+
         # ── Fast mode: lightweight prompt — no whitelist, compact rules, minimal summaries ──
-        if fast_mode:
+        if mode == "fast":
             return self._build_qa_prompt_fast(
                 question=question,
                 project_index_json=project_index_json,

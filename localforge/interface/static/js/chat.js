@@ -11,8 +11,8 @@ let _chatHistory = [];
 // 送信中フラグ
 let _chatSending = false;
 
-// Q&Aモード: true=高速, false=精密
-let _chatFastMode = true;
+// Q&Aモード: "ultra" | "fast" | "precise"
+let _chatMode = "ultra";
 
 /**
  * チャット履歴をリセットする。
@@ -65,19 +65,22 @@ function loadChatHistory(entries) {
  * Q&Aモードトグルを初期化する。
  */
 function initChatModeToggle() {
+  const ultraBtn = document.getElementById("chat-mode-ultra");
   const fastBtn = document.getElementById("chat-mode-fast");
   const preciseBtn = document.getElementById("chat-mode-precise");
-  if (!fastBtn || !preciseBtn) return;
+  if (!ultraBtn || !fastBtn || !preciseBtn) return;
 
-  function _applyMode(fast) {
-    _chatFastMode = fast;
-    fastBtn.classList.toggle("active", fast);
-    preciseBtn.classList.toggle("active", !fast);
+  function _applyMode(m) {
+    _chatMode = m;
+    ultraBtn.classList.toggle("active", m === "ultra");
+    fastBtn.classList.toggle("active", m === "fast");
+    preciseBtn.classList.toggle("active", m === "precise");
   }
 
-  fastBtn.addEventListener("click", () => _applyMode(true));
-  preciseBtn.addEventListener("click", () => _applyMode(false));
-  _applyMode(_chatFastMode);
+  ultraBtn.addEventListener("click", () => _applyMode("ultra"));
+  fastBtn.addEventListener("click", () => _applyMode("fast"));
+  preciseBtn.addEventListener("click", () => _applyMode("precise"));
+  _applyMode(_chatMode);
 }
 
 /**
@@ -145,7 +148,7 @@ async function sendChatMessage(question) {
     {
       question,
       history: _chatHistory.slice(-10).map(m => ({ role: m.role, content: m.content })),
-      fast_mode: _chatFastMode,
+      mode: _chatMode,
     },
     null,
     {

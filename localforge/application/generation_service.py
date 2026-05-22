@@ -59,6 +59,11 @@ def _sanitize_path(raw: str) -> str:
     return normalized
 
 
+def is_cancelled() -> bool:
+    """現在キャンセルが要求されているかを返す。"""
+    return _cancel_flag
+
+
 def request_cancel() -> None:
     """生成キャンセルを要求する（グローバルフラグを設定）。"""
     global _cancel_flag

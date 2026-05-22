@@ -229,7 +229,9 @@ def ask_question():
         if role in ("user", "assistant") and content:
             history.append(Message(role=role, content=content))
 
-    fast_mode = bool(data.get("fast_mode", False))
+    mode = data.get("mode", "ultra")
+    if mode not in ("precise", "fast", "ultra"):
+        mode = "ultra"
     model = project.config.model
     root = project.root
 
@@ -244,7 +246,7 @@ def ask_question():
         history=history,
         workspace_roots=workspace_roots or None,
         pinned_paths=pinned_paths or None,
-        fast_mode=fast_mode,
+        mode=mode,
     )
     return _sse_response(gen)
 

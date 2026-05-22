@@ -299,19 +299,20 @@ class OllamaClient:
         if not model:
             return
         try:
-            # /api/generate だけでなく /api/chat にも keep_alive: 0 を送ることで、
-            # どちらのAPIで読み込まれたモデルも確実にアンロードする。
+            # Use a fresh session so an active streaming connection on self._session
+            # never blocks the unload POST (keep_alive=0 must reach Ollama immediately).
             payload = {"model": model, "keep_alive": 0}
-            self._session.post(
-                f"{self._base_url}/api/generate",
-                json={**payload, "prompt": ""},
-                timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
-            )
-            self._session.post(
-                f"{self._base_url}/api/chat",
-                json={**payload, "messages": []},
-                timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
-            )
+            with requests.Session() as s:
+                s.post(
+                    f"{self._base_url}/api/generate",
+                    json={**payload, "prompt": ""},
+                    timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
+                )
+                s.post(
+                    f"{self._base_url}/api/chat",
+                    json={**payload, "messages": []},
+                    timeout=(_CONNECT_TIMEOUT, _CONNECT_TIMEOUT),
+                )
             logger.info("モデルをアンロードしました: %s", model)
         except Exception as exc:
             logger.warning("モデルアンロード失敗 (%s): %s", model, exc)
