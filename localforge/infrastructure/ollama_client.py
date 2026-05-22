@@ -24,8 +24,6 @@ _DEFAULT_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 _CONNECT_TIMEOUT = 30
 # ストリーミング読み込みタイムアウト: 2時間（大規模プロジェクトの長時間生成に対応）
 _READ_TIMEOUT = 7200
-# generate_sync 用タイムアウト（バッチサマリー生成など同期呼び出し用）
-_GENERATE_READ_TIMEOUT = 7200
 
 
 def _detect_cuda() -> bool:
@@ -389,41 +387,3 @@ class OllamaClient:
             "cuda_available": self.cuda_available,
         }
 
-    def generate_sync(
-        self,
-        model: str,
-        prompt: str,
-        system: Optional[str] = None,
-        num_ctx: Optional[int] = None,
-        num_predict: Optional[int] = None,
-        keep_alive: Optional[str] = None,
-        read_timeout: int = _GENERATE_READ_TIMEOUT,
-    ) -> str:
-        """
-        ストリーミングなしで完全なテキスト応答を生成する（テスト・内部用）。
-        大型ローカルモデル向けに長めのタイムアウトを使用する。
-        read_timeout を指定することで CPU 推論での過長待機を防げる（例: 120s）。
-
-        Args:
-            model: 使用するOllamaモデル名
-            prompt: ユーザープロンプト
-            system: システムプロンプト（省略可能）
-            num_ctx: コンテキスト長（省略可能）
-            read_timeout: 読み込みタイムアウト秒数
-
-        Returns:
-            生成されたテキスト全文
-
-        Raises:
-            OllamaConnectionError: サーバーへの接続に失敗した場合
-            OllamaModelNotFoundError: 指定モデルが見つからない場合
-        """
-        return "".join(self.stream_completion(
-            model=model,
-            prompt=prompt,
-            system=system,
-            read_timeout=read_timeout,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            keep_alive=keep_alive,
-        ))

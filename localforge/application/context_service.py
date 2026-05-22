@@ -454,34 +454,6 @@ class ContextService:
     # Explainモード用コンテキスト
     # ------------------------------------------------------------------
 
-    def build_batch_file_summary_prompt(
-        self,
-        file_chunks: List["FileChunk"],
-        content_limit: int = 800,
-    ) -> str:
-        """
-        複数ファイルを一括でサマリー生成するプロンプトを組み立てる。
-        1回のLLM呼び出しで複数ファイルのサマリーを取得することで処理を高速化する。
-
-        Args:
-            file_chunks: FileChunkのリスト
-            content_limit: バッチプロンプト内で使う1ファイルあたりの最大文字数
-
-        Returns:
-            組み立てたプロンプト文字列
-        """
-        sections = []
-        for chunk in file_chunks:
-            excerpt = chunk.content[:content_limit]
-            sections.append(f"FILE: {chunk.path}\n{excerpt}")
-
-        prompt = (
-            "各ファイルの役割を1文で要約してください。\n"
-            "出力形式: FILE: <パス>\\nSUMMARY: <要約>\n\n"
-            + "\n\n".join(sections)
-        )
-        return self._guard_budget(prompt, "batch_file_summary")
-
     def build_file_summary_prompt(
         self,
         file_path: str,
@@ -509,12 +481,6 @@ class ContextService:
             "4. 特筆すべきアルゴリズム、データ構造、または状態管理のロジック\n"
             "これらをマークダウン形式の箇条書きで、詳細かつ具体的に記述してください。"
         )
-        # prompt = (
-        #     f"ファイル: {file_path} (拡張子: {extension})\n\n"
-        #     f"{content}\n\n"
-        #     "このファイルの役割、主要なクラス・関数・エクスポート、依存関係を3〜5文の日本語で要約してください。"
-        #     " 要約のみを出力してください。"
-        # )
         return self._guard_budget(prompt, f"file_summary:{file_path}")
 
     # セクション別の具体的な分析指示 — 各セクションで何を書くべきかをLLMに明示する
@@ -1010,62 +976,3 @@ class ContextService:
             )
         return self._guard_budget(prompt, "qa"), estimated
 
-    # ------------------------------------------------------------------
-    # Resumeモード用コンテキスト
-    # ------------------------------------------------------------------
-
-    def build_resume_continue_prompt(
-        self,
-        target_file: str,
-        target_description: str,
-        context_md: str,
-        plan_json: str,
-        completed_contents: List[tuple[str, str]],
-    ) -> str:
-        """
-        再開時のファイル生成プロンプトを組み立てる。
-
-        Args:
-            target_file: 生成対象ファイル
-            target_description: ファイルの説明
-            context_md: context.mdの内容
-            plan_json: プランのJSON文字列
-            completed_contents: 完了済みファイルの内容リスト
-
-        Returns:
-            組み立てたプロンプト文字列
-        """
-        return self.build_file_generation_prompt(
-            target_file=target_file,
-            target_description=target_description,
-            context_md=context_md,
-            plan_json=plan_json,
-            dependency_contents=completed_contents,
-        )
-
-    def build_foreign_resume_qa_prompt(
-        self,
-        question: str,
-        project_index_json: str,
-        top_summaries: List[tuple[str, str]],
-        conversation_history: List[Message],
-    ) -> str:
-        """
-        外部プロジェクト再開時のQ&AプロンプトをQ&Aプロンプトに委譲して組み立てる。
-
-        Args:
-            question: ユーザーの質問
-            project_index_json: ProjectIndexのJSON文字列
-            top_summaries: 上位5件のファイルサマリー
-            conversation_history: 会話履歴
-
-        Returns:
-            組み立てたプロンプト文字列
-        """
-        return self.build_qa_prompt(
-            question=question,
-            project_index_json=project_index_json,
-            top_summaries=top_summaries,
-            full_contents=[],
-            conversation_history=conversation_history,
-        )

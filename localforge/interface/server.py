@@ -16,7 +16,6 @@ from localforge.application.context_service import ContextService
 from localforge.application.explanation_service import ExplanationService
 from localforge.application.generation_service import GenerationService
 from localforge.application.project_service import ProjectService
-from localforge.application.resume_service import ResumeService
 from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
 from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
@@ -116,14 +115,6 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     generation_svc = GenerationService(
         fs=fs, git=git, index_adapter=index_adapter, llm=llm, context=context_svc
     )
-    resume_svc = ResumeService(
-        fs=fs,
-        git=git,
-        generation=generation_svc,
-        explanation=explanation_svc,
-        context=context_svc,
-    )
-
     # ---------------------------------------------------------------------------
     # サービスをアプリケーション設定に格納
     # ---------------------------------------------------------------------------
@@ -131,7 +122,6 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     app.config["generation_service"] = generation_svc
     app.config["analysis_service"] = analysis_svc
     app.config["explanation_service"] = explanation_svc
-    app.config["resume_service"] = resume_svc
     app.config["context_service"] = context_svc
     app.config["llm"] = llm
     app.config["ollama_client"] = ollama_client

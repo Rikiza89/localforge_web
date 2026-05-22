@@ -27,8 +27,7 @@ from localforge.infrastructure.index_adapter import IndexAdapter
 
 logger = logging.getLogger(__name__)
 
-# .localforgeディレクトリ名
-_LOCALFORGE_DIR = ".localforge"
+from localforge.domain.models import LOCALFORGE_DIR as _LOCALFORGE_DIR
 _CONFIG_FILE = "config.json"
 _CONTEXT_FILE = "context.md"
 _INDEX_JSONL = "index.jsonl"
@@ -290,46 +289,6 @@ class ProjectService:
             "completed_files": resume_state.completed_files,
             "pending_files": resume_state.pending_files,
         }
-
-    def log_operation(
-        self,
-        root: Path,
-        entry: GenerationLogEntry,
-    ) -> None:
-        """
-        操作ログをgeneration_log.jsonlに記録する。
-
-        Args:
-            root: プロジェクトルート
-            entry: 記録するログエントリ
-        """
-        log_path = root / _LOCALFORGE_DIR / _GENERATION_LOG
-        self._index.append_log_entry(log_path, entry)
-
-    def update_log_entry_status(
-        self, root: Path, file_path: str, status: str
-    ) -> None:
-        """
-        generation_log.jsonl内の特定ファイルのステータスを更新する。
-
-        Args:
-            root: プロジェクトルート
-            file_path: 対象ファイルパス
-            status: 新しいステータス（"completed" など）
-        """
-        log_path = root / _LOCALFORGE_DIR / _GENERATION_LOG
-        entries = self._index.load_log_entries(log_path)
-        updated = []
-        for e in entries:
-            if e.file_path == file_path and e.status == "pending":
-                e.status = status
-            updated.append(e)
-
-        # 全エントリを書き直す
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w", encoding="utf-8") as fh:
-            for e in updated:
-                fh.write(e.model_dump_json() + "\n")
 
     def get_file_tree(self, root: Path) -> List[FileNode]:
         """

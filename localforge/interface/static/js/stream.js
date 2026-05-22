@@ -272,6 +272,77 @@ const ProcessLog = (() => {
 })();
 
 /**
+ * 単一のSSEペイロードを解析して適切なハンドラーに振り分ける共通ルーター。
+ * "done" / "error" を返した場合は呼び出し元がストリームを終了する。
+ * @param {Object} data - パース済みSSEペイロード
+ * @param {Object} handlers - イベントハンドラーマップ
+ * @param {HTMLElement|null} outputEl - トークン追記先要素
+ * @returns {"done"|"error"|null}
+ */
+function _dispatchSseEvent(data, handlers, outputEl) {
+  if (data.heartbeat) return null;
+
+  if (data.raw_token !== undefined) {
+    OllamaPanel.appendToken(data.raw_token);
+    return null;
+  }
+
+  if (data.phase !== undefined) {
+    ProcessLog.addPhase(data.phase, data.detail || "");
+    return null;
+  }
+
+  if (data.prompt_preview !== undefined) {
+    ProcessLog.setPromptPreview(data.prompt_preview, data.prompt_tokens);
+    return null;
+  }
+
+  if (data.done) {
+    OllamaPanel.markDone();
+    ProcessLog.markAllDone();
+    if (handlers.onDone) handlers.onDone();
+    return "done";
+  }
+
+  if (data.error) {
+    OllamaPanel.markDone();
+    ProcessLog.markAllDone();
+    if (handlers.onError) handlers.onError(data.error);
+    return "error";
+  }
+
+  if (data.token !== undefined) {
+    if (outputEl) { outputEl.textContent += data.token; _autoScroll(outputEl); }
+    if (handlers.onToken) handlers.onToken(data.token);
+  }
+
+  if (data.section !== undefined && handlers.onSection) {
+    handlers.onSection(data.section, data.section_idx, data.section_total);
+  }
+
+  if (data.file_written !== undefined && handlers.onFileWritten) {
+    handlers.onFileWritten(data.file_written);
+  }
+
+  if (data.progress !== undefined && handlers.onProgress) {
+    const { done: d, total, current_file } = data.progress;
+    handlers.onProgress(d, total, current_file || "");
+  }
+
+  if (data.status !== undefined) updateStatusBar(data.status);
+
+  if (data.checkpoint !== undefined && handlers.onCheckpoint) {
+    handlers.onCheckpoint(data.checkpoint);
+  }
+
+  if (data.warning !== undefined && handlers.onWarning) {
+    handlers.onWarning(data.warning);
+  }
+
+  return null;
+}
+
+/**
  * SSEストリームを開始する。
  * @param {string} url - SSEエンドポイントURL
  * @param {HTMLElement|null} outputEl - トークンを追記する出力要素（nullも可）
@@ -324,82 +395,11 @@ function startStream(url, outputEl, handlers) {
   function _dispatch(data) {
     if (_closed) return;
     _resetIdle();
-
-    if (data.heartbeat) return;
-
-    if (data.raw_token !== undefined) {
-      OllamaPanel.appendToken(data.raw_token);
-      return;
-    }
-
-    if (data.phase !== undefined) {
-      ProcessLog.addPhase(data.phase, data.detail || "");
-      return;
-    }
-
-    if (data.prompt_preview !== undefined) {
-      ProcessLog.setPromptPreview(data.prompt_preview, data.prompt_tokens);
-      return;
-    }
-
-    if (data.done) {
+    const result = _dispatchSseEvent(data, handlers, outputEl);
+    if (result === "done" || result === "error") {
       _closed = true;
       if (_idleTimer) clearTimeout(_idleTimer);
       if (es) es.close();
-      OllamaPanel.markDone();
-      ProcessLog.markAllDone();
-      if (handlers.onDone) handlers.onDone();
-      return;
-    }
-
-    if (data.error) {
-      _closed = true;
-      if (_idleTimer) clearTimeout(_idleTimer);
-      if (es) es.close();
-      OllamaPanel.markDone();
-      ProcessLog.markAllDone();
-      if (handlers.onError) handlers.onError(data.error);
-      return;
-    }
-
-    if (data.token !== undefined) {
-      if (outputEl) {
-        outputEl.textContent += data.token;
-        _autoScroll(outputEl);
-      }
-      if (handlers.onToken) handlers.onToken(data.token);
-      return;
-    }
-
-    if (data.section !== undefined) {
-      if (handlers.onSection) handlers.onSection(data.section, data.section_idx, data.section_total);
-      return;
-    }
-
-    if (data.file_written !== undefined) {
-      if (handlers.onFileWritten) handlers.onFileWritten(data.file_written);
-      return;
-    }
-
-    if (data.progress !== undefined) {
-      const { done, total, current_file } = data.progress;
-      if (handlers.onProgress) handlers.onProgress(done, total, current_file || "");
-      return;
-    }
-
-    if (data.status !== undefined) {
-      updateStatusBar(data.status);
-      return;
-    }
-
-    if (data.checkpoint !== undefined) {
-      if (handlers.onCheckpoint) handlers.onCheckpoint(data.checkpoint);
-      return;
-    }
-
-    if (data.warning !== undefined) {
-      if (handlers.onWarning) handlers.onWarning(data.warning);
-      return;
     }
   }
 
@@ -482,60 +482,9 @@ async function startPostStream(url, body, outputEl, handlers) {
           continue;
         }
 
-        if (data.heartbeat) continue;
-
-        if (data.raw_token !== undefined) {
-          OllamaPanel.appendToken(data.raw_token);
-          continue;
-        }
-
-        if (data.phase !== undefined) {
-          ProcessLog.addPhase(data.phase, data.detail || "");
-          continue;
-        }
-
-        if (data.prompt_preview !== undefined) {
-          ProcessLog.setPromptPreview(data.prompt_preview, data.prompt_tokens);
-          continue;
-        }
-
-        if (data.done) {
-          OllamaPanel.markDone();
-          ProcessLog.markAllDone();
-          if (handlers.onDone) handlers.onDone();
+        const result = _dispatchSseEvent(data, handlers, outputEl);
+        if (result === "done" || result === "error") {
           return cancel;
-        }
-        if (data.error) {
-          OllamaPanel.markDone();
-          ProcessLog.markAllDone();
-          if (handlers.onError) handlers.onError(data.error);
-          return cancel;
-        }
-        if (data.token !== undefined) {
-          if (outputEl) {
-            outputEl.textContent += data.token;
-            _autoScroll(outputEl);
-          }
-          if (handlers.onToken) handlers.onToken(data.token);
-        }
-        if (data.section !== undefined && handlers.onSection) {
-          handlers.onSection(data.section, data.section_idx, data.section_total);
-        }
-        if (data.file_written !== undefined && handlers.onFileWritten) {
-          handlers.onFileWritten(data.file_written);
-        }
-        if (data.progress !== undefined && handlers.onProgress) {
-          const { done: d, total, current_file } = data.progress;
-          handlers.onProgress(d, total, current_file || "");
-        }
-        if (data.status !== undefined) {
-          updateStatusBar(data.status);
-        }
-        if (data.checkpoint !== undefined && handlers.onCheckpoint) {
-          handlers.onCheckpoint(data.checkpoint);
-        }
-        if (data.warning !== undefined && handlers.onWarning) {
-          handlers.onWarning(data.warning);
         }
       }
     }

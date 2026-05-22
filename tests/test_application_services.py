@@ -318,7 +318,7 @@ def standalone_func():
                 summary="認証機能",
             ),
         ]
-        top = analysis_service.get_top_chunks_by_keywords(chunks, "login auth", top_n=1)
+        top = analysis_service._get_top_chunks_by_keywords(chunks, "login auth", top_n=1)
         assert len(top) == 1
         assert top[0].path == "auth.py"
 

@@ -12,6 +12,9 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# Shared directory name constant — used across all application services
+LOCALFORGE_DIR = ".localforge"
+
 
 # ---------------------------------------------------------------------------
 # 列挙型

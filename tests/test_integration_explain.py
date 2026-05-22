@@ -128,7 +128,7 @@ class TestExplainPipelineE2E:
             ),
         ]
 
-        top = analysis_svc.get_top_chunks_by_keywords(chunks, "login auth user", top_n=2)
+        top = analysis_svc._get_top_chunks_by_keywords(chunks, "login auth user", top_n=2)
         assert len(top) == 2
         paths = {c.path for c in top}
         assert "auth/login.py" in paths

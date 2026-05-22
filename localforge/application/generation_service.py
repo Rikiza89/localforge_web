@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Generator, List, Optional, Tuple
 
 from localforge.application.context_service import ContextService
 from localforge.domain.exceptions import PlanParseError
-from localforge.domain.models import GenerationLogEntry, GenerationPlan, PlannedFile
+from localforge.domain.models import LOCALFORGE_DIR as _LOCALFORGE_DIR, GenerationLogEntry, GenerationPlan, PlannedFile
 from localforge.infrastructure.code_validator import delete_backup, restore_backup, validate
 from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
 from localforge.infrastructure.git_adapter import GitAdapter
@@ -24,9 +25,8 @@ from localforge.infrastructure.ollama_client import OllamaClient
 
 logger = logging.getLogger(__name__)
 
-_LOCALFORGE_DIR = ".localforge"
-# 生成キャンセルフラグ
-_cancel_flag: bool = False
+# 生成キャンセルフラグ (threading.Event for thread-safety across concurrent requests)
+_cancel_event: threading.Event = threading.Event()
 
 
 def _sanitize_path(raw: str) -> str:
@@ -61,20 +61,18 @@ def _sanitize_path(raw: str) -> str:
 
 def is_cancelled() -> bool:
     """現在キャンセルが要求されているかを返す。"""
-    return _cancel_flag
+    return _cancel_event.is_set()
 
 
 def request_cancel() -> None:
-    """生成キャンセルを要求する（グローバルフラグを設定）。"""
-    global _cancel_flag
-    _cancel_flag = True
+    """生成キャンセルを要求する。"""
+    _cancel_event.set()
     logger.info("生成キャンセルが要求されました")
 
 
 def reset_cancel() -> None:
     """キャンセルフラグをリセットする。"""
-    global _cancel_flag
-    _cancel_flag = False
+    _cancel_event.clear()
 
 
 class GenerationService:
@@ -213,7 +211,7 @@ class GenerationService:
         start_time = time.time()
         try:
             for token in self._llm.stream_completion(model, prompt):
-                if _cancel_flag:
+                if is_cancelled():
                     yield {"error": "キャンセルされました"}
                     return
                 yield {"token": token}
@@ -351,7 +349,7 @@ class GenerationService:
                 yield {"checkpoint": cp_hash, "status": f"🔖 チェックポイント作成: {cp_hash}"}
 
         for idx, planned_file in enumerate(files[start_idx:], start=start_idx):
-            if _cancel_flag:
+            if is_cancelled():
                 yield {"error": "キャンセルされました"}
                 return
 
@@ -428,7 +426,7 @@ class GenerationService:
                 generation_error = False
 
                 for chunk_idx, chunk_content in enumerate(chunks):
-                    if _cancel_flag:
+                    if is_cancelled():
                         yield {"error": "キャンセルされました"}
                         return
 
@@ -451,7 +449,7 @@ class GenerationService:
                     chunk_parts: List[str] = []
                     try:
                         for token in self._llm.stream_completion(model, prompt):
-                            if _cancel_flag:
+                            if is_cancelled():
                                 yield {"error": "キャンセルされました"}
                                 return
                             chunk_parts.append(token)
@@ -477,7 +475,7 @@ class GenerationService:
                 )
 
                 # 失敗した場合のリトライ（1回のみ）
-                if failed and not _cancel_flag:
+                if failed and not is_cancelled():
                     yield {"status": f"🔄 {planned_file.path}: ブロック不一致のためリトライ中..."}
                     retry_diff_parts = []
                     for chunk_idx, chunk_content in enumerate(chunks):
@@ -491,12 +489,12 @@ class GenerationService:
                         )
                         chunk_parts = []
                         for token in self._llm.stream_completion(model, prompt):
-                            if _cancel_flag: break
+                            if is_cancelled(): break
                             chunk_parts.append(token)
                         retry_diff_parts.append("".join(chunk_parts))
-                        if _cancel_flag: break
+                        if is_cancelled(): break
 
-                    if not _cancel_flag:
+                    if not is_cancelled():
                         combined_diff = "\n".join(retry_diff_parts)
                         modified_content, applied, failed = self._apply_search_replace_blocks(
                             existing_content, combined_diff
@@ -572,7 +570,7 @@ class GenerationService:
                 file_content_parts: List[str] = []
                 try:
                     for token in self._llm.stream_completion(model, prompt):
-                        if _cancel_flag:
+                        if is_cancelled():
                             yield {"error": "キャンセルされました"}
                             return
                         file_content_parts.append(token)
@@ -683,7 +681,7 @@ class GenerationService:
             all_diff_parts: List[str] = []
 
             for chunk_idx, chunk_content in enumerate(chunks):
-                if _cancel_flag:
+                if is_cancelled():
                     yield {"error": "キャンセルされました"}
                     return
 
@@ -704,7 +702,7 @@ class GenerationService:
                 chunk_parts: List[str] = []
                 try:
                     for token in self._llm.stream_completion(model, prompt):
-                        if _cancel_flag:
+                        if is_cancelled():
                             yield {"error": "キャンセルされました"}
                             return
                         chunk_parts.append(token)
@@ -774,7 +772,7 @@ class GenerationService:
             file_content_parts: List[str] = []
             try:
                 for token in self._llm.stream_completion(model, prompt):
-                    if _cancel_flag:
+                    if is_cancelled():
                         yield {"error": "キャンセルされました"}
                         return
                     file_content_parts.append(token)

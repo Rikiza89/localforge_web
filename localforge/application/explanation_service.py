@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re as _re_mod
+import re as _re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -17,7 +17,7 @@ from typing import Dict, Generator, List, Optional
 from localforge.application.analysis_service import AnalysisService
 from localforge.application.context_service import ContextService
 from localforge.application.generation_service import is_cancelled, reset_cancel
-from localforge.domain.models import FileChunk, GenerationLogEntry, Message, ProjectIndex
+from localforge.domain.models import LOCALFORGE_DIR as _LOCALFORGE_DIR, FileChunk, GenerationLogEntry, Message, ProjectIndex
 from localforge.infrastructure.disk_cache import DiskCache
 from localforge.infrastructure.ollama_client import OllamaClient
 
@@ -39,9 +39,6 @@ REPORT_SECTIONS = [
     "How to Extend This Project",
 ]
 
-_LOCALFORGE_DIR = ".localforge"
-
-import re as _re
 _HEADING_RE = _re.compile(r"^#{1,3}\s+", _re.MULTILINE)
 
 
@@ -97,7 +94,6 @@ class ExplanationService:
         # Avoids re-reading unchanged files across Q&A calls.
         # Bounded at 300 entries (LRU-ish: dict insertion order).
         self._file_content_cache: dict[tuple, str] = {}
-        _FILE_CACHE_MAX = 300
 
         # ── Cache 4: Q&A response ──
         # Stores full answer strings keyed by a hash of (root, question,
@@ -184,12 +180,9 @@ class ExplanationService:
 
     def invalidate_response_cache(self, root: Path) -> None:
         """Clear response cache for a project (call after build_index)."""
-        dc = self._response_cache.pop(str(root), None)
-        if dc:
-            dc.clear()
-        else:
-            # Clear disk cache even if not in memory
-            DiskCache(root / _LOCALFORGE_DIR / "cache" / "responses").clear()
+        dc = self._get_response_disk_cache(root)
+        dc.clear()
+        self._response_cache.pop(str(root), None)
 
     def _log_async(self, log_path: Path, log_entry: "GenerationLogEntry") -> None:
         """Append a log entry in a background thread — does not block streaming."""
@@ -448,7 +441,7 @@ class ExplanationService:
 
         result: dict = {}
         # ## Section Name\n\n ... \n\n---\n\n のパターンで分割
-        pattern = _re_mod.compile(r"^## (.+?)$", _re_mod.MULTILINE)
+        pattern = _re.compile(r"^## (.+?)$", _re.MULTILINE)
         matches = list(pattern.finditer(content))
         for i, m in enumerate(matches):
             name = m.group(1).strip()
