@@ -1053,13 +1053,18 @@ class AnalysisService:
         # BFS frontier: paths added at the previous depth level
         frontier: List[str] = list(ordered)
 
+        _truncated_at_depth: Optional[int] = None
         for _depth in range(max_depth):
-            if not frontier or len(ordered) >= max_total:
+            if not frontier:
+                break
+            if len(ordered) >= max_total:
+                _truncated_at_depth = _depth
                 break
             next_frontier: List[str] = []
             for path in frontier:
-                if len(ordered) >= max_total:
-                    break
+                # Always finish processing every file in the current frontier so the
+                # depth level is complete, even if we've already reached max_total.
+                # New files are only added while under the cap.
                 chunk = chunk_map.get(path)
                 if chunk is None:
                     continue
@@ -1075,7 +1080,17 @@ class AnalysisService:
                         ordered.append(rev)
                         next_frontier.append(rev)
                         depth_map[rev] = _depth + 1
+            if len(ordered) >= max_total and next_frontier:
+                _truncated_at_depth = _depth + 1
             frontier = next_frontier
+
+        if _truncated_at_depth is not None:
+            logger.warning(
+                "BFS import expansion reached max_total=%d at depth %d — "
+                "some transitive imports may be omitted. "
+                "Raise max_total if you need deeper coverage.",
+                max_total, _truncated_at_depth,
+            )
 
         result_chunks = [chunk_map[p] for p in ordered if p in chunk_map]
 
@@ -1113,7 +1128,7 @@ class AnalysisService:
         root: Path,
         pinned_paths: List[str],
         chunks: List[FileChunk],
-        max_total: int = 30,
+        max_total: int = 100,
     ) -> Tuple[List[FileChunk], Dict[str, List[str]], Dict[str, int]]:
         """
         ピン留めパス（ファイルまたはフォルダ）をチャンクに解決し、

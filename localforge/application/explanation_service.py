@@ -577,7 +577,7 @@ class ExplanationService:
             try:
                 # ピン留めの場合は依存関係をより深く (max_total=40, max_depth=10) 展開する
                 pinned_chunks, _pdep, _pinned_depth_map = self._analysis.resolve_pinned_chunks(
-                    root, pinned_paths, chunks, max_total=40
+                    root, pinned_paths, chunks, max_total=200
                 )
                 _direct_pinned_set = {p for p, d in _pinned_depth_map.items() if d == 0}
                 pinned_base_chunks = pinned_chunks
