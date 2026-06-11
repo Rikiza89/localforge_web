@@ -338,8 +338,10 @@ async function refreshContextPanel() {
   try {
     const data = await apiRequest("/api/project/context");
     const contextEl = document.getElementById("context-md-content");
-    if (contextEl) {
-      contextEl.textContent = data.content || "（空）";
+    const newContent = data.content || "（空）";
+    // 内容が変わっていない場合は DOM 更新（reflow）をスキップする
+    if (contextEl && contextEl.textContent !== newContent) {
+      contextEl.textContent = newContent;
     }
   } catch (e) {
     console.warn("コンテキスト更新エラー:", e.message);
@@ -350,10 +352,11 @@ async function refreshContextPanel() {
     const summary = await apiRequest("/api/explain/summary");
     const summaryEl = document.getElementById("index-summary");
     if (summaryEl) {
-      summaryEl.innerHTML = `
+      const newHtml = `
         <div class="index-stat"><span>ファイル数</span><span>${summary.indexed_files} / ${summary.total_files}</span></div>
         <div class="index-stat" style="margin-top:6px; color:var(--text-muted); font-size:11px;">${(summary.summary || "").slice(0, 120)}...</div>
       `;
+      if (summaryEl.innerHTML !== newHtml) summaryEl.innerHTML = newHtml;
     }
     const reportBtn = document.getElementById("generate-report-btn");
     if (reportBtn) reportBtn.disabled = false;
@@ -685,7 +688,7 @@ async function approvePlanAndGenerate() {
       }
     },
     onFileWritten: (path) => {
-      refreshFileTree();
+      debouncedRefreshFileTree();
       // Briefly show a completion tick before the next file clears the header
       if (genFileHeader) {
         genFileHeader.innerHTML =
@@ -1042,7 +1045,7 @@ async function _runSavedPlan(endpoint, statusText, successText) {
       }
     },
     onFileWritten: (path) => {
-      refreshFileTree();
+      debouncedRefreshFileTree();
       if (genFileHeader) {
         genFileHeader.innerHTML =
           `<span class="gen-file-icon gen-file-done">✓</span>` +
@@ -1283,7 +1286,7 @@ async function continueGeneration() {
       updateStatusBar(`再開中: ${currentFile} (${done}/${total})`);
       if (genStream) genStream.textContent = "";
     },
-    onFileWritten: () => refreshFileTree(),
+    onFileWritten: () => debouncedRefreshFileTree(),
     onDone: () => {
       _unlockUI();
       updateStatusBar("生成再開完了");
@@ -1978,6 +1981,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 async function refreshSysInfo() {
   const vramEl = document.getElementById("status-vram");
   if (!vramEl) return;
+
+  // 生成・Q&Aストリーム中はポーリングを一時停止する
+  // （API呼び出し + DOM更新がトークン描画のフレームを奪うため）
+  if (_uiLocked) return;
 
   try {
     const data = await apiRequest("/api/project/sysinfo");

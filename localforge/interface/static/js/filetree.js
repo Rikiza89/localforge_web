@@ -538,6 +538,17 @@ async function refreshFileTree() {
   }
 }
 
+// 連続生成中の file_written ごとのフルツリー再構築を防ぐデバウンス版。
+// 最後の呼び出しから 1 秒後に一度だけ更新する（生成中の DOM チャーン削減）。
+let _fileTreeRefreshTimer = null;
+function debouncedRefreshFileTree() {
+  if (_fileTreeRefreshTimer) clearTimeout(_fileTreeRefreshTimer);
+  _fileTreeRefreshTimer = setTimeout(() => {
+    _fileTreeRefreshTimer = null;
+    refreshFileTree();
+  }, 1000);
+}
+
 // ---------------------------------------------------------------------------
 // イベントリスナーの初期化
 // ---------------------------------------------------------------------------

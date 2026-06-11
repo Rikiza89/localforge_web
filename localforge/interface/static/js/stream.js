@@ -43,41 +43,73 @@ const OllamaPanel = (() => {
   let _thinkDirty = false;
   let _rafPending = false;
 
+  // インクリメンタルレンダリング状態:
+  // バッファ全体を毎フレーム marked.parse() すると長いストリームで O(n²) になる。
+  // 確定領域（最後の段落境界まで、コードフェンス外）は一度だけパースして HTML を
+  // キャッシュし、末尾の未確定領域のみ毎フレーム再パースする。
+  // markDone() で全体を一度フルパースして最終整合を取る。
+  const _incr = {
+    normal: { stableLen: 0, stableHtml: "" },
+    think: { stableLen: 0, stableHtml: "" },
+  };
+
+  function _renderIncremental(buf, state) {
+    const boundary = buf.lastIndexOf("\n\n");
+    if (boundary + 2 > state.stableLen && boundary >= 0) {
+      const candidate = buf.slice(0, boundary + 2);
+      // 開いたコードフェンス内では確定境界を進めない（分割パースで壊れるため）
+      const fenceCount = (candidate.match(/```/g) || []).length;
+      if (fenceCount % 2 === 0) {
+        state.stableHtml += _renderMd(buf.slice(state.stableLen, boundary + 2));
+        state.stableLen = boundary + 2;
+      }
+    }
+    return state.stableHtml + _renderMd(buf.slice(state.stableLen));
+  }
+
   function _normalEl() { return document.getElementById("ollama-output-normal"); }
   function _thinkingEl() { return document.getElementById("ollama-output-thinking"); }
   function _thinkingContent() { return document.getElementById("ollama-thinking-content"); }
   function _panel() { return document.getElementById("ollama-panel"); }
+
+  function _flushDirty(final) {
+    if (_normalDirty) {
+      _normalDirty = false;
+      const el = _normalEl();
+      if (el) {
+        el.innerHTML = final
+          ? _renderMd(_normalBuf)
+          : _renderIncremental(_normalBuf, _incr.normal);
+        _autoScroll(el);
+      }
+    }
+    if (_thinkDirty) {
+      _thinkDirty = false;
+      const el = _thinkingContent();
+      if (el) {
+        el.innerHTML = final
+          ? _renderMd(_thinkBuf)
+          : _renderIncremental(_thinkBuf, _incr.think);
+        _autoScroll(el.parentElement);
+      }
+    }
+  }
 
   function _scheduleFlush() {
     if (_rafPending) return;
     _rafPending = true;
     requestAnimationFrame(() => {
       _rafPending = false;
-      if (_normalDirty) {
-        _normalDirty = false;
-        const el = _normalEl();
-        if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
-      }
-      if (_thinkDirty) {
-        _thinkDirty = false;
-        const el = _thinkingContent();
-        if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
-      }
+      _flushDirty(false);
     });
   }
 
   function _flushNow() {
     _rafPending = false;
-    if (_normalDirty) {
-      _normalDirty = false;
-      const el = _normalEl();
-      if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
-    }
-    if (_thinkDirty) {
-      _thinkDirty = false;
-      const el = _thinkingContent();
-      if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
-    }
+    // 最終フラッシュ: 全体を一度フルパースして分割パースの境界ズレを解消する
+    _normalDirty = _normalBuf.length > 0;
+    _thinkDirty = _thinkBuf.length > 0;
+    _flushDirty(true);
   }
 
   function appendToken(token) {
@@ -135,6 +167,10 @@ const OllamaPanel = (() => {
     _normalDirty = false;
     _thinkDirty = false;
     _rafPending = false;
+    _incr.normal.stableLen = 0;
+    _incr.normal.stableHtml = "";
+    _incr.think.stableLen = 0;
+    _incr.think.stableHtml = "";
     const normal = _normalEl();
     const thinking = _thinkingContent();
     if (normal) normal.innerHTML = "";

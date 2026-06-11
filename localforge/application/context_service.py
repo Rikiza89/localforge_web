@@ -269,16 +269,19 @@ class ContextService:
         Returns:
             組み立てたプロンプト文字列
         """
-        parts = [
-            f"生成対象ファイル: {target_file}",
-            f"役割・内容の説明: {target_description}",
-        ]
+        # 静的な共有コンテキスト（計画・context.md）を先頭に置き、ファイル固有の
+        # 部分を後ろに置く。複数ファイルの連続生成でプロンプトのプレフィックスが
+        # 一致し、Ollama の KV プロンプトキャッシュが prefill を再利用できる。
+        parts = []
+
+        if plan_json.strip():
+            parts.append(f"プロジェクト全体の計画:\n{plan_json}")
 
         if context_md.strip():
             parts.append(f"プロジェクトコンテキスト:\n{context_md}")
 
-        if plan_json.strip():
-            parts.append(f"プロジェクト全体の計画:\n{plan_json}")
+        parts.append(f"生成対象ファイル: {target_file}")
+        parts.append(f"役割・内容の説明: {target_description}")
 
         # トークン予算内で依存ファイルを注入（古いものから切り詰め）
         dep_parts: List[str] = []
@@ -345,10 +348,15 @@ class ContextService:
         Returns:
             組み立てたプロンプト文字列
         """
-        parts = [
-            f"ファイル: {target_file}",
-            f"変更要求: {modification_notes}",
-        ]
+        # 安定部分（context.md・対象ファイル・コードチャンク）を先頭に、
+        # 変動部分（変更要求 — リトライ時に書き換わる）を後ろに置く。
+        # リトライ時に同一チャンクの prefill を Ollama の KV キャッシュが再利用できる。
+        parts = []
+
+        if context_md.strip():
+            parts.append(f"プロジェクトコンテキスト:\n{context_md}")
+
+        parts.append(f"ファイル: {target_file}")
 
         if total_chunks > 1:
             parts.append(
@@ -357,10 +365,8 @@ class ContextService:
                 f" このチャンク内の変更のみを出力してください。]"
             )
 
-        if context_md.strip():
-            parts.append(f"プロジェクトコンテキスト:\n{context_md}")
-
         parts.append(f"現在のコード:\n```\n{chunk_content}\n```")
+        parts.append(f"変更要求: {modification_notes}")
 
         parts.append(
             "変更要求を実現するために必要な変更を SEARCH/REPLACE ブロックで出力してください。\n"

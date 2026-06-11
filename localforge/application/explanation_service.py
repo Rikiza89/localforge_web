@@ -19,7 +19,7 @@ from localforge.application.context_service import ContextService
 from localforge.application.generation_service import is_cancelled, reset_cancel
 from localforge.domain.models import LOCALFORGE_DIR as _LOCALFORGE_DIR, FileChunk, GenerationLogEntry, Message, ProjectIndex
 from localforge.infrastructure.disk_cache import DiskCache
-from localforge.infrastructure.ollama_client import OllamaClient
+from localforge.infrastructure.ollama_client import OllamaClient, pick_num_ctx
 
 logger = logging.getLogger(__name__)
 
@@ -290,10 +290,6 @@ class ExplanationService:
         _MAX_SHARED_SUMMARIES = 30
         shared_summaries = sorted(_union.items())[:_MAX_SHARED_SUMMARIES]
 
-        # Q&A（stream_answer）と同一の Ollama オプションを使う:
-        # num_ctx が呼び出し間で異なると Ollama がモデルを再ロードする（1〜5秒）
-        _num_ctx: Optional[int] = 8192 if not getattr(self._llm, "cuda_available", False) else None
-
         for sec_idx, section_name in sections_to_run:
             if sec_idx < resume_from:
                 continue  # 既に処理済み
@@ -315,7 +311,7 @@ class ExplanationService:
             section_tokens: List[str] = []
             try:
                 for token in self._llm.stream_completion(
-                    model, prompt, num_ctx=_num_ctx, keep_alive="2h"
+                    model, prompt, num_ctx=pick_num_ctx(tokens), keep_alive="2h"
                 ):
                     section_tokens.append(token)
                     yield {"token": token}
@@ -580,7 +576,9 @@ class ExplanationService:
 
         answer_tokens: List[str] = []
         try:
-            for token in self._llm.stream_completion(model, prompt, keep_alive="2h"):
+            for token in self._llm.stream_completion(
+                model, prompt, num_ctx=pick_num_ctx(tokens), keep_alive="2h"
+            ):
                 if is_cancelled():
                     break
                 answer_tokens.append(token)
@@ -897,15 +895,11 @@ class ExplanationService:
         preview = preview_head + ("\n...[中略]...\n" + preview_tail if preview_tail else "")
         yield {"prompt_preview": preview, "prompt_tokens": tokens}
 
-        # CPU 用 Ollama パラメータ — 固定値にすることでモデル再ロードを防ぐ。
-        # 8192 は CPU モードの典型的な Q&A プロンプト（サマリーのみ）を収容するのに十分で、
-        # 16384 より prefill が約 2 倍速い。
-        _CPU_NUM_CTX = 8192
-        _num_ctx: Optional[int] = None
-        _num_predict: Optional[int] = None
-        if _is_cpu:
-            _num_ctx = _CPU_NUM_CTX
-            _num_predict = -1
+        # num_ctx はプロンプトサイズに応じた共通バケット（最小 8192）。
+        # 全 LLM 呼び出し（Q&A / レポート / 生成）が同じバケット体系を共有し、
+        # num_ctx 差異による Ollama のモデル再ロードを防ぐ。
+        _num_ctx: Optional[int] = pick_num_ctx(tokens)
+        _num_predict: Optional[int] = -1 if _is_cpu else None
 
         # Wait for preload to complete before sending the prompt.
         # This guarantees the model is in RAM with no Ollama queue gap.

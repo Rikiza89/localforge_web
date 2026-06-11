@@ -26,6 +26,22 @@ _CONNECT_TIMEOUT = 30
 _READ_TIMEOUT = 7200
 
 
+def pick_num_ctx(prompt_tokens: int, floor: int = 8192, cap: int = 131072) -> int:
+    """
+    プロンプトサイズに応じた num_ctx を 2 の冪のバケット（最小 floor）で返す。
+
+    すべての LLM 呼び出し（Q&A / レポート / 生成）が同じバケット体系を使うことで:
+    - 典型的なプロンプトは同じ num_ctx (8192) を共有し、呼び出し間の
+      num_ctx 差異による Ollama のモデル再ロード（1〜5秒）を防ぐ
+    - 大きなプロンプトが Ollama デフォルト ctx で先頭からサイレントに
+      切り捨てられるのを防ぐ（バケットが自動的に拡大する）
+    """
+    n = floor
+    while n < prompt_tokens + 4096 and n < cap:
+        n *= 2
+    return n
+
+
 def _detect_cuda() -> bool:
     """
     nvidia-smi を呼び出してCUDA対応GPUが存在するか確認する。
