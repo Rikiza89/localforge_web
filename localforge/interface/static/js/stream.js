@@ -344,6 +344,71 @@ const ProcessLog = (() => {
   return { addPhase, markAllDone, setPromptPreview, clear, init };
 })();
 
+// ---------------------------------------------------------------------------
+// トークンスループット / ETA 表示（ステータスバーの #status-tokens）
+// ---------------------------------------------------------------------------
+const TokenStats = (() => {
+  let _count = 0;
+  let _startTime = 0;
+  let _lastRender = 0;
+  let _progressDone = 0;
+  let _progressTotal = 0;
+
+  function _el() { return document.getElementById("status-tokens"); }
+
+  function _fmt(seconds) {
+    const s = Math.max(0, Math.round(seconds));
+    const m = Math.floor(s / 60);
+    return m > 0 ? `${m}分${s % 60}秒` : `${s}秒`;
+  }
+
+  function _render(now) {
+    const el = _el();
+    if (!el || !_startTime) return;
+    const elapsed = (now - _startTime) / 1000;
+    if (elapsed <= 0.5) return;
+    const tps = (_count / elapsed).toFixed(1);
+    let eta = "";
+    // 複数ユニット（ファイル/セクション）の進捗があれば平均所要時間からETAを出す
+    if (_progressTotal > 1 && _progressDone > 0 && _progressDone < _progressTotal) {
+      const remain = (elapsed / _progressDone) * (_progressTotal - _progressDone);
+      eta = ` ・残り目安 ${_fmt(remain)}`;
+    }
+    el.textContent = `⚡ ${tps} tok/s ・経過 ${_fmt(elapsed)}${eta}`;
+  }
+
+  function reset() {
+    _count = 0;
+    _startTime = 0;
+    _lastRender = 0;
+    _progressDone = 0;
+    _progressTotal = 0;
+    const el = _el();
+    if (el) el.textContent = "";
+  }
+
+  function addToken() {
+    const now = performance.now();
+    if (!_startTime) _startTime = now;
+    _count++;
+    if (now - _lastRender > 500) {
+      _lastRender = now;
+      _render(now);
+    }
+  }
+
+  function setProgress(done, total) {
+    _progressDone = done;
+    _progressTotal = total;
+  }
+
+  function done() {
+    _render(performance.now());
+  }
+
+  return { reset, addToken, setProgress, done };
+})();
+
 // outputEl へのトークン追記を rAF でバッチ化する WeakMap ベースバッファ。
 // textContent += を毎トークン呼ぶと O(n²) になるため、フレームごとに一括更新する。
 const _tokenStreamBufs = new WeakMap();
@@ -393,6 +458,7 @@ function _dispatchSseEvent(data, handlers, outputEl) {
   if (data.done) {
     OllamaPanel.markDone();
     ProcessLog.markAllDone();
+    TokenStats.done();
     if (handlers.onDone) handlers.onDone();
     return "done";
   }
@@ -400,6 +466,7 @@ function _dispatchSseEvent(data, handlers, outputEl) {
   if (data.error) {
     OllamaPanel.markDone();
     ProcessLog.markAllDone();
+    TokenStats.done();
     if (handlers.onError) handlers.onError(data.error);
     return "error";
   }
@@ -412,6 +479,7 @@ function _dispatchSseEvent(data, handlers, outputEl) {
     //   SSEペイロードを半減するため通常トークンの複製は廃止。
     //   思考トークンのみ raw_token イベントとして届く。）
     OllamaPanel.appendToken(data.token);
+    TokenStats.addToken();
   }
 
   if (data.section !== undefined && handlers.onSection) {
@@ -422,15 +490,20 @@ function _dispatchSseEvent(data, handlers, outputEl) {
     handlers.onFileWritten(data.file_written);
   }
 
-  if (data.progress !== undefined && handlers.onProgress) {
+  if (data.progress !== undefined) {
     const { done: d, total, current_file } = data.progress;
-    handlers.onProgress(d, total, current_file || "");
+    TokenStats.setProgress(d, total);
+    if (handlers.onProgress) handlers.onProgress(d, total, current_file || "");
   }
 
   if (data.status !== undefined) updateStatusBar(data.status);
 
   if (data.checkpoint !== undefined && handlers.onCheckpoint) {
     handlers.onCheckpoint(data.checkpoint);
+  }
+
+  if (data.diff_preview !== undefined && handlers.onDiffPreview) {
+    handlers.onDiffPreview(data.diff_preview, data.file_path);
   }
 
   if (data.warning !== undefined && handlers.onWarning) {
@@ -455,6 +528,7 @@ function _dispatchSseEvent(data, handlers, outputEl) {
  * @returns {{close: function}} ストリームコントローラー（常に現在のESをclose()する）
  */
 function startStream(url, outputEl, handlers) {
+  TokenStats.reset();
   let es = null;
   let _closed = false;
   let _idleTimer = null;
@@ -532,6 +606,7 @@ function startStream(url, outputEl, handlers) {
  * @returns {Promise<void>}
  */
 async function startPostStream(url, body, outputEl, handlers) {
+  TokenStats.reset();
   let aborted = false;
   const controller = new AbortController();
 

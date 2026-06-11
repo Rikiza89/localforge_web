@@ -451,13 +451,20 @@ def regenerate_file():
     if not plan or not any(f.path == file_path for f in plan.files):
         plan = _synthesize_plan_for_file(root, file_path)
 
+    preview = bool(data.get("preview", False))
+
     gen = generation_svc.stream_regenerate_file(
         root=root,
         plan=plan,
         model=model,
         context_md=context_md,
         file_path=file_path,
+        preview=preview,
     )
+
+    if preview:
+        # プレビューモード: ファイル未書き込みのため context.md 更新もスキップ
+        return _sse_response(gen)
 
     def _update_ctx():
         threading.Thread(
@@ -467,6 +474,78 @@ def regenerate_file():
         ).start()
 
     return _sse_response(_after_done(gen, _update_ctx))
+
+
+def _validated_edit_request():
+    """edit/apply・edit/discard 共通の検証。(project, file_path) または (None, error_response)。"""
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return None, (jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400)
+
+    data = request.get_json(silent=True) or {}
+    file_path = str(data.get("file_path", "")).strip()
+    if not file_path:
+        return None, (jsonify({"error": "NoFilePath", "message": "ファイルパスが指定されていません"}), 400)
+
+    # パストラバーサル防御
+    try:
+        (project.root / file_path).resolve().relative_to(project.root.resolve())
+    except (ValueError, OSError):
+        return None, (jsonify({"error": "InvalidPath", "message": "プロジェクト外のパスです"}), 403)
+
+    return (project, file_path), None
+
+
+@bp.route("/edit/apply", methods=["POST"])
+def apply_pending_edit():
+    """
+    差分プレビューで保留中の編集を承認してディスクに適用する。
+
+    Request JSON:
+        file_path (str): 対象ファイルの相対パス
+    """
+    validated, err = _validated_edit_request()
+    if err:
+        return err
+    project, file_path = validated
+
+    generation_svc = _get_generation_svc()
+    ok, message = generation_svc.apply_pending_edit(project.root, file_path)
+    if not ok:
+        return jsonify({"error": "ApplyFailed", "message": message}), 409
+
+    # context.md をバックグラウンドで更新する
+    model = project.config.model
+    if model:
+        project_svc = _get_project_svc()
+        threading.Thread(
+            target=generation_svc.update_context_md_incremental,
+            args=(project.root, model, file_path, project_svc),
+            daemon=True,
+        ).start()
+
+    logger.info("差分プレビューを適用: %s", file_path)
+    return jsonify({"ok": True})
+
+
+@bp.route("/edit/discard", methods=["POST"])
+def discard_pending_edit():
+    """
+    差分プレビューで保留中の編集を破棄する。ファイルは変更されない。
+
+    Request JSON:
+        file_path (str): 対象ファイルの相対パス
+    """
+    validated, err = _validated_edit_request()
+    if err:
+        return err
+    project, file_path = validated
+
+    generation_svc = _get_generation_svc()
+    discarded = generation_svc.discard_pending_edit(project.root, file_path)
+    logger.info("差分プレビューを破棄: %s (存在: %s)", file_path, discarded)
+    return jsonify({"ok": True, "discarded": discarded})
 
 
 def _synthesize_plan_for_file(root: Path, file_path: str) -> GenerationPlan:

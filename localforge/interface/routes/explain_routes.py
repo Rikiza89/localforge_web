@@ -40,6 +40,52 @@ def get_report_sections():
     return jsonify({"sections": REPORT_SECTIONS})
 
 
+@bp.route("/search", methods=["GET"])
+def search_project():
+    """
+    プロジェクト全体のセマンティック検索（ChromaDB / BM25フォールバック）。
+
+    Query params:
+        q: 検索クエリ
+        top_n: 返す件数（デフォルト10、最大30）
+
+    Response JSON:
+        results: [{path, summary, language}]
+    """
+    project_svc = _get_project_svc()
+    analysis_svc = _get_analysis_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
+
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"results": []})
+
+    try:
+        top_n = max(1, min(int(request.args.get("top_n", "10")), 30))
+    except ValueError:
+        top_n = 10
+
+    project_index = analysis_svc.load_project_index(project.root)
+    if not project_index:
+        return jsonify({"error": "NoIndex", "message": "先にインデックスを構築してください"}), 404
+
+    results = analysis_svc.get_top_chunks_semantic(
+        project_index.file_chunks, query, top_n=top_n
+    )
+    return jsonify({
+        "results": [
+            {
+                "path": c.path,
+                "summary": (c.summary or "")[:300],
+                "language": c.language or "",
+            }
+            for c in results
+        ]
+    })
+
+
 @bp.route("/index", methods=["GET"])
 def stream_index():
     """

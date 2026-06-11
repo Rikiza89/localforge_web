@@ -239,9 +239,15 @@ class ExplanationService:
         total_sections = len(REPORT_SECTIONS)
         completed_sections: List[tuple[str, str]] = []
 
+        # 既存レポートのセクションを常に読み込み、選択的再生成（特定セクションのみ）
+        # でも他セクションが失われないようマージして保存する
+        existing = self._load_existing_sections(root)
+        merged: dict[str, str] = {
+            name: existing[name] for name in REPORT_SECTIONS if name in existing
+        }
+
         # resume_from: 既存レポートから既存セクション内容を取得して再利用する
         if resume_from > 0:
-            existing = self._load_existing_sections(root)
             for i, name in enumerate(REPORT_SECTIONS):
                 if i < resume_from:
                     existing_content = existing.get(name, "")
@@ -331,12 +337,19 @@ class ExplanationService:
             log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
             self._log_async(log_path, log_entry)
 
-            completed_sections.append((section_name, "".join(section_tokens)))
+            section_content = "".join(section_tokens)
+            completed_sections.append((section_name, section_content))
+            merged[section_name] = section_content
 
-            # セクション完了ごとに差分保存（中断しても失わない）
-            is_partial = len(completed_sections) < total_sections
+            # セクション完了ごとに差分保存（中断しても失わない）。
+            # 既存セクションとマージし、REPORT_SECTIONS の正規順で保存する —
+            # 選択的再生成でも他のセクションが失われない。
+            ordered_sections = [
+                (name, merged[name]) for name in REPORT_SECTIONS if name in merged
+            ]
+            is_partial = len(ordered_sections) < total_sections
             self._save_report(
-                root, completed_sections, project_index.project_name,
+                root, ordered_sections, project_index.project_name,
                 partial=is_partial, total=total_sections,
             )
 

@@ -869,6 +869,7 @@ async function loadSavedReport() {
     if (!reportOutput) return false;
 
     reportOutput.innerHTML = _renderMd(data.content);
+    _attachSectionRegenButtons(reportOutput);
 
     if (data.partial) {
       _showPartialBanner(data.sections_done, data.sections_total);
@@ -1186,6 +1187,12 @@ function generateReport(opts = {}) {
       showAlert("レポートが完成しました！Q&Aで質問できます。", "success");
       _hideSavedReportBanner();
       enableChat();
+      if (opts.sectionIndices && opts.sectionIndices.length > 0) {
+        // 選択的再生成: 既存セクションとマージされた保存済みレポートを再表示する
+        loadSavedReport();
+      } else if (reportOutput) {
+        _attachSectionRegenButtons(reportOutput);
+      }
     },
     onError: (err) => {
       _unlockUI();
@@ -1196,6 +1203,49 @@ function generateReport(opts = {}) {
     },
   });
   _lockUI(() => _ctrl.close());
+}
+
+// =========================================================================
+// セクション単位の再生成ボタン
+// =========================================================================
+
+let _reportSectionNames = null;
+
+async function _getReportSectionNames() {
+  if (_reportSectionNames) return _reportSectionNames;
+  try {
+    const data = await apiRequest("/api/explain/sections");
+    _reportSectionNames = data.sections || [];
+  } catch (e) {
+    _reportSectionNames = [];
+  }
+  return _reportSectionNames;
+}
+
+/**
+ * レポート内のセクション見出しに「このセクションのみ再生成」ボタンを付与する。
+ * 保存済みレポートは h2、ライブ生成は h3[data-section] が見出しになる。
+ */
+async function _attachSectionRegenButtons(container) {
+  const names = await _getReportSectionNames();
+  if (!names.length || !container) return;
+  container.querySelectorAll("h2, h3[data-section]").forEach(h => {
+    if (h.querySelector(".section-regen-btn")) return;
+    const name = (h.dataset.section || h.textContent).trim();
+    const idx = names.indexOf(name);
+    if (idx === -1) return;
+    const btn = document.createElement("button");
+    btn.className = "section-regen-btn";
+    btn.type = "button";
+    btn.title = "このセクションのみ再生成";
+    btn.textContent = "↻";
+    btn.addEventListener("click", () => {
+      if (_uiLocked) return;
+      if (!confirm(`セクション「${name}」のみ再生成しますか？\n（他のセクションは保持されます）`)) return;
+      generateReport({ sectionIndices: [idx] });
+    });
+    h.appendChild(btn);
+  });
 }
 
 // =========================================================================

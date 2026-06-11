@@ -495,32 +495,93 @@ async function explainSingleFile(filePath) {
 
 /**
  * ファイルの再生成をトリガーする。
+ * 変更はまずプレビュー（diff_preview イベント）として届き、
+ * ユーザーが承認した場合のみ /api/generate/edit/apply でディスクに書き込まれる。
  * @param {string} filePath - 再生成するファイルパス
  */
 async function triggerRegenerateFile(filePath) {
-  if (!confirm(`${filePath} を再生成しますか？`)) return;
+  if (!confirm(`${filePath} を再生成しますか？\n（変更は適用前にプレビューで確認できます）`)) return;
 
   updateStatusBar(`再生成中: ${filePath}`);
+  let previewShown = false;
 
   await startPostStream(
     "/api/generate/regenerate",
-    { file_path: filePath },
+    { file_path: filePath, preview: true },
     null,
     {
+      onDiffPreview: (diffText, path) => {
+        previewShown = true;
+        showDiffPreviewModal(path || filePath, diffText);
+      },
       onFileWritten: (path) => {
-        showAlert(`ファイルを再生成しました: ${path}`, "success");
+        // 非プレビュー経路（変更なし等）のフォールバック
         refreshFileTree();
       },
       onWarning: (msg) => {
         showAlert(msg, "warning", 8000);
       },
-      onDone: () => { updateStatusBar("再生成完了"); },
+      onDone: () => {
+        updateStatusBar(previewShown ? "変更プレビューを確認してください" : "再生成完了");
+      },
       onError: (err) => {
         showAlert(`再生成エラー: ${err}`, "error");
         updateStatusBar("エラーが発生しました");
       },
     }
   );
+}
+
+/**
+ * 差分プレビューモーダルを表示する。承認 / 破棄ボタン付き。
+ * @param {string} filePath - 対象ファイルの相対パス
+ * @param {string} diffText - unified diff テキスト
+ */
+function showDiffPreviewModal(filePath, diffText) {
+  const modal = document.getElementById("file-modal");
+  const title = document.getElementById("modal-title");
+  const content = document.getElementById("modal-content");
+  if (!modal || !title || !content) return;
+
+  title.textContent = `変更プレビュー: ${filePath}`;
+
+  const diffHtml = (diffText || "").split("\n").map(line => {
+    let cls = "diff-ctx";
+    if (line.startsWith("+++") || line.startsWith("---")) cls = "diff-meta";
+    else if (line.startsWith("@@")) cls = "diff-hunk";
+    else if (line.startsWith("+")) cls = "diff-add";
+    else if (line.startsWith("-")) cls = "diff-del";
+    return `<div class="diff-line ${cls}">${escapeHtml(line) || "&nbsp;"}</div>`;
+  }).join("");
+
+  content.className = "modal-content";
+  content.innerHTML =
+    `<div class="diff-preview">${diffHtml || "（変更なし）"}</div>` +
+    `<div class="diff-actions">` +
+    `<button class="btn btn-primary" id="diff-approve-btn">✓ 適用する</button>` +
+    `<button class="btn" id="diff-reject-btn">✕ 破棄する</button>` +
+    `</div>`;
+  modal.style.display = "flex";
+
+  document.getElementById("diff-approve-btn").addEventListener("click", async () => {
+    try {
+      await apiRequest("/api/generate/edit/apply", "POST", { file_path: filePath });
+      modal.style.display = "none";
+      showAlert(`変更を適用しました: ${filePath}`, "success");
+      updateStatusBar("変更を適用しました");
+      refreshFileTree();
+    } catch (e) {
+      showAlert(`適用エラー: ${e.message}`, "error");
+    }
+  });
+
+  document.getElementById("diff-reject-btn").addEventListener("click", async () => {
+    try {
+      await apiRequest("/api/generate/edit/discard", "POST", { file_path: filePath });
+    } catch (e) { /* 破棄失敗は無視 */ }
+    modal.style.display = "none";
+    updateStatusBar("変更を破棄しました");
+  });
 }
 
 /**
@@ -550,10 +611,74 @@ function debouncedRefreshFileTree() {
 }
 
 // ---------------------------------------------------------------------------
+// プロジェクト検索（セマンティック / BM25）
+// ---------------------------------------------------------------------------
+
+function initProjectSearch() {
+  const input = document.getElementById("project-search-input");
+  const resultsEl = document.getElementById("project-search-results");
+  const treeEl = document.getElementById("file-tree");
+  if (!input || !resultsEl || !treeEl) return;
+
+  let timer = null;
+  let seq = 0;
+
+  function clearSearch() {
+    resultsEl.style.display = "none";
+    resultsEl.innerHTML = "";
+    treeEl.style.display = "";
+  }
+
+  input.addEventListener("input", () => {
+    if (timer) clearTimeout(timer);
+    const q = input.value.trim();
+    if (!q) { clearSearch(); return; }
+    timer = setTimeout(async () => {
+      const mySeq = ++seq;
+      try {
+        const data = await apiRequest(`/api/explain/search?q=${encodeURIComponent(q)}`);
+        if (mySeq !== seq) return; // 古いレスポンスは破棄
+        resultsEl.innerHTML = "";
+        treeEl.style.display = "none";
+        resultsEl.style.display = "block";
+        if (!data.results || data.results.length === 0) {
+          resultsEl.innerHTML = '<div class="empty-state">一致するファイルがありません</div>';
+          return;
+        }
+        data.results.forEach(r => {
+          const item = document.createElement("div");
+          item.className = "search-result-item";
+          item.innerHTML =
+            `<div class="search-result-path">${escapeHtml(r.path)}</div>` +
+            `<div class="search-result-summary">${escapeHtml(r.summary || "")}</div>`;
+          item.addEventListener("click", () => showFileContent(r.path));
+          resultsEl.appendChild(item);
+        });
+      } catch (err) {
+        if (mySeq !== seq) return;
+        treeEl.style.display = "none";
+        resultsEl.style.display = "block";
+        resultsEl.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+      }
+    }, 350);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      input.value = "";
+      clearSearch();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // イベントリスナーの初期化
 // ---------------------------------------------------------------------------
 
 document.addEventListener("DOMContentLoaded", () => {
+  // プロジェクト検索の初期化
+  initProjectSearch();
+
   // モーダルを閉じる
   const modalOverlay = document.getElementById("file-modal");
   const modalClose = document.getElementById("modal-close");

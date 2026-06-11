@@ -105,6 +105,8 @@ class GenerationService:
         self._index_adapter = index_adapter
         self._llm = llm
         self._context = context
+        # 差分プレビュー機能: 承認待ちの編集内容 {resolved_path: {content, newline, base_content}}
+        self._pending_edits: dict[str, dict] = {}
 
     def generate_context_md(self, root: Path, model: str, plan: "GenerationPlan", project_svc: object) -> None:
         """
@@ -736,6 +738,7 @@ class GenerationService:
         model: str,
         context_md: str,
         file_path: str,
+        preview: bool = False,
     ) -> Generator[dict, None, None]:
         """
         単一ファイルを再生成してSSEでストリーミングする。
@@ -746,6 +749,8 @@ class GenerationService:
             model: 使用するモデル名
             context_md: context.mdの内容
             file_path: 再生成するファイルの相対パス
+            preview: True の場合はディスクに書き込まず diff_preview イベントを
+                発行し、apply_pending_edit() の承認を待つ
 
         Yields:
             SSEペイロード辞書
@@ -846,6 +851,22 @@ class GenerationService:
             if failed:
                 yield {"status": f"⚠ {len(failed)}件のブロックが一致しませんでした"}
 
+            if preview:
+                # ディスクには書き込まず、承認待ちとして保留する
+                self._pending_edits[str(full_path.resolve())] = {
+                    "content": modified_content,
+                    "newline": original_newline,
+                    "base_content": existing_content,
+                }
+                yield {
+                    "diff_preview": self._make_unified_diff(
+                        existing_content, modified_content, planned_file.path
+                    ),
+                    "file_path": planned_file.path,
+                }
+                yield {"done": True}
+                return
+
             try:
                 if original_newline == "\r\n":
                     modified_content = modified_content.replace("\n", "\r\n")
@@ -895,6 +916,23 @@ class GenerationService:
                 return
 
             file_content = "".join(file_content_parts)
+
+            if preview:
+                # 新規ファイルも書き込まずに承認待ちとして保留する
+                self._pending_edits[str(full_path.resolve())] = {
+                    "content": file_content,
+                    "newline": "\n",
+                    "base_content": "",
+                }
+                yield {
+                    "diff_preview": self._make_unified_diff(
+                        "", file_content, planned_file.path
+                    ),
+                    "file_path": planned_file.path,
+                }
+                yield {"done": True}
+                return
+
             try:
                 self._fs.write_text(full_path, file_content)
             except Exception as exc:
@@ -1038,6 +1076,70 @@ class GenerationService:
         num_ctx のバケット方針は ollama_client.pick_num_ctx を参照。
         """
         return {"num_ctx": pick_num_ctx(prompt_tokens), "keep_alive": "2h"}
+
+    @staticmethod
+    def _make_unified_diff(old: str, new: str, path: str) -> str:
+        """編集前後の unified diff テキストを返す（プレビュー表示用）。"""
+        import difflib
+        old_norm = old.replace("\r\n", "\n").replace("\r", "\n")
+        new_norm = new.replace("\r\n", "\n").replace("\r", "\n")
+        diff = difflib.unified_diff(
+            old_norm.splitlines(),
+            new_norm.splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        )
+        return "\n".join(diff)
+
+    def apply_pending_edit(self, root: Path, file_path: str) -> Tuple[bool, str]:
+        """
+        プレビューで保留中の編集を検証してディスクに適用する。
+
+        Returns:
+            (ok, error_message)
+        """
+        full_path = root / file_path
+        pending = self._pending_edits.pop(str(full_path.resolve()), None)
+        if pending is None:
+            return False, "保留中の編集が見つかりません。再度プレビューしてください"
+
+        # プレビュー作成後にファイルが変更されていないか確認する
+        if full_path.exists() and pending["base_content"]:
+            try:
+                current = self._fs.read_text(full_path)
+            except Exception:
+                current = None
+            if current is not None and (
+                current.replace("\r\n", "\n") != pending["base_content"].replace("\r\n", "\n")
+            ):
+                return False, "プレビュー作成後にファイルが変更されています。再度プレビューしてください"
+
+        content = pending["content"]
+        if pending.get("newline") == "\r\n":
+            content = content.replace("\n", "\r\n")
+
+        ok, err = validate(full_path, content)
+        if not ok:
+            return False, f"構文エラー: {err}"
+
+        try:
+            self._fs.write_text(full_path, content)
+        except Exception as exc:
+            return False, str(exc)
+
+        delete_backup(full_path)
+        try:
+            self._git.commit_all(root, f"LocalForge [edit-approved] {file_path} ✓")
+        except Exception as exc:
+            logger.warning("git commit失敗 [%s]: %s", file_path, exc)
+        return True, ""
+
+    def discard_pending_edit(self, root: Path, file_path: str) -> bool:
+        """プレビューで保留中の編集を破棄する。ファイルは変更されない。"""
+        full_path = root / file_path
+        delete_backup(full_path)
+        return self._pending_edits.pop(str(full_path.resolve()), None) is not None
 
     @staticmethod
     def _plan_digest(plan: GenerationPlan) -> str:
