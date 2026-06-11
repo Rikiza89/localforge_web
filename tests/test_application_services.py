@@ -364,8 +364,8 @@ def standalone_func():
         # 埋め込みフェーズのstatusイベントが存在する
         assert len(status_events) >= 1
         assert len(done_events) == 1
-        # upsert_chunkが呼び出されたことを確認
-        assert mock_vector.upsert_chunk.called
+        # バッチ埋め込み (upsert_chunks_batch) が呼び出されたことを確認
+        assert mock_vector.upsert_chunks_batch.called
 
     def test_get_top_chunks_semantic_fallback_to_keywords(self, analysis_service):
         """vector=Noneの場合、get_top_chunks_semanticがキーワード検索にフォールバックすることをテスト。"""

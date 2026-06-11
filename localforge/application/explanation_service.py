@@ -274,9 +274,25 @@ class ExplanationService:
         if sections_needing_gen:
             with ThreadPoolExecutor(max_workers=min(len(sections_needing_gen), 4)) as ex:
                 fetched_chunks = list(ex.map(_fetch_section_chunks, sections_needing_gen))
-            chunk_map = {name: fetched_chunks[j] for j, (_, name) in enumerate(sections_needing_gen)}
         else:
-            chunk_map = {}
+            fetched_chunks = []
+
+        # 全セクションの関連サマリーを重複排除して 1 つの共有リストに統合する。
+        # 全セクションのプロンプトが「メタデータ + サマリー」までの同一プレフィックスを
+        # 共有するため、Ollama の KV プロンプトキャッシュがセクション 2 以降の
+        # prefill をほぼスキップできる（セクションごとに異なるサマリーを渡すと
+        # 毎回フル prefill になる）。
+        _union: dict[str, str] = {}
+        for sec_chunks in fetched_chunks:
+            for c in sec_chunks:
+                if c.summary and c.path not in _union:
+                    _union[c.path] = "\n".join(c.summary.splitlines()[:3])[:400]
+        _MAX_SHARED_SUMMARIES = 30
+        shared_summaries = sorted(_union.items())[:_MAX_SHARED_SUMMARIES]
+
+        # Q&A（stream_answer）と同一の Ollama オプションを使う:
+        # num_ctx が呼び出し間で異なると Ollama がモデルを再ロードする（1〜5秒）
+        _num_ctx: Optional[int] = 8192 if not getattr(self._llm, "cuda_available", False) else None
 
         for sec_idx, section_name in sections_to_run:
             if sec_idx < resume_from:
@@ -288,24 +304,19 @@ class ExplanationService:
                 "section_total": total_sections,
             }
 
-            relevant_chunks = chunk_map.get(section_name, [])
-            # サマリーを先頭3行・最大400文字に拡張してコンテキストを豊かにする
-            relevant_summaries = [
-                (c.path, "\n".join((c.summary or "").splitlines()[:3])[:400])
-                for c in relevant_chunks if c.summary
-            ]
-
             prompt, tokens = self._context.build_report_section_prompt(
                 section_name=section_name,
                 project_index_json=index_json,
-                relevant_summaries=relevant_summaries,
+                relevant_summaries=shared_summaries,
                 language=language,
             )
 
             start_time = time.time()
             section_tokens: List[str] = []
             try:
-                for token in self._llm.stream_completion(model, prompt):
+                for token in self._llm.stream_completion(
+                    model, prompt, num_ctx=_num_ctx, keep_alive="2h"
+                ):
                     section_tokens.append(token)
                     yield {"token": token}
             except Exception as exc:
@@ -668,6 +679,16 @@ class ExplanationService:
             yield {"done": True}
             return
 
+        # ── Phase D 先行実行: 質問のセマンティック検索は Phase A/B と独立なので
+        # バックグラウンドで並列実行し、Phase D で結果を回収する ──
+        _is_cpu = not getattr(self._llm, "cuda_available", False)
+        _top_n = 3 if mode == "fast" else (5 if _is_cpu else 10)
+        _search_executor = ThreadPoolExecutor(max_workers=1)
+        _semantic_future = _search_executor.submit(
+            self._analysis.get_top_chunks_semantic, chunks, question, _top_n
+        )
+        _search_executor.shutdown(wait=False)
+
         # ── Phase A: ピン留めコンテキスト解決 ──
         # ピン留めファイルはユーザーが明示的に選んだもの。全内容を読み込む（文字数上限なし）。
         # トークン予算は build_qa_prompt 内で管理する。
@@ -774,15 +795,19 @@ class ExplanationService:
             yield {"status": "セマンティック検索でファイルを選択中..."}
 
         # ── Phase D: セマンティック検索で補完 ──
+        # 検索自体は Phase A の前にバックグラウンドで開始済み — ここで結果を回収する。
         # CPU専用では top_n を絞ってコンテキストサイズを抑制する（8000+ トークンを防ぐ）
         # mode == "fast" では常に top_n=3 に絞る
-        _is_cpu = not getattr(self._llm, "cuda_available", False)
-        _top_n = 3 if mode == "fast" else (5 if _is_cpu else 10)
+        try:
+            _semantic_results = _semantic_future.result()
+        except Exception as exc:
+            logger.warning("セマンティック検索エラー: %s", exc)
+            _semantic_results = []
         if pinned_base_chunks:
             # ピン留めファイルを起点に、不足分をセマンティック検索で補完
             base_chunks = list(pinned_base_chunks)
             seen_paths: set[str] = {c.path for c in base_chunks}
-            extra = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
+            extra = _semantic_results
             for c in extra:
                 if c.path not in seen_paths:
                     base_chunks.append(c)
@@ -793,14 +818,14 @@ class ExplanationService:
             base_chunks = [chunk_map[p] for p in selected_paths if p in chunk_map]
             if len(base_chunks) < _top_n:
                 seen_paths = {c.path for c in base_chunks}
-                for c in self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n):
+                for c in _semantic_results:
                     if c.path not in seen_paths:
                         base_chunks.append(c)
                         seen_paths.add(c.path)
                         if len(base_chunks) >= _top_n:
                             break
         else:
-            base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
+            base_chunks = _semantic_results
 
         # ── Phase E: 依存関係展開 (BFS 10 hop, カスタムインポートのみ) ──
         # mode == "fast" では BFS を完全にスキップして base_chunks をそのまま使う

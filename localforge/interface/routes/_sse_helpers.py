@@ -67,11 +67,14 @@ def _sse_response(generator):
                 if "token" in payload:
                     tok = payload["token"]
                     if tok.startswith("\x01"):
+                        # 思考トークン: メイン表示をスキップし、パネル専用の
+                        # raw_token イベントとしてのみ送信する
                         thinking_text = tok[1:]
                         yield f"data: {json.dumps({'raw_token': '<think>' + thinking_text + '</think>'}, ensure_ascii=False)}\n\n"
                         continue
-                    else:
-                        yield f"data: {json.dumps({'raw_token': tok}, ensure_ascii=False)}\n\n"
+                    # 通常トークンは token イベントのみ送信する。
+                    # クライアント側 (_dispatchSseEvent) が Ollama ライブパネルへも
+                    # 同じトークンを転送するため、raw_token の二重送信は不要。
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
         finally:
             stop.set()

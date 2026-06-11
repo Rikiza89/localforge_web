@@ -129,6 +129,8 @@ def mock_vector() -> MagicMock:
     mock = MagicMock(spec=VectorAdapter)
     mock.needs_reembedding.return_value = True
     mock.upsert_chunk.return_value = True
+    mock.upsert_chunks_batch.side_effect = lambda chunks: len(chunks)
+    mock.filter_needing_reembedding.side_effect = lambda chunks: list(chunks)
     mock.collection_exists.return_value = True
     mock.get_top_chunks_semantic.return_value = []
     return mock

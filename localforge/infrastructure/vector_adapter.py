@@ -266,6 +266,80 @@ class VectorAdapter:
             logger.warning("ChromaDB upsert エラー: %s — %s", chunk.path, exc)
             return False
 
+    def upsert_chunks_batch(self, chunks: List[FileChunk]) -> int:
+        """
+        複数チャンクの埋め込みを 1 回の model.encode() で生成し、
+        1 回の ChromaDB upsert で登録する。
+        チャンク単位の upsert_chunk() より大幅に高速（特に件数が多い場合）。
+
+        Returns:
+            登録に成功したチャンク数
+        """
+        if not self._collection:
+            logger.warning("コレクションが初期化されていません")
+            return 0
+        target = [c for c in chunks if c.summary]
+        if not target:
+            return 0
+        model = _load_st_model()
+        if model is None:
+            return 0
+
+        texts = [self._chunk_to_embed_text(c) for c in target]
+        try:
+            embeddings = model.encode(
+                texts, normalize_embeddings=True, show_progress_bar=False
+            )
+        except Exception as exc:
+            logger.warning("バッチ埋め込み生成エラー: %s", exc)
+            return 0
+
+        try:
+            self._collection.upsert(
+                ids=[c.path for c in target],
+                embeddings=[e.tolist() for e in embeddings],
+                documents=texts,
+                metadatas=[{
+                    "path": c.path,
+                    "mtime": c.mtime,
+                    "size": c.size,
+                    "language": c.language or "",
+                    "summary": c.summary or "",
+                } for c in target],
+            )
+            return len(target)
+        except Exception as exc:
+            logger.warning("ChromaDB バッチ upsert エラー: %s", exc)
+            return 0
+
+    def filter_needing_reembedding(self, chunks: List[FileChunk]) -> List[FileChunk]:
+        """
+        再埋め込みが必要なチャンクのみを返す。
+        チャンク単位の needs_reembedding() と異なり、ChromaDB への
+        get を 1 回にまとめる（N 回のラウンドトリップを回避）。
+        """
+        if not self._collection or not chunks:
+            return list(chunks)
+        try:
+            result = self._collection.get(
+                ids=[c.path for c in chunks], include=["metadatas"]
+            )
+        except Exception as exc:
+            logger.warning("ChromaDB 一括 get エラー: %s", exc)
+            return list(chunks)
+
+        meta_by_id = dict(zip(result.get("ids", []), result.get("metadatas", [])))
+        needing: List[FileChunk] = []
+        for c in chunks:
+            meta = meta_by_id.get(c.path)
+            if (
+                meta is None
+                or abs(meta.get("mtime", 0.0) - c.mtime) >= 0.001
+                or meta.get("size", -1) != c.size
+            ):
+                needing.append(c)
+        return needing
+
     def needs_reembedding(self, chunk: FileChunk) -> bool:
         if not self._collection:
             return True
@@ -282,13 +356,9 @@ class VectorAdapter:
             return True
 
     def migrate_from_chunks(self, chunks: List[FileChunk]) -> int:
-        embedded = 0
-        for chunk in chunks:
-            if not chunk.summary:
-                continue
-            if self.needs_reembedding(chunk):
-                if self.upsert_chunk(chunk):
-                    embedded += 1
+        with_summary = [c for c in chunks if c.summary]
+        needing = self.filter_needing_reembedding(with_summary)
+        embedded = self.upsert_chunks_batch(needing)
         logger.info("ChromaDB 移行完了: %d 件を埋め込みました", embedded)
         return embedded
 

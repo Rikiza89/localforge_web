@@ -371,6 +371,11 @@ function _dispatchSseEvent(data, handlers, outputEl) {
   if (data.token !== undefined) {
     if (outputEl) { _appendTokenToEl(outputEl, data.token); }
     if (handlers.onToken) handlers.onToken(data.token);
+    // Ollamaライブパネルは token イベントから直接給電する。
+    // （以前はサーバーが全トークンを raw_token として二重送信していた —
+    //   SSEペイロードを半減するため通常トークンの複製は廃止。
+    //   思考トークンのみ raw_token イベントとして届く。）
+    OllamaPanel.appendToken(data.token);
   }
 
   if (data.section !== undefined && handlers.onSection) {

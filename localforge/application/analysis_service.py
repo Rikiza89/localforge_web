@@ -12,7 +12,7 @@ import hashlib
 import logging
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Generator, List, Optional, Set, Tuple
@@ -704,32 +704,32 @@ class AnalysisService:
             pass
 
         if self._vector is not None and _enable_rag:
-            for cached in cached_chunks:
-                if cached.summary and self._vector.needs_reembedding(cached):
-                    embed_queue.append(cached)
+            # キャッシュ済みチャンクの欠落確認は ChromaDB への一括 get 1 回で行う
+            # （チャンク単位の needs_reembedding は N 回のラウンドトリップになる）
+            cached_with_summary = [c for c in cached_chunks if c.summary]
+            if cached_with_summary:
+                try:
+                    embed_queue.extend(
+                        self._vector.filter_needing_reembedding(cached_with_summary)
+                    )
+                except Exception as exc:
+                    logger.warning("再埋め込み判定エラー: %s", exc)
 
             if embed_queue:
                 embed_total = len(embed_queue)
-                embed_done = 0
                 yield {"status": f"ベクトルインデックス構築中: 0/{embed_total}"}
 
-                _vec = self._vector
-
-                def _do_embed(chunk: FileChunk) -> None:
+                # バッチ埋め込み: model.encode() のネイティブバッチ処理は
+                # チャンク単位のスレッド並列（GILで実質直列）より大幅に速い
+                _BATCH = 64
+                for i in range(0, embed_total, _BATCH):
+                    batch = embed_queue[i : i + _BATCH]
                     try:
-                        if _vec.needs_reembedding(chunk):
-                            _vec.upsert_chunk(chunk)
+                        self._vector.upsert_chunks_batch(batch)
                     except Exception as exc:
-                        logger.warning("埋め込みエラー (%s): %s", chunk.path, exc)
-
-                # CPU推論では埋め込みも直列化してCPUコア競合を避ける
-                _embed_workers = 4 if self._llm.cuda_available else 1
-                with ThreadPoolExecutor(max_workers=_embed_workers) as embed_ex:
-                    futures = {embed_ex.submit(_do_embed, c): c for c in embed_queue}
-                    for future in as_completed(futures):
-                        future.result()
-                        embed_done += 1
-                        yield {"status": f"ベクトルインデックス構築中: {embed_done}/{embed_total}"}
+                        logger.warning("バッチ埋め込みエラー: %s", exc)
+                    embed_done = min(i + _BATCH, embed_total)
+                    yield {"status": f"ベクトルインデックス構築中: {embed_done}/{embed_total}"}
 
                 yield {"status": "ベクトルインデックス完了"}
 
@@ -917,12 +917,15 @@ class AnalysisService:
         total = len(chunks_with_summary)
         yield {"progress": {"done": 0, "total": total, "current_file": ""}}
 
-        done = 0
-        for chunk in chunks_with_summary:
-            if self._vector.needs_reembedding(chunk):
-                self._vector.upsert_chunk(chunk)
-            done += 1
-            yield {"progress": {"done": done, "total": total, "current_file": chunk.path}}
+        # 一括 get で対象を絞り、バッチ埋め込みで登録する
+        needing = self._vector.filter_needing_reembedding(chunks_with_summary)
+        _BATCH = 64
+        done = total - len(needing)
+        for i in range(0, len(needing), _BATCH):
+            batch = needing[i : i + _BATCH]
+            self._vector.upsert_chunks_batch(batch)
+            done += len(batch)
+            yield {"progress": {"done": done, "total": total, "current_file": batch[-1].path}}
 
         yield {"progress": {"done": total, "total": total, "current_file": "完了"}}
         yield {"done": True}
