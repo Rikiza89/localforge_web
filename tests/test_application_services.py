@@ -209,7 +209,7 @@ class TestGenerationService:
             generation_service.parse_plan("not valid json at all {{{")
 
     def test_stream_plan_yields_tokens(self, generation_service, tmp_path):
-        def fake_stream(model, prompt, system=None):
+        def fake_stream(model, prompt, system=None, **kwargs):
             yield '{"project_name": "app", "description": "test", "files": []}'
 
         generation_service._llm.stream_completion.side_effect = fake_stream
@@ -236,7 +236,7 @@ class TestGenerationService:
     def test_stream_all_files_yields_progress(self, generation_service, tmp_path):
         reset_cancel()
 
-        def fake_stream(model, prompt, system=None):
+        def fake_stream(model, prompt, system=None, **kwargs):
             yield "# generated code\n"
 
         generation_service._llm.stream_completion.side_effect = fake_stream
@@ -280,7 +280,8 @@ class TestAnalysisService:
 
     def test_read_file_chunk_hybrid(self, analysis_service, tmp_path):
         file_path = tmp_path / "large.py"
-        lines = [f"# line {i}" for i in range(250)]
+        # _HYBRID_THRESHOLD (350行) を超えるファイルは hybrid 読み込みになる
+        lines = [f"# line {i}" for i in range(400)]
         content = "\n".join(lines)
         file_path.write_text(content, encoding="utf-8")
 

@@ -70,11 +70,10 @@ def mock_llm() -> MagicMock:
     mock.cuda_available = False
     mock.num_thread = None
 
-    def fake_stream(model, prompt, system=None):
+    def fake_stream(model, prompt, system=None, **kwargs):
         yield '{"project_name": "test", "description": "test", "files": []}'
 
     mock.stream_completion.side_effect = fake_stream
-    mock.generate_sync.return_value = "モックサマリーテキスト"
     return mock
 
 
@@ -197,12 +196,21 @@ def sample_chunk() -> FileChunk:
 @pytest.fixture
 def flask_app():
     """テスト用のFlaskアプリケーションを返すフィクスチャ。"""
-    # ログディレクトリに一時ディレクトリを使用
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    import logging
+
+    # ログディレクトリに一時ディレクトリを使用。
+    # Windows では開いたままの app.log を削除できないため、teardown 時に
+    # 一時ディレクトリ配下の FileHandler をすべて閉じてから削除する。
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
         from localforge.interface.server import create_app
         app = create_app(log_dir=Path(tmp_dir))
         app.config["TESTING"] = True
         yield app
+        for handler in list(logging.getLogger().handlers):
+            base = getattr(handler, "baseFilename", "")
+            if base and str(base).startswith(tmp_dir):
+                handler.close()
+                logging.getLogger().removeHandler(handler)
 
 
 @pytest.fixture
