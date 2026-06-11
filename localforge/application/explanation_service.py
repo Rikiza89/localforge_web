@@ -138,6 +138,8 @@ class ExplanationService:
             return None
         cached = self._file_content_cache.get(key)
         if cached is not None:
+            # 真の LRU: アクセスされたエントリを末尾に移動して退避されにくくする
+            self._file_content_cache[key] = self._file_content_cache.pop(key)
             return cached
         try:
             content = path.read_text(encoding="utf-8", errors="replace")

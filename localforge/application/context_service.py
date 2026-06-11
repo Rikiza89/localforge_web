@@ -23,7 +23,10 @@ _DEFAULT_TOKEN_LIMIT = 131072
 
 def _estimate_tokens(text: str) -> int:
     """
-    テキストのトークン数を単語数から推定する。
+    テキストのトークン数を推定する。
+
+    英語はスペース区切り単語数 × 1.3、日本語などの非スペース言語は
+    文字数 ÷ 4 で推定し、両者の大きい方を返す。
 
     Args:
         text: 推定対象テキスト
@@ -31,7 +34,9 @@ def _estimate_tokens(text: str) -> int:
     Returns:
         推定トークン数
     """
-    return int(len(text.split()) * _WORDS_TO_TOKENS)
+    word_est = int(len(text.split()) * _WORDS_TO_TOKENS)
+    char_est = len(text) // 4
+    return max(word_est, char_est)
 
 
 _DOC_EXTENSIONS: Set[str] = {".md", ".rst", ".txt", ".pdf", ".adoc", ".org", ".docx", ".xlsx"}
@@ -130,7 +135,7 @@ class ContextService:
         workspace_summaries: Optional[List[tuple[str, str]]] = None,
         max_files: Optional[int] = None,
         min_files: Optional[int] = None,
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
         既存プロジェクトのインデックスサマリーがある場合はRAGコンテキストとして注入する。
@@ -250,7 +255,7 @@ class ContextService:
         context_md: str,
         plan_json: str,
         dependency_contents: List[tuple[str, str]],
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         個別ファイル生成のプロンプトを組み立てる。
 
@@ -324,7 +329,7 @@ class ContextService:
         context_md: str,
         chunk_idx: int = 0,
         total_chunks: int = 1,
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         ファイル編集差分（SEARCH/REPLACE形式）生成のプロンプトを組み立てる。
         ファイルが大きい場合はチャンク単位で呼び出し、全チャンクの出力を合成して適用する。

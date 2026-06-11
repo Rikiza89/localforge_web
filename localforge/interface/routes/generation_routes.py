@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 
 from flask import Blueprint, current_app, jsonify, request
@@ -124,7 +125,13 @@ def stream_plan():
                     fp = root / pc.path
                     if fp.exists():
                         try:
-                            pinned_contents.append((pc.path, fp.read_text(encoding="utf-8", errors="replace")[:_max_pin]))
+                            content = fp.read_text(encoding="utf-8", errors="replace")
+                            if len(content) > _max_pin:
+                                logger.warning(
+                                    "ピン留めファイルを %d 文字に切り詰め (元サイズ %d 文字): %s",
+                                    _max_pin, len(content), pc.path,
+                                )
+                            pinned_contents.append((pc.path, content[:_max_pin]))
                         except OSError:
                             pass
     except Exception as exc:

@@ -14,6 +14,16 @@ from localforge.domain.models import FileChunk
 
 logger = logging.getLogger(__name__)
 
+# BM25インデックスキャッシュ: {チャンクリストのフィンガープリント: BM25Okapi}
+# (path, mtime, size) の組から導出するため、ファイルの追加・削除・更新で自動的に再構築される。
+# id() ベースのキーは GC 後に別リストへ再割当てされ得るため使用しない。
+_bm25_cache: dict = {}
+
+
+def _chunks_fingerprint(chunks: List[FileChunk]) -> int:
+    """チャンクリストの内容フィンガープリントを返す（O(n)、BM25再構築より遥かに軽い）。"""
+    return hash(tuple((c.path, c.mtime, c.size) for c in chunks))
+
 
 def _tokenize(text: str) -> List[str]:
     """
@@ -57,7 +67,7 @@ def get_top_chunks_bm25(
 
     query_tokens = _tokenize(query)
     if not query_tokens:
-        return chunks[:top_n]
+        return []
 
     try:
         from rank_bm25 import BM25Okapi
@@ -65,20 +75,33 @@ def get_top_chunks_bm25(
         logger.debug("rank-bm25 未インストール: キーワードカウントフォールバックを使用")
         return _keyword_fallback(chunks, query_tokens, top_n)
 
-    # コーパス: パス + サマリー + シンボル名 + コンテンツ先頭 300 文字をトークナイズ
-    corpus = [
-        _tokenize(
-            f"{c.path} {c.summary or ''} "
-            f"{' '.join(s.name for s in c.symbols) if c.symbols else ''} "
-            f"{c.content[:300]}"
-        )
-        for c in chunks
-    ]
+    # チャンク内容のフィンガープリントで BM25 インデックスをキャッシュする。
+    # インデックス再構築でファイル構成が変われば自動的にミスして再構築される。
+    cache_key = _chunks_fingerprint(chunks)
+    cached = _bm25_cache.get(cache_key)
+    if cached is None:
+        # 複数プロジェクトの交互検索でスラッシングしないよう、直近4件まで保持する
+        while len(_bm25_cache) >= 4:
+            _bm25_cache.pop(next(iter(_bm25_cache)))
+        corpus = [
+            _tokenize(
+                f"{c.path} {c.summary or ''} "
+                f"{' '.join(s.name for s in c.symbols) if c.symbols else ''} "
+                f"{c.content[:300]}"
+            )
+            for c in chunks
+        ]
+        cached = BM25Okapi(corpus)
+        _bm25_cache[cache_key] = cached
 
-    bm25 = BM25Okapi(corpus)
-    scores = bm25.get_scores(query_tokens)
+    scores = cached.get_scores(query_tokens)
 
-    # スコア降順で上位 N 件を返す（全件スコア 0 でも先頭 N 件を返す）
+    # 小規模コーパスでは IDF が 0 に退化して全スコアが 0 になることがある
+    # （クエリ語が文書の半数に出現すると ln(1)=0）。その場合はキーワード
+    # カウントフォールバックで実際の一致度に基づくランキングを返す。
+    if max(scores, default=0.0) <= 0.0:
+        return _keyword_fallback(chunks, query_tokens, top_n)
+
     indexed = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
     return [chunks[i] for i, _ in indexed[:top_n]]
 

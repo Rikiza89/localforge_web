@@ -8,6 +8,7 @@ LLMバッチ処理（複数ファイルを1回のLLM呼び出しで処理）を�
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 import os
 import re
@@ -867,10 +868,11 @@ class AnalysisService:
         """ProjectIndex・セマンティックキャッシュを無効化する（インデックス再構築後に呼び出す）。"""
         key = str(root / _LOCALFORGE_DIR / "project_index.json")
         self._index_cache.pop(key, None)
-        # セマンティック検索キャッシュも全クリア（インデックスが変わったため）
+        # インメモリのセマンティックキャッシュをクリアする。
+        # ディスク層は削除しない: キャッシュキーにチャンク内容フィンガープリントが
+        # 含まれるため、インデックスが変わった場合は古いエントリに到達不能になり、
+        # 変化がなかった再構築では有効なエントリがそのまま再利用できる。
         self._semantic_cache.clear()
-        for dc in self._semantic_disk_caches.values():
-            dc.clear()
         self._semantic_disk_caches.clear()
 
     def migrate_vector_index(self, root: Path) -> Generator[dict, None, None]:
@@ -941,10 +943,18 @@ class AnalysisService:
 
         chunk_map = {c.path: c for c in chunks}
 
-        # ── キャッシュキー: (クエリ正規化, top_n, チャンク数) ──
-        # チャンク数をキーに含めることでインデックス再構築後の古い結果を返さないようにする
+        # ── キャッシュキー: (クエリ正規化, top_n, チャンク内容フィンガープリント) ──
+        # フィンガープリントは (path, mtime, size) から導出するため、別プロジェクトや
+        # インデックス再構築後のチャンクリストとは衝突しない。
+        # （チャンク数だけでは別プロジェクト間で衝突し得る）
         norm_q = query.strip().lower()
-        cache_key_tuple = (norm_q, top_n, len(chunks))
+        fp_src = "\x00".join(f"{c.path}|{c.mtime}|{c.size}" for c in chunks)
+        fingerprint = hashlib.sha256(fp_src.encode("utf-8", errors="replace")).hexdigest()
+        # 検索バックエンドもキーに含める: BM25フォールバック時代の結果が
+        # RAG有効化後もディスクキャッシュから返され続けるのを防ぐ
+        use_vector = self._vector is not None and self._vector.is_initialized()
+        backend = "vec" if use_vector else "bm25"
+        cache_key_tuple = (norm_q, top_n, fingerprint, backend)
 
         # 1. インメモリキャッシュ確認
         cached_paths = self._semantic_cache.get(cache_key_tuple)
@@ -953,13 +963,13 @@ class AnalysisService:
             if result:
                 return result
 
-        # 2. ディスクキャッシュ確認（chunk_mapの最初のパスからrootを特定する代わりに
-        #    クエリ+サイズのみをキーにする — rootなしでもコリジョンはほぼ起きない）
-        disk_key = f"{norm_q}|{top_n}|{len(chunks)}"
-        # ディスクキャッシュは chunks リストのルートに依存しないグローバルキャッシュを使う
+        # 2. ディスクキャッシュ確認 — 生のキー文字列を渡す（DiskCache 側が
+        #    ハッシュ化と元キー検証を行うため、呼び出し側で事前ハッシュしない）
+        disk_key = f"{norm_q}\x00{top_n}\x00{fingerprint}\x00{backend}"
+        # フィンガープリントでプロジェクトが区別されるため、保存先はグローバルでよい
         if "global" not in self._semantic_disk_caches:
             self._semantic_disk_caches["global"] = DiskCache(
-                Path(".localforge") / "cache" / "semantic", max_memory=200
+                Path(".localforge").resolve() / "cache" / "semantic", max_memory=200
             )
         disk_cache = self._semantic_disk_caches["global"]
         disk_val = disk_cache.get(disk_key)
@@ -974,7 +984,7 @@ class AnalysisService:
                 pass
 
         # 3. 実際の検索を実行
-        if self._vector is not None and self._vector.is_initialized():
+        if use_vector:
             result = self._vector.get_top_chunks_semantic(chunks, query, top_n)
         else:
             from localforge.infrastructure.bm25_adapter import get_top_chunks_bm25

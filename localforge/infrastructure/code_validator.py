@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import shutil
 from pathlib import Path
 from typing import Tuple
 
@@ -94,8 +95,8 @@ def restore_backup(file_path: Path) -> bool:
     if not backup_path.exists():
         return False
     try:
-        content = backup_path.read_text(encoding="utf-8", errors="replace")
-        file_path.write_text(content, encoding="utf-8")
+        # バイト単位でコピーし、改行コードや BOM を完全に復元する
+        shutil.copy2(backup_path, file_path)
         backup_path.unlink(missing_ok=True)
         logger.info("バックアップから復元: %s", file_path)
         return True

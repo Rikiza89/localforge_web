@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -415,6 +416,7 @@ class GenerationService:
                 self._index_adapter.append_log_entry(log_path, log_entry)
 
                 existing_content = self._create_backup(file_path)
+                original_newline = self._detect_newline(file_path)
                 modification_notes = planned_file.modification_notes or planned_file.description
 
                 # ファイルをチャンク分割（コンテキスト窓に収まるサイズに）
@@ -474,25 +476,41 @@ class GenerationService:
                     existing_content, combined_diff
                 )
 
-                # 失敗した場合のリトライ（1回のみ）
+                # 失敗した場合のリトライ（1回のみ、失敗ブロックを含むチャンクのみ対象）
                 if failed and not is_cancelled():
-                    yield {"status": f"🔄 {planned_file.path}: ブロック不一致のためリトライ中..."}
-                    retry_diff_parts = []
-                    for chunk_idx, chunk_content in enumerate(chunks):
-                        prompt = self._context.build_file_diff_prompt(
+                    failing_indices = [
+                        ci for ci, part in enumerate(all_diff_parts)
+                        if self._apply_search_replace_blocks(existing_content, part)[2]
+                    ]
+                    yield {"status": (
+                        f"🔄 {planned_file.path}: "
+                        f"{len(failing_indices)}/{total_chunks}チャンクをリトライ中..."
+                    )}
+                    retry_diff_parts = list(all_diff_parts)
+                    for ci in failing_indices:
+                        if is_cancelled():
+                            break
+                        _, _, chunk_failed = self._apply_search_replace_blocks(
+                            existing_content, all_diff_parts[ci]
+                        )
+                        prompt, _ = self._context.build_file_diff_prompt(
                             target_file=planned_file.path,
-                            modification_notes=f"【リトライ】以前の生成で以下のコードブロックが一致しませんでした。より正確なSEARCHブロックを使用して再試行してください：\n" + "\n".join(failed),
-                            chunk_content=chunk_content,
+                            modification_notes=(
+                                "【リトライ】以前の生成で以下のコードブロックが一致しませんでした。"
+                                "より正確なSEARCHブロックを使用して再試行してください：\n"
+                                + "\n".join(chunk_failed)
+                            ),
+                            chunk_content=chunks[ci],
                             context_md=context_md,
-                            chunk_idx=chunk_idx,
+                            chunk_idx=ci,
                             total_chunks=total_chunks,
                         )
                         chunk_parts = []
                         for token in self._llm.stream_completion(model, prompt):
-                            if is_cancelled(): break
+                            if is_cancelled():
+                                break
                             chunk_parts.append(token)
-                        retry_diff_parts.append("".join(chunk_parts))
-                        if is_cancelled(): break
+                        retry_diff_parts[ci] = "".join(chunk_parts)
 
                     if not is_cancelled():
                         combined_diff = "\n".join(retry_diff_parts)
@@ -527,6 +545,8 @@ class GenerationService:
 
                 try:
                     yield {"status": f"💾 {planned_file.path} に変更を保存中..."}
+                    if original_newline == "\r\n":
+                        modified_content = modified_content.replace("\n", "\r\n")
                     self._fs.write_text(file_path, modified_content)
                 except Exception as exc:
                     logger.error("ファイル書き込みエラー [%s]: %s", planned_file.path, exc)
@@ -672,6 +692,7 @@ class GenerationService:
         if is_modify:
             self._ensure_bak_ignored(root)
             existing_content = self._create_backup(full_path)
+            original_newline = self._detect_newline(full_path)
             modification_notes = planned_file.modification_notes or planned_file.description
             context_md_val = context_md
 
@@ -690,7 +711,7 @@ class GenerationService:
                         f"{planned_file.path}: チャンク {chunk_idx + 1}/{total_chunks} を分析中..."
                     )}
 
-                prompt = self._context.build_file_diff_prompt(
+                prompt, _ = self._context.build_file_diff_prompt(
                     target_file=planned_file.path,
                     modification_notes=modification_notes,
                     chunk_content=chunk_content,
@@ -738,6 +759,8 @@ class GenerationService:
                 yield {"status": f"⚠ {len(failed)}件のブロックが一致しませんでした"}
 
             try:
+                if original_newline == "\r\n":
+                    modified_content = modified_content.replace("\n", "\r\n")
                 self._fs.write_text(full_path, modified_content)
             except Exception as exc:
                 yield {"error": str(exc)}
@@ -762,7 +785,7 @@ class GenerationService:
                 logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
 
         else:
-            prompt = self._context.build_file_generation_prompt(
+            prompt, _ = self._context.build_file_generation_prompt(
                 target_file=planned_file.path,
                 target_description=planned_file.description,
                 context_md=context_md,
@@ -874,42 +897,40 @@ class GenerationService:
             re.DOTALL,
         )
 
-        result = original
+        # 比較・置換はすべて LF 正規化空間で行う（行ズレ防止のため一括正規化）。
+        # 元ファイルの改行コードの復元は呼び出し側（書き込み時）が担う。
+        result = original.replace("\r\n", "\n").replace("\r", "\n")
         applied = 0
         failed: List[str] = []
 
         for match in pattern.finditer(llm_output):
             search_text = match.group(1)
             replace_text = match.group(2)
+            norm_search = search_text.replace("\r\n", "\n").replace("\r", "\n")
+            norm_replace = replace_text.replace("\r\n", "\n").replace("\r", "\n")
 
             # 1) 完全一致
-            if search_text in result:
-                result = result.replace(search_text, replace_text, 1)
+            if norm_search in result:
+                result = result.replace(norm_search, norm_replace, 1)
                 applied += 1
                 continue
 
-            # 2) 改行コード正規化
-            norm_result = result.replace("\r\n", "\n").replace("\r", "\n")
-            norm_search = search_text.replace("\r\n", "\n").replace("\r", "\n")
-            if norm_search in norm_result:
-                result = norm_result.replace(norm_search, replace_text, 1)
-                applied += 1
-                continue
-
-            # 3) 行末空白を除去して再試行（LLMが行末スペースを省略する場合）
-            def rstrip_lines(s: str) -> str:
-                return "\n".join(l.rstrip() for l in s.replace("\r\n", "\n").split("\n"))
-
-            stripped_result = rstrip_lines(norm_result)
-            stripped_search = rstrip_lines(norm_search)
-
-            if stripped_search in stripped_result:
-                pos = stripped_result.find(stripped_search)
-                line_start = stripped_result[:pos].count("\n")
-                search_line_count = stripped_search.count("\n") + 1
-                result_lines = norm_result.split("\n")
-                replace_lines = replace_text.replace("\r\n", "\n").split("\n")
-                result_lines[line_start : line_start + search_line_count] = replace_lines
+            # 2) 行末空白を無視した行単位マッチ（LLMが行末スペースを省略する場合）。
+            #    必ず行境界に揃った位置のみ置換し、行の途中での部分一致による
+            #    コード欠落を防ぐ。
+            result_lines = result.split("\n")
+            search_lines = [l.rstrip() for l in norm_search.split("\n")]
+            n = len(search_lines)
+            match_at = -1
+            first = search_lines[0]
+            for i in range(len(result_lines) - n + 1):
+                if result_lines[i].rstrip() != first:
+                    continue
+                if all(result_lines[i + j].rstrip() == search_lines[j] for j in range(1, n)):
+                    match_at = i
+                    break
+            if match_at >= 0:
+                result_lines[match_at : match_at + n] = norm_replace.split("\n")
                 result = "\n".join(result_lines)
                 applied += 1
                 continue
@@ -920,6 +941,16 @@ class GenerationService:
             )
 
         return result, applied, failed
+
+    @staticmethod
+    def _detect_newline(file_path: Path) -> str:
+        """ファイル先頭8KBの生バイトから元の改行コードを判定する。"""
+        try:
+            with file_path.open("rb") as fh:
+                head = fh.read(8192)
+            return "\r\n" if b"\r\n" in head else "\n"
+        except OSError:
+            return "\n"
 
     def _ensure_bak_ignored(self, root: Path) -> None:
         """
@@ -951,7 +982,8 @@ class GenerationService:
         try:
             existing = self._fs.read_text(file_path)
             backup_path = file_path.with_suffix(file_path.suffix + ".bak")
-            self._fs.write_text(backup_path, existing)
+            # バイト単位でコピーし、改行コードや BOM を完全に保存する
+            shutil.copy2(file_path, backup_path)
             logger.info("バックアップ作成: %s", backup_path)
             return existing
         except Exception as exc:

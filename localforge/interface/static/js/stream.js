@@ -38,11 +38,47 @@ const OllamaPanel = (() => {
   let _thinkingVisible = false;
   let _normalBuf = "";
   let _thinkBuf = "";
+  // rAF debounce state — avoids re-rendering full markdown on every token
+  let _normalDirty = false;
+  let _thinkDirty = false;
+  let _rafPending = false;
 
   function _normalEl() { return document.getElementById("ollama-output-normal"); }
   function _thinkingEl() { return document.getElementById("ollama-output-thinking"); }
   function _thinkingContent() { return document.getElementById("ollama-thinking-content"); }
   function _panel() { return document.getElementById("ollama-panel"); }
+
+  function _scheduleFlush() {
+    if (_rafPending) return;
+    _rafPending = true;
+    requestAnimationFrame(() => {
+      _rafPending = false;
+      if (_normalDirty) {
+        _normalDirty = false;
+        const el = _normalEl();
+        if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
+      }
+      if (_thinkDirty) {
+        _thinkDirty = false;
+        const el = _thinkingContent();
+        if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
+      }
+    });
+  }
+
+  function _flushNow() {
+    _rafPending = false;
+    if (_normalDirty) {
+      _normalDirty = false;
+      const el = _normalEl();
+      if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
+    }
+    if (_thinkDirty) {
+      _thinkDirty = false;
+      const el = _thinkingContent();
+      if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
+    }
+  }
 
   function appendToken(token) {
     const panel = _panel();
@@ -57,15 +93,13 @@ const OllamaPanel = (() => {
         const thinkStart = remaining.indexOf("<think>");
         if (thinkStart === -1) {
           _normalBuf += remaining;
-          const el = _normalEl();
-          if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
+          _normalDirty = true;
           break;
         }
         const before = remaining.slice(0, thinkStart);
         if (before) {
           _normalBuf += before;
-          const el = _normalEl();
-          if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
+          _normalDirty = true;
         }
         _inThinkBlock = true;
         remaining = remaining.slice(thinkStart + "<think>".length);
@@ -73,23 +107,23 @@ const OllamaPanel = (() => {
         const thinkEnd = remaining.indexOf("</think>");
         if (thinkEnd === -1) {
           _thinkBuf += remaining;
-          const el = _thinkingContent();
-          if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
+          _thinkDirty = true;
           break;
         }
         const thinkText = remaining.slice(0, thinkEnd);
         if (thinkText) {
           _thinkBuf += thinkText;
-          const el = _thinkingContent();
-          if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
+          _thinkDirty = true;
         }
         _inThinkBlock = false;
         remaining = remaining.slice(thinkEnd + "</think>".length);
       }
     }
+    if (_normalDirty || _thinkDirty) _scheduleFlush();
   }
 
   function markDone() {
+    _flushNow();
     const panel = _panel();
     if (panel) panel.classList.remove("streaming");
     _inThinkBlock = false;
@@ -98,6 +132,9 @@ const OllamaPanel = (() => {
   function clear() {
     _normalBuf = "";
     _thinkBuf = "";
+    _normalDirty = false;
+    _thinkDirty = false;
+    _rafPending = false;
     const normal = _normalEl();
     const thinking = _thinkingContent();
     if (normal) normal.innerHTML = "";
@@ -271,6 +308,26 @@ const ProcessLog = (() => {
   return { addPhase, markAllDone, setPromptPreview, clear, init };
 })();
 
+// outputEl へのトークン追記を rAF でバッチ化する WeakMap ベースバッファ。
+// textContent += を毎トークン呼ぶと O(n²) になるため、フレームごとに一括更新する。
+const _tokenStreamBufs = new WeakMap();
+
+function _appendTokenToEl(el, token) {
+  if (!_tokenStreamBufs.has(el)) {
+    _tokenStreamBufs.set(el, { text: el.textContent, pending: false });
+  }
+  const state = _tokenStreamBufs.get(el);
+  state.text += token;
+  if (!state.pending) {
+    state.pending = true;
+    requestAnimationFrame(() => {
+      state.pending = false;
+      el.textContent = state.text;
+      _autoScroll(el);
+    });
+  }
+}
+
 /**
  * 単一のSSEペイロードを解析して適切なハンドラーに振り分ける共通ルーター。
  * "done" / "error" を返した場合は呼び出し元がストリームを終了する。
@@ -312,7 +369,7 @@ function _dispatchSseEvent(data, handlers, outputEl) {
   }
 
   if (data.token !== undefined) {
-    if (outputEl) { outputEl.textContent += data.token; _autoScroll(outputEl); }
+    if (outputEl) { _appendTokenToEl(outputEl, data.token); }
     if (handlers.onToken) handlers.onToken(data.token);
   }
 

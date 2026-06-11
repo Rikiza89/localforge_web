@@ -44,6 +44,12 @@ def _sse_response(generator):
             except Exception as exc:
                 q.put({"error": str(exc)})
             finally:
+                # クライアント切断（stop）時もジェネレーターの finally を確実に実行し、
+                # Ollama への HTTP ストリームを閉じて生成を停止させる
+                try:
+                    generator.close()
+                except Exception:
+                    pass
                 q.put(None)  # sentinel
 
         def _heartbeat():
