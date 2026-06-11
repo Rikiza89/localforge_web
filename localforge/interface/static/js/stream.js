@@ -613,9 +613,10 @@ function escapeHtml(str) {
  * @returns {string} サニタイズ済みHTML文字列
  */
 function _renderMd(text) {
-  if (typeof marked !== "undefined") {
-    const raw = marked.parse(text || "");
-    return typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(raw) : raw;
+  // DOMPurify が読み込めていない場合は生HTMLを返さない（XSSフォールバック防止）。
+  // LLM出力はインデックスされたファイル内容に影響され得るため信頼できない。
+  if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
+    return DOMPurify.sanitize(marked.parse(text || ""));
   }
   return "<pre>" + escapeHtml(text || "") + "</pre>";
 }

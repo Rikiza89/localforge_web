@@ -135,7 +135,7 @@ def mock_vector() -> MagicMock:
 
 
 @pytest.fixture
-def analysis_service(fs_adapter, index_adapter, mock_llm, context_service) -> AnalysisService:
+def analysis_service(fs_adapter, index_adapter, mock_llm, context_service, tmp_path) -> AnalysisService:
     """AnalysisServiceのインスタンスを返すフィクスチャ（LLMはモック、Vectorなし）。"""
     return AnalysisService(
         fs=fs_adapter,
@@ -143,11 +143,12 @@ def analysis_service(fs_adapter, index_adapter, mock_llm, context_service) -> An
         llm=mock_llm,
         context=context_service,
         vector=None,
+        semantic_cache_dir=tmp_path / "_semcache",
     )
 
 
 @pytest.fixture
-def analysis_service_with_vector(fs_adapter, index_adapter, mock_llm, context_service, mock_vector) -> AnalysisService:
+def analysis_service_with_vector(fs_adapter, index_adapter, mock_llm, context_service, mock_vector, tmp_path) -> AnalysisService:
     """VectorAdapterモックつきAnalysisServiceのインスタンスを返すフィクスチャ。"""
     return AnalysisService(
         fs=fs_adapter,
@@ -155,6 +156,7 @@ def analysis_service_with_vector(fs_adapter, index_adapter, mock_llm, context_se
         llm=mock_llm,
         context=context_service,
         vector=mock_vector,
+        semantic_cache_dir=tmp_path / "_semcache",
     )
 
 

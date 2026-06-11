@@ -36,6 +36,7 @@ class TestExplainPipelineE2E:
             index_adapter=index_adapter,
             llm=mock_llm,
             context=context,
+            semantic_cache_dir=python_fixture_project / "_semcache",
         )
         explanation_svc = ExplanationService(
             analysis=analysis_svc,

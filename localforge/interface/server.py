@@ -146,6 +146,50 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     app.register_blueprint(workspace_bp)
 
     # ---------------------------------------------------------------------------
+    # Host / Origin 検証（DNSリバインディング・CSRF対策）
+    # ---------------------------------------------------------------------------
+    # ループバック専用サーバーには認証がないため、ブラウザ経由の攻撃
+    # （悪意あるWebページからの localhost へのリクエスト、DNSリバインディング）
+    # を Host / Origin ヘッダー検証でブロックする。
+    # FLASK_HOST を明示的に変更してLAN公開した場合は検証をスキップする
+    # （main.py が起動時に警告を出す）。
+    from urllib.parse import urlsplit
+
+    from flask import abort, request
+
+    _flask_host = os.environ.get("FLASK_HOST", "127.0.0.1").lower()
+    _enforce_local = _flask_host in ("127.0.0.1", "localhost", "::1", "")
+    _allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+
+    if not _enforce_local:
+        logger.warning(
+            "FLASK_HOST=%s のため Host/Origin 検証を無効化します。"
+            "信頼できるネットワークでのみ使用してください。", _flask_host
+        )
+
+    @app.before_request
+    def _validate_host_origin():
+        if not _enforce_local:
+            return None
+        try:
+            host = urlsplit("//" + (request.host or "")).hostname or ""
+        except ValueError:
+            abort(403)
+        if host.lower() not in _allowed_hosts:
+            logger.warning("不正な Host ヘッダーを拒否: %s", request.host)
+            abort(403)
+        origin = request.headers.get("Origin")
+        if origin:
+            try:
+                origin_host = urlsplit(origin).hostname or ""
+            except ValueError:
+                origin_host = ""
+            if origin_host.lower() not in _allowed_hosts:
+                logger.warning("不正な Origin ヘッダーを拒否: %s", origin)
+                abort(403)
+        return None
+
+    # ---------------------------------------------------------------------------
     # メインルート（SPAシェル）
     # ---------------------------------------------------------------------------
     from flask import render_template

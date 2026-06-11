@@ -358,6 +358,7 @@ class AnalysisService:
         llm: OllamaClient,
         context: ContextService,
         vector: Optional[VectorAdapter] = None,
+        semantic_cache_dir: Optional[Path] = None,
     ) -> None:
         """
         AnalysisServiceを初期化する。
@@ -368,12 +369,19 @@ class AnalysisService:
             llm: OllamaクライアントLLMバックエンド
             context: コンテキストサービス
             vector: ベクトルインデックスアダプター（省略可能）
+            semantic_cache_dir: セマンティック検索ディスクキャッシュの保存先
+                （省略時はアプリ実行ディレクトリの .localforge/cache/semantic）
         """
         self._fs = fs
         self._index_adapter = index_adapter
         self._llm = llm
         self._context = context
         self._vector = vector
+        self._semantic_cache_dir = (
+            semantic_cache_dir
+            if semantic_cache_dir is not None
+            else Path(".localforge").resolve() / "cache" / "semantic"
+        )
         # ProjectIndex のインメモリキャッシュ: {path_str: (mtime, ProjectIndex)}
         # リクエストごとのディスク読み込み・JSONパースを回避する
         self._index_cache: dict[str, tuple[float, "ProjectIndex"]] = {}
@@ -969,7 +977,7 @@ class AnalysisService:
         # フィンガープリントでプロジェクトが区別されるため、保存先はグローバルでよい
         if "global" not in self._semantic_disk_caches:
             self._semantic_disk_caches["global"] = DiskCache(
-                Path(".localforge").resolve() / "cache" / "semantic", max_memory=200
+                self._semantic_cache_dir, max_memory=200
             )
         disk_cache = self._semantic_disk_caches["global"]
         disk_val = disk_cache.get(disk_key)

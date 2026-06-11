@@ -121,8 +121,16 @@ def stream_plan():
                     root, pinned_paths, pi.file_chunks, max_total=15
                 )
                 _max_pin = 4000
+                _root_resolved = root.resolve()
                 for pc in pin_chunks:
                     fp = root / pc.path
+                    # 防御的検証: 旧バージョンの config や改ざんされた index 由来の
+                    # ルート外パスを読み込まない
+                    try:
+                        fp.resolve().relative_to(_root_resolved)
+                    except (ValueError, OSError):
+                        logger.warning("ルート外のピン留めパスをスキップ: %s", pc.path)
+                        continue
                     if fp.exists():
                         try:
                             content = fp.read_text(encoding="utf-8", errors="replace")

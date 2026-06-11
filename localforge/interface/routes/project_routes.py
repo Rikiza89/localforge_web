@@ -527,7 +527,22 @@ def save_pinned():
         return jsonify({"error": "InvalidData", "message": "pathsはリストである必要があります"}), 400
 
     paths = [str(p) for p in paths if isinstance(p, str) and p.strip()]
-    project_svc.save_pinned_context(project.root, paths)
-    logger.info("ピン留めコンテキスト更新: %d件", len(paths))
 
-    return jsonify({"ok": True, "pinned": paths})
+    # パストラバーサル検証: プロジェクトルート外を指すパスを拒否する
+    root_resolved = project.root.resolve()
+    safe_paths: list[str] = []
+    for p in paths:
+        try:
+            (root_resolved / p).resolve().relative_to(root_resolved)
+        except (ValueError, OSError):
+            logger.warning("ピン留めパスを拒否（ルート外）: %s", p)
+            return jsonify({
+                "error": "InvalidPath",
+                "message": f"プロジェクト外のパスはピン留めできません: {p}",
+            }), 403
+        safe_paths.append(p)
+
+    project_svc.save_pinned_context(project.root, safe_paths)
+    logger.info("ピン留めコンテキスト更新: %d件", len(safe_paths))
+
+    return jsonify({"ok": True, "pinned": safe_paths})

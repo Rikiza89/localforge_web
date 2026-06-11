@@ -89,10 +89,12 @@ class GitAdapter:
             # LocalForgeの自動コミット用にGPG署名を無効化する
             self._run_no_raise(["config", "commit.gpgsign", "false"], path)
             # .gitignoreを作成する
+            # .localforge/ 全体を除外する: インデックス（ファイル内容のサマリー）、
+            # 生成ログ、キャッシュ等が誤ってリポジトリにコミットされ情報漏洩するのを防ぐ
             gitignore_path = path / ".gitignore"
             if not gitignore_path.exists():
                 gitignore_path.write_text(
-                    ".localforge/app.log\n__pycache__/\n*.pyc\n.venv/\nvenv/\n",
+                    ".localforge/\n__pycache__/\n*.pyc\n.venv/\nvenv/\n*.bak\n",
                     encoding="utf-8",
                 )
         except GitOperationError as exc:
