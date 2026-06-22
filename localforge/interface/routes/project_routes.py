@@ -29,6 +29,11 @@ def _get_llm() -> OllamaClient:
     return current_app.config["llm"]
 
 
+def _get_generation_svc():
+    """現在のアプリコンテキストからGenerationServiceを取得する。"""
+    return current_app.config["generation_service"]
+
+
 def _error_response(exc: Exception, status: int = 500):
     """エラーレスポンスを生成する。"""
     return jsonify({
@@ -90,6 +95,12 @@ def open_project():
     # プロジェクト設定の num_thread を LLM クライアントに適用する
     if project.config.num_thread is not None:
         llm.set_num_thread(project.config.num_thread)
+
+    # プロジェクト設定の max_output_tokens を生成サービスに適用する（0 = 無制限）
+    try:
+        _get_generation_svc().set_max_output_tokens(project.config.max_output_tokens)
+    except Exception as exc:
+        logger.debug("max_output_tokens の適用をスキップ: %s", exc)
 
     mode = project.mode.value
     banner_messages = {

@@ -28,8 +28,46 @@ logger = logging.getLogger(__name__)
 _flask_app = None
 
 
+def _unload_ollama_model() -> None:
+    """
+    現在ロードされている Ollama モデルをアンロードして RAM/VRAM を解放する。
+
+    LocalForge は Ollama プロセスを自身で起動しない（ユーザーまたは OS サービスが
+    起動している）ため、プロセス全体を kill するのではなくモデルだけをアンロードする。
+    これにより VRAM/RAM 解放という本来の目的を達成しつつ、ユーザーが別用途で使っている
+    Ollama を巻き込んで終了させない。
+    """
+    global _flask_app
+    try:
+        if _flask_app is None:
+            return
+        llm = _flask_app.config.get("llm")
+        if llm is None or not hasattr(llm, "unload_model"):
+            return
+        # 現在のプロジェクトで選択中のモデルを取得（無ければ何もしない）
+        model = ""
+        project_svc = _flask_app.config.get("project_service")
+        current = getattr(project_svc, "current_project", None) if project_svc else None
+        if current is not None:
+            model = getattr(getattr(current, "config", None), "model", "") or ""
+        if model:
+            llm.unload_model(model)
+            logger.info("Ollama モデルをアンロードしました: %s", model)
+    except Exception as exc:
+        logger.warning("Ollama モデルのアンロードに失敗しました: %s", exc)
+
+
 def _kill_ollama() -> None:
-    """Ollamaプロセスを終了してVRAM/RAMを解放する。"""
+    """
+    Ollamaプロセスを強制終了する（オプトイン時のみ）。
+
+    LocalForge は Ollama を起動しないため、既定ではプロセスを kill せず
+    モデルのアンロードのみ行う（_unload_ollama_model）。
+    環境変数 LOCALFORGE_KILL_OLLAMA_ON_EXIT=1 が設定されている場合のみ、
+    従来通りプロセス全体を終了する。
+    """
+    if os.environ.get("LOCALFORGE_KILL_OLLAMA_ON_EXIT", "0") not in ("1", "true", "True"):
+        return
     system = platform.system()
     try:
         if system == "Windows":
@@ -62,9 +100,24 @@ def _unload_hf_model() -> None:
         logger.warning("HuggingFace モデルアンロードに失敗しました: %s", exc)
 
 
+def _stop_llamacpp_server() -> None:
+    """LocalForge が起動した llama-server プロセスを停止する（起動していなければ no-op）。"""
+    global _flask_app
+    try:
+        if _flask_app is None:
+            return
+        manager = _flask_app.config.get("llamacpp_manager")
+        if manager is not None:
+            manager.stop()
+    except Exception as exc:
+        logger.warning("llama-server の停止に失敗しました: %s", exc)
+
+
 def _cleanup() -> None:
     """アプリ終了時にすべての LLM リソースを解放する。"""
     _unload_hf_model()
+    _unload_ollama_model()
+    _stop_llamacpp_server()
     _kill_ollama()
 
 
@@ -104,6 +157,15 @@ def _check_network_exposure() -> None:
             "the LocalForge API will be reachable from the network with no authentication. "
             "Unset FLASK_HOST to bind to localhost only.",
             _HOST,
+        )
+
+    llamacpp_url = os.environ.get("LLAMACPP_SERVER_URL", "")
+    if llamacpp_url and not _localhost_re.match(llamacpp_url):
+        logger.warning(
+            "SECURITY WARNING: LLAMACPP_SERVER_URL is set to an external address: %s — "
+            "indexed file contents and LLM prompts will be sent to this host. "
+            "Point it at a local llama-server instead.",
+            llamacpp_url,
         )
 
 

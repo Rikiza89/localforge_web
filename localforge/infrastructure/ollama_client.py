@@ -42,6 +42,25 @@ def pick_num_ctx(prompt_tokens: int, floor: int = 8192, cap: int = 131072) -> in
     return n
 
 
+def recommended_num_thread() -> Optional[int]:
+    """
+    CPU推論向けの推奨スレッド数を返す。
+
+    物理コア数（SMT/ハイパースレッディングを除く）を優先して返す。
+    ハイブリッド構成（Intel P/E コア等）やSMTでは、論理コア全数を使うより
+    物理コア数に抑えたほうがスループットが安定することが多いため。
+    psutil が無い・取得できない場合は None（= Ollama デフォルトに委譲）。
+    """
+    try:
+        import psutil
+        physical = psutil.cpu_count(logical=False)
+        if physical and physical >= 1:
+            return physical
+    except Exception:
+        pass
+    return None
+
+
 def _detect_cuda() -> bool:
     """
     nvidia-smi を呼び出してCUDA対応GPUが存在するか確認する。

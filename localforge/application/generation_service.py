@@ -107,6 +107,17 @@ class GenerationService:
         self._context = context
         # 差分プレビュー機能: 承認待ちの編集内容 {resolved_path: {content, newline, base_content}}
         self._pending_edits: dict[str, dict] = {}
+        # 1回の生成呼び出しの最大出力トークン数（0 = 無制限）。
+        # CPU推論での暴走防止。プロジェクト設定 / 環境変数から適用される。
+        self._max_output_tokens: int = 0
+
+    def set_max_output_tokens(self, n: Optional[int]) -> None:
+        """生成呼び出しごとの最大出力トークン数を設定する（0 / None = 無制限）。"""
+        self._max_output_tokens = int(n) if n else 0
+        if self._max_output_tokens > 0:
+            logger.info("生成出力トークン上限を設定: %d", self._max_output_tokens)
+        else:
+            logger.info("生成出力トークン上限をデフォルト（無制限）にリセットしました")
 
     def generate_context_md(self, root: Path, model: str, plan: "GenerationPlan", project_svc: object) -> None:
         """
@@ -196,6 +207,10 @@ class GenerationService:
             SSEペイロード辞書（token, done, error）
         """
         reset_cancel()
+        # モデルをバックグラウンドでプリロードしてコールドスタートを隠蔽する。
+        # プロンプト組み立て（RAG/ファイル読み込み等）と並行して RAM ロードを進めることで、
+        # CPU推論での最初のトークンまでの待ち時間を短縮する。
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
         prompt, tokens = self._context.build_plan_prompt(
             user_prompt=user_prompt,
             folder_name=folder_name,
@@ -332,6 +347,9 @@ class GenerationService:
             SSEペイロード辞書（progress, file_written, token, done, error）
         """
         reset_cancel()
+        # モデルをバックグラウンドでプリロードしてコールドスタートを隠蔽する
+        # （計画ダイジェスト組み立て・git初期化と並行して RAM ロードを進める）。
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
         files = plan.files
         total = len(files)
         # フルJSON（全ファイルのnotes/deps含む）の代わりにコンパクトな計画ダイジェストを
@@ -756,6 +774,8 @@ class GenerationService:
             SSEペイロード辞書
         """
         reset_cancel()
+        # モデルをバックグラウンドでプリロードしてコールドスタートを隠蔽する。
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
         planned_file = next(
             (f for f in plan.files if f.path == file_path), None
         )
@@ -1074,8 +1094,13 @@ class GenerationService:
         """
         stream_completion に渡す共通オプションを返す。
         num_ctx のバケット方針は ollama_client.pick_num_ctx を参照。
+        max_output_tokens が設定されている場合は num_predict として渡し、
+        CPU推論での生成暴走（無限ループ）を防ぐ。
         """
-        return {"num_ctx": pick_num_ctx(prompt_tokens), "keep_alive": "2h"}
+        opts: dict = {"num_ctx": pick_num_ctx(prompt_tokens), "keep_alive": "2h"}
+        if self._max_output_tokens > 0:
+            opts["num_predict"] = self._max_output_tokens
+        return opts
 
     @staticmethod
     def _make_unified_diff(old: str, new: str, path: str) -> str:
