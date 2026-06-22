@@ -29,6 +29,11 @@ def _get_llm() -> OllamaClient:
     return current_app.config["llm"]
 
 
+def _get_generation_svc():
+    """現在のアプリコンテキストからGenerationServiceを取得する。"""
+    return current_app.config["generation_service"]
+
+
 def _error_response(exc: Exception, status: int = 500):
     """エラーレスポンスを生成する。"""
     return jsonify({
@@ -90,6 +95,12 @@ def open_project():
     # プロジェクト設定の num_thread を LLM クライアントに適用する
     if project.config.num_thread is not None:
         llm.set_num_thread(project.config.num_thread)
+
+    # プロジェクト設定の max_output_tokens を生成サービスに適用する（0 = 無制限）
+    try:
+        _get_generation_svc().set_max_output_tokens(project.config.max_output_tokens)
+    except Exception as exc:
+        logger.debug("max_output_tokens の適用をスキップ: %s", exc)
 
     mode = project.mode.value
     banner_messages = {
@@ -527,7 +538,22 @@ def save_pinned():
         return jsonify({"error": "InvalidData", "message": "pathsはリストである必要があります"}), 400
 
     paths = [str(p) for p in paths if isinstance(p, str) and p.strip()]
-    project_svc.save_pinned_context(project.root, paths)
-    logger.info("ピン留めコンテキスト更新: %d件", len(paths))
 
-    return jsonify({"ok": True, "pinned": paths})
+    # パストラバーサル検証: プロジェクトルート外を指すパスを拒否する
+    root_resolved = project.root.resolve()
+    safe_paths: list[str] = []
+    for p in paths:
+        try:
+            (root_resolved / p).resolve().relative_to(root_resolved)
+        except (ValueError, OSError):
+            logger.warning("ピン留めパスを拒否（ルート外）: %s", p)
+            return jsonify({
+                "error": "InvalidPath",
+                "message": f"プロジェクト外のパスはピン留めできません: {p}",
+            }), 403
+        safe_paths.append(p)
+
+    project_svc.save_pinned_context(project.root, safe_paths)
+    logger.info("ピン留めコンテキスト更新: %d件", len(safe_paths))
+
+    return jsonify({"ok": True, "pinned": safe_paths})

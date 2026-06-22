@@ -24,8 +24,41 @@ _DEFAULT_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 _CONNECT_TIMEOUT = 30
 # ストリーミング読み込みタイムアウト: 2時間（大規模プロジェクトの長時間生成に対応）
 _READ_TIMEOUT = 7200
-# generate_sync 用タイムアウト（バッチサマリー生成など同期呼び出し用）
-_GENERATE_READ_TIMEOUT = 7200
+
+
+def pick_num_ctx(prompt_tokens: int, floor: int = 8192, cap: int = 131072) -> int:
+    """
+    プロンプトサイズに応じた num_ctx を 2 の冪のバケット（最小 floor）で返す。
+
+    すべての LLM 呼び出し（Q&A / レポート / 生成）が同じバケット体系を使うことで:
+    - 典型的なプロンプトは同じ num_ctx (8192) を共有し、呼び出し間の
+      num_ctx 差異による Ollama のモデル再ロード（1〜5秒）を防ぐ
+    - 大きなプロンプトが Ollama デフォルト ctx で先頭からサイレントに
+      切り捨てられるのを防ぐ（バケットが自動的に拡大する）
+    """
+    n = floor
+    while n < prompt_tokens + 4096 and n < cap:
+        n *= 2
+    return n
+
+
+def recommended_num_thread() -> Optional[int]:
+    """
+    CPU推論向けの推奨スレッド数を返す。
+
+    物理コア数（SMT/ハイパースレッディングを除く）を優先して返す。
+    ハイブリッド構成（Intel P/E コア等）やSMTでは、論理コア全数を使うより
+    物理コア数に抑えたほうがスループットが安定することが多いため。
+    psutil が無い・取得できない場合は None（= Ollama デフォルトに委譲）。
+    """
+    try:
+        import psutil
+        physical = psutil.cpu_count(logical=False)
+        if physical and physical >= 1:
+            return physical
+    except Exception:
+        pass
+    return None
 
 
 def _detect_cuda() -> bool:
@@ -389,41 +422,3 @@ class OllamaClient:
             "cuda_available": self.cuda_available,
         }
 
-    def generate_sync(
-        self,
-        model: str,
-        prompt: str,
-        system: Optional[str] = None,
-        num_ctx: Optional[int] = None,
-        num_predict: Optional[int] = None,
-        keep_alive: Optional[str] = None,
-        read_timeout: int = _GENERATE_READ_TIMEOUT,
-    ) -> str:
-        """
-        ストリーミングなしで完全なテキスト応答を生成する（テスト・内部用）。
-        大型ローカルモデル向けに長めのタイムアウトを使用する。
-        read_timeout を指定することで CPU 推論での過長待機を防げる（例: 120s）。
-
-        Args:
-            model: 使用するOllamaモデル名
-            prompt: ユーザープロンプト
-            system: システムプロンプト（省略可能）
-            num_ctx: コンテキスト長（省略可能）
-            read_timeout: 読み込みタイムアウト秒数
-
-        Returns:
-            生成されたテキスト全文
-
-        Raises:
-            OllamaConnectionError: サーバーへの接続に失敗した場合
-            OllamaModelNotFoundError: 指定モデルが見つからない場合
-        """
-        return "".join(self.stream_completion(
-            model=model,
-            prompt=prompt,
-            system=system,
-            read_timeout=read_timeout,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            keep_alive=keep_alive,
-        ))

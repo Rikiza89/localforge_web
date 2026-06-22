@@ -45,7 +45,10 @@ class DiskCache:
     def get(self, key: str) -> Optional[str]:
         h = _sha(key)
         if h in self._mem:
-            return self._mem[h]
+            # 真の LRU: 参照されたエントリを末尾に移動して退避されにくくする
+            v = self._mem.pop(h)
+            self._mem[h] = v
+            return v
         p = self._dir / f"{h}.json"
         if p.exists():
             try:

@@ -63,7 +63,6 @@ async function loadWorkspace() {
     }
   } catch (e) {
     console.warn("ワークスペース読み込みエラー:", e.message);
-    const bar = document.getElementById("workspace-bar");
     if (bar) bar.style.display = "none";
   }
 }

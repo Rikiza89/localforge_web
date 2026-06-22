@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,18 +17,17 @@ from typing import Generator, List, Optional, Tuple
 
 from localforge.application.context_service import ContextService
 from localforge.domain.exceptions import PlanParseError
-from localforge.domain.models import GenerationLogEntry, GenerationPlan, PlannedFile
+from localforge.domain.models import LOCALFORGE_DIR as _LOCALFORGE_DIR, GenerationLogEntry, GenerationPlan, PlannedFile
 from localforge.infrastructure.code_validator import delete_backup, restore_backup, validate
 from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
 from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
-from localforge.infrastructure.ollama_client import OllamaClient
+from localforge.infrastructure.ollama_client import OllamaClient, pick_num_ctx
 
 logger = logging.getLogger(__name__)
 
-_LOCALFORGE_DIR = ".localforge"
-# 生成キャンセルフラグ
-_cancel_flag: bool = False
+# 生成キャンセルフラグ (threading.Event for thread-safety across concurrent requests)
+_cancel_event: threading.Event = threading.Event()
 
 
 def _sanitize_path(raw: str) -> str:
@@ -61,20 +62,18 @@ def _sanitize_path(raw: str) -> str:
 
 def is_cancelled() -> bool:
     """現在キャンセルが要求されているかを返す。"""
-    return _cancel_flag
+    return _cancel_event.is_set()
 
 
 def request_cancel() -> None:
-    """生成キャンセルを要求する（グローバルフラグを設定）。"""
-    global _cancel_flag
-    _cancel_flag = True
+    """生成キャンセルを要求する。"""
+    _cancel_event.set()
     logger.info("生成キャンセルが要求されました")
 
 
 def reset_cancel() -> None:
     """キャンセルフラグをリセットする。"""
-    global _cancel_flag
-    _cancel_flag = False
+    _cancel_event.clear()
 
 
 class GenerationService:
@@ -106,6 +105,19 @@ class GenerationService:
         self._index_adapter = index_adapter
         self._llm = llm
         self._context = context
+        # 差分プレビュー機能: 承認待ちの編集内容 {resolved_path: {content, newline, base_content}}
+        self._pending_edits: dict[str, dict] = {}
+        # 1回の生成呼び出しの最大出力トークン数（0 = 無制限）。
+        # CPU推論での暴走防止。プロジェクト設定 / 環境変数から適用される。
+        self._max_output_tokens: int = 0
+
+    def set_max_output_tokens(self, n: Optional[int]) -> None:
+        """生成呼び出しごとの最大出力トークン数を設定する（0 / None = 無制限）。"""
+        self._max_output_tokens = int(n) if n else 0
+        if self._max_output_tokens > 0:
+            logger.info("生成出力トークン上限を設定: %d", self._max_output_tokens)
+        else:
+            logger.info("生成出力トークン上限をデフォルト（無制限）にリセットしました")
 
     def generate_context_md(self, root: Path, model: str, plan: "GenerationPlan", project_svc: object) -> None:
         """
@@ -195,6 +207,10 @@ class GenerationService:
             SSEペイロード辞書（token, done, error）
         """
         reset_cancel()
+        # モデルをバックグラウンドでプリロードしてコールドスタートを隠蔽する。
+        # プロンプト組み立て（RAG/ファイル読み込み等）と並行して RAM ロードを進めることで、
+        # CPU推論での最初のトークンまでの待ち時間を短縮する。
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
         prompt, tokens = self._context.build_plan_prompt(
             user_prompt=user_prompt,
             folder_name=folder_name,
@@ -212,8 +228,10 @@ class GenerationService:
 
         start_time = time.time()
         try:
-            for token in self._llm.stream_completion(model, prompt):
-                if _cancel_flag:
+            for token in self._llm.stream_completion(
+                model, prompt, **self._llm_options(tokens)
+            ):
+                if is_cancelled():
                     yield {"error": "キャンセルされました"}
                     return
                 yield {"token": token}
@@ -329,9 +347,14 @@ class GenerationService:
             SSEペイロード辞書（progress, file_written, token, done, error）
         """
         reset_cancel()
+        # モデルをバックグラウンドでプリロードしてコールドスタートを隠蔽する
+        # （計画ダイジェスト組み立て・git初期化と並行して RAM ロードを進める）。
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
         files = plan.files
         total = len(files)
-        plan_json = plan.model_dump_json(indent=2)
+        # フルJSON（全ファイルのnotes/deps含む）の代わりにコンパクトな計画ダイジェストを
+        # 使う — ファイルごとのプロンプトサイズを大幅に削減する
+        plan_json = self._plan_digest(plan)
         start_idx = start_from or 0
 
         # gitリポジトリの初期化（必要な場合）
@@ -350,8 +373,50 @@ class GenerationService:
             if cp_hash:
                 yield {"checkpoint": cp_hash, "status": f"🔖 チェックポイント作成: {cp_hash}"}
 
+        # ファイルごとの git commit は重い（1コミット 50〜200ms × ファイル数）ため、
+        # コミットをまとめて 10 ファイルごと＋終了時にフラッシュする。
+        # キャンセル・エラー時も finally でフラッシュされるため取りこぼしはない。
+        pending_commits: List[str] = []
+
+        def _flush_commits() -> None:
+            if not pending_commits:
+                return
+            n = len(pending_commits)
+            message = (
+                f"LocalForge [batch] {n}ファイル生成/編集 ✓\n\n"
+                + "\n".join(f"- {line}" for line in pending_commits)
+            )
+            try:
+                self._git.commit_all(root, message)
+            except Exception as exc:
+                logger.warning("git batch commit失敗: %s", exc)
+            pending_commits.clear()
+
+        try:
+            yield from self._stream_all_files_inner(
+                root, files, total, start_idx, plan_json, context_md, model,
+                pending_commits, _flush_commits,
+            )
+        finally:
+            _flush_commits()
+
+    def _stream_all_files_inner(
+        self,
+        root: Path,
+        files: List[PlannedFile],
+        total: int,
+        start_idx: int,
+        plan_json: str,
+        context_md: str,
+        model: str,
+        pending_commits: List[str],
+        _flush_commits,
+    ) -> Generator[dict, None, None]:
+        """stream_all_files のファイル生成ループ本体（バッチコミット対応）。"""
+        log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
+
         for idx, planned_file in enumerate(files[start_idx:], start=start_idx):
-            if _cancel_flag:
+            if is_cancelled():
                 yield {"error": "キャンセルされました"}
                 return
 
@@ -404,7 +469,6 @@ class GenerationService:
                 logger.info(
                     "既存ファイルのため create → modify に昇格: %s", planned_file.path
                 )
-            log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
             start_time = time.time()
 
             if is_modify:
@@ -417,6 +481,7 @@ class GenerationService:
                 self._index_adapter.append_log_entry(log_path, log_entry)
 
                 existing_content = self._create_backup(file_path)
+                original_newline = self._detect_newline(file_path)
                 modification_notes = planned_file.modification_notes or planned_file.description
 
                 # ファイルをチャンク分割（コンテキスト窓に収まるサイズに）
@@ -428,7 +493,7 @@ class GenerationService:
                 generation_error = False
 
                 for chunk_idx, chunk_content in enumerate(chunks):
-                    if _cancel_flag:
+                    if is_cancelled():
                         yield {"error": "キャンセルされました"}
                         return
 
@@ -450,8 +515,10 @@ class GenerationService:
 
                     chunk_parts: List[str] = []
                     try:
-                        for token in self._llm.stream_completion(model, prompt):
-                            if _cancel_flag:
+                        for token in self._llm.stream_completion(
+                            model, prompt, **self._llm_options(tokens)
+                        ):
+                            if is_cancelled():
                                 yield {"error": "キャンセルされました"}
                                 return
                             chunk_parts.append(token)
@@ -476,27 +543,84 @@ class GenerationService:
                     existing_content, combined_diff
                 )
 
-                # 失敗した場合のリトライ（1回のみ）
-                if failed and not _cancel_flag:
-                    yield {"status": f"🔄 {planned_file.path}: ブロック不一致のためリトライ中..."}
-                    retry_diff_parts = []
-                    for chunk_idx, chunk_content in enumerate(chunks):
-                        prompt = self._context.build_file_diff_prompt(
+                # 失敗した場合のリトライ（1回のみ、失敗ブロックを含むチャンクのみ対象）
+                if failed and not is_cancelled():
+                    failing_indices = [
+                        ci for ci, part in enumerate(all_diff_parts)
+                        if self._apply_search_replace_blocks(existing_content, part)[2]
+                    ]
+                    retry_diff_parts = list(all_diff_parts)
+                    combined_failing = "\n\n".join(chunks[ci] for ci in failing_indices)
+
+                    if failing_indices and len(combined_failing) <= max_chars:
+                        # ── 一括リトライ: 失敗チャンクを 1 つのプロンプトに統合して
+                        # LLM 呼び出しを 1 回に削減する ──
+                        yield {"status": (
+                            f"🔄 {planned_file.path}: "
+                            f"{len(failing_indices)}チャンクを一括リトライ中..."
+                        )}
+                        failed_snippets: List[str] = []
+                        for ci in failing_indices:
+                            failed_snippets.extend(
+                                self._apply_search_replace_blocks(
+                                    existing_content, all_diff_parts[ci]
+                                )[2]
+                            )
+                        prompt, retry_tokens = self._context.build_file_diff_prompt(
                             target_file=planned_file.path,
-                            modification_notes=f"【リトライ】以前の生成で以下のコードブロックが一致しませんでした。より正確なSEARCHブロックを使用して再試行してください：\n" + "\n".join(failed),
-                            chunk_content=chunk_content,
+                            modification_notes=(
+                                "【リトライ】以前の生成で以下のコードブロックが一致しませんでした。"
+                                "より正確なSEARCHブロックを使用して再試行してください：\n"
+                                + "\n".join(failed_snippets)
+                            ),
+                            chunk_content=combined_failing,
                             context_md=context_md,
-                            chunk_idx=chunk_idx,
-                            total_chunks=total_chunks,
                         )
                         chunk_parts = []
-                        for token in self._llm.stream_completion(model, prompt):
-                            if _cancel_flag: break
+                        for token in self._llm.stream_completion(
+                            model, prompt, **self._llm_options(retry_tokens)
+                        ):
+                            if is_cancelled():
+                                break
                             chunk_parts.append(token)
-                        retry_diff_parts.append("".join(chunk_parts))
-                        if _cancel_flag: break
+                        if not is_cancelled():
+                            for ci in failing_indices:
+                                retry_diff_parts[ci] = ""
+                            retry_diff_parts[failing_indices[0]] = "".join(chunk_parts)
+                    elif failing_indices:
+                        # ── 統合するとプロンプトが大きすぎる場合: チャンク単位リトライ ──
+                        yield {"status": (
+                            f"🔄 {planned_file.path}: "
+                            f"{len(failing_indices)}/{total_chunks}チャンクをリトライ中..."
+                        )}
+                        for ci in failing_indices:
+                            if is_cancelled():
+                                break
+                            _, _, chunk_failed = self._apply_search_replace_blocks(
+                                existing_content, all_diff_parts[ci]
+                            )
+                            prompt, retry_tokens = self._context.build_file_diff_prompt(
+                                target_file=planned_file.path,
+                                modification_notes=(
+                                    "【リトライ】以前の生成で以下のコードブロックが一致しませんでした。"
+                                    "より正確なSEARCHブロックを使用して再試行してください：\n"
+                                    + "\n".join(chunk_failed)
+                                ),
+                                chunk_content=chunks[ci],
+                                context_md=context_md,
+                                chunk_idx=ci,
+                                total_chunks=total_chunks,
+                            )
+                            chunk_parts = []
+                            for token in self._llm.stream_completion(
+                                model, prompt, **self._llm_options(retry_tokens)
+                            ):
+                                if is_cancelled():
+                                    break
+                                chunk_parts.append(token)
+                            retry_diff_parts[ci] = "".join(chunk_parts)
 
-                    if not _cancel_flag:
+                    if failing_indices and not is_cancelled():
                         combined_diff = "\n".join(retry_diff_parts)
                         modified_content, applied, failed = self._apply_search_replace_blocks(
                             existing_content, combined_diff
@@ -529,6 +653,8 @@ class GenerationService:
 
                 try:
                     yield {"status": f"💾 {planned_file.path} に変更を保存中..."}
+                    if original_newline == "\r\n":
+                        modified_content = modified_content.replace("\n", "\r\n")
                     self._fs.write_text(file_path, modified_content)
                 except Exception as exc:
                     logger.error("ファイル書き込みエラー [%s]: %s", planned_file.path, exc)
@@ -544,13 +670,11 @@ class GenerationService:
                 delete_backup(file_path)
 
                 line_count = modified_content.count("\n") + 1
-                try:
-                    self._git.commit_all(
-                        root,
-                        f"LocalForge [modify] {planned_file.path} — {applied}件のブロック適用, {line_count}行, 検証済み ✓",
-                    )
-                except Exception as exc:
-                    logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
+                pending_commits.append(
+                    f"[modify] {planned_file.path} — {applied}件のブロック適用, {line_count}行, 検証済み"
+                )
+                if len(pending_commits) >= 10:
+                    _flush_commits()
 
             else:
                 # ── CREATE路: ファイル全体をゼロから生成（従来通り） ──
@@ -571,8 +695,10 @@ class GenerationService:
 
                 file_content_parts: List[str] = []
                 try:
-                    for token in self._llm.stream_completion(model, prompt):
-                        if _cancel_flag:
+                    for token in self._llm.stream_completion(
+                        model, prompt, **self._llm_options(tokens)
+                    ):
+                        if is_cancelled():
                             yield {"error": "キャンセルされました"}
                             return
                         file_content_parts.append(token)
@@ -606,13 +732,11 @@ class GenerationService:
                     continue
 
                 line_count = file_content.count("\n") + 1
-                try:
-                    self._git.commit_all(
-                        root,
-                        f"LocalForge [create] {planned_file.path} — {line_count}行, 検証済み ✓",
-                    )
-                except Exception as exc:
-                    logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
+                pending_commits.append(
+                    f"[create] {planned_file.path} — {line_count}行, 検証済み"
+                )
+                if len(pending_commits) >= 10:
+                    _flush_commits()
 
                 yield {"file_written": planned_file.path}
 
@@ -632,6 +756,7 @@ class GenerationService:
         model: str,
         context_md: str,
         file_path: str,
+        preview: bool = False,
     ) -> Generator[dict, None, None]:
         """
         単一ファイルを再生成してSSEでストリーミングする。
@@ -642,11 +767,15 @@ class GenerationService:
             model: 使用するモデル名
             context_md: context.mdの内容
             file_path: 再生成するファイルの相対パス
+            preview: True の場合はディスクに書き込まず diff_preview イベントを
+                発行し、apply_pending_edit() の承認を待つ
 
         Yields:
             SSEペイロード辞書
         """
         reset_cancel()
+        # モデルをバックグラウンドでプリロードしてコールドスタートを隠蔽する。
+        getattr(self._llm, "preload_model_async", lambda m: None)(model)
         planned_file = next(
             (f for f in plan.files if f.path == file_path), None
         )
@@ -674,6 +803,7 @@ class GenerationService:
         if is_modify:
             self._ensure_bak_ignored(root)
             existing_content = self._create_backup(full_path)
+            original_newline = self._detect_newline(full_path)
             modification_notes = planned_file.modification_notes or planned_file.description
             context_md_val = context_md
 
@@ -683,7 +813,7 @@ class GenerationService:
             all_diff_parts: List[str] = []
 
             for chunk_idx, chunk_content in enumerate(chunks):
-                if _cancel_flag:
+                if is_cancelled():
                     yield {"error": "キャンセルされました"}
                     return
 
@@ -692,7 +822,7 @@ class GenerationService:
                         f"{planned_file.path}: チャンク {chunk_idx + 1}/{total_chunks} を分析中..."
                     )}
 
-                prompt = self._context.build_file_diff_prompt(
+                prompt, prompt_tokens = self._context.build_file_diff_prompt(
                     target_file=planned_file.path,
                     modification_notes=modification_notes,
                     chunk_content=chunk_content,
@@ -703,8 +833,10 @@ class GenerationService:
 
                 chunk_parts: List[str] = []
                 try:
-                    for token in self._llm.stream_completion(model, prompt):
-                        if _cancel_flag:
+                    for token in self._llm.stream_completion(
+                        model, prompt, **self._llm_options(prompt_tokens)
+                    ):
+                        if is_cancelled():
                             yield {"error": "キャンセルされました"}
                             return
                         chunk_parts.append(token)
@@ -739,7 +871,25 @@ class GenerationService:
             if failed:
                 yield {"status": f"⚠ {len(failed)}件のブロックが一致しませんでした"}
 
+            if preview:
+                # ディスクには書き込まず、承認待ちとして保留する
+                self._pending_edits[str(full_path.resolve())] = {
+                    "content": modified_content,
+                    "newline": original_newline,
+                    "base_content": existing_content,
+                }
+                yield {
+                    "diff_preview": self._make_unified_diff(
+                        existing_content, modified_content, planned_file.path
+                    ),
+                    "file_path": planned_file.path,
+                }
+                yield {"done": True}
+                return
+
             try:
+                if original_newline == "\r\n":
+                    modified_content = modified_content.replace("\n", "\r\n")
                 self._fs.write_text(full_path, modified_content)
             except Exception as exc:
                 yield {"error": str(exc)}
@@ -764,17 +914,19 @@ class GenerationService:
                 logger.warning("git commit失敗 [%s]: %s", planned_file.path, exc)
 
         else:
-            prompt = self._context.build_file_generation_prompt(
+            prompt, prompt_tokens = self._context.build_file_generation_prompt(
                 target_file=planned_file.path,
                 target_description=planned_file.description,
                 context_md=context_md,
-                plan_json=plan.model_dump_json(indent=2),
+                plan_json=self._plan_digest(plan),
                 dependency_contents=dependency_contents,
             )
             file_content_parts: List[str] = []
             try:
-                for token in self._llm.stream_completion(model, prompt):
-                    if _cancel_flag:
+                for token in self._llm.stream_completion(
+                    model, prompt, **self._llm_options(prompt_tokens)
+                ):
+                    if is_cancelled():
                         yield {"error": "キャンセルされました"}
                         return
                     file_content_parts.append(token)
@@ -784,6 +936,23 @@ class GenerationService:
                 return
 
             file_content = "".join(file_content_parts)
+
+            if preview:
+                # 新規ファイルも書き込まずに承認待ちとして保留する
+                self._pending_edits[str(full_path.resolve())] = {
+                    "content": file_content,
+                    "newline": "\n",
+                    "base_content": "",
+                }
+                yield {
+                    "diff_preview": self._make_unified_diff(
+                        "", file_content, planned_file.path
+                    ),
+                    "file_path": planned_file.path,
+                }
+                yield {"done": True}
+                return
+
             try:
                 self._fs.write_text(full_path, file_content)
             except Exception as exc:
@@ -876,42 +1045,40 @@ class GenerationService:
             re.DOTALL,
         )
 
-        result = original
+        # 比較・置換はすべて LF 正規化空間で行う（行ズレ防止のため一括正規化）。
+        # 元ファイルの改行コードの復元は呼び出し側（書き込み時）が担う。
+        result = original.replace("\r\n", "\n").replace("\r", "\n")
         applied = 0
         failed: List[str] = []
 
         for match in pattern.finditer(llm_output):
             search_text = match.group(1)
             replace_text = match.group(2)
+            norm_search = search_text.replace("\r\n", "\n").replace("\r", "\n")
+            norm_replace = replace_text.replace("\r\n", "\n").replace("\r", "\n")
 
             # 1) 完全一致
-            if search_text in result:
-                result = result.replace(search_text, replace_text, 1)
+            if norm_search in result:
+                result = result.replace(norm_search, norm_replace, 1)
                 applied += 1
                 continue
 
-            # 2) 改行コード正規化
-            norm_result = result.replace("\r\n", "\n").replace("\r", "\n")
-            norm_search = search_text.replace("\r\n", "\n").replace("\r", "\n")
-            if norm_search in norm_result:
-                result = norm_result.replace(norm_search, replace_text, 1)
-                applied += 1
-                continue
-
-            # 3) 行末空白を除去して再試行（LLMが行末スペースを省略する場合）
-            def rstrip_lines(s: str) -> str:
-                return "\n".join(l.rstrip() for l in s.replace("\r\n", "\n").split("\n"))
-
-            stripped_result = rstrip_lines(norm_result)
-            stripped_search = rstrip_lines(norm_search)
-
-            if stripped_search in stripped_result:
-                pos = stripped_result.find(stripped_search)
-                line_start = stripped_result[:pos].count("\n")
-                search_line_count = stripped_search.count("\n") + 1
-                result_lines = norm_result.split("\n")
-                replace_lines = replace_text.replace("\r\n", "\n").split("\n")
-                result_lines[line_start : line_start + search_line_count] = replace_lines
+            # 2) 行末空白を無視した行単位マッチ（LLMが行末スペースを省略する場合）。
+            #    必ず行境界に揃った位置のみ置換し、行の途中での部分一致による
+            #    コード欠落を防ぐ。
+            result_lines = result.split("\n")
+            search_lines = [l.rstrip() for l in norm_search.split("\n")]
+            n = len(search_lines)
+            match_at = -1
+            first = search_lines[0]
+            for i in range(len(result_lines) - n + 1):
+                if result_lines[i].rstrip() != first:
+                    continue
+                if all(result_lines[i + j].rstrip() == search_lines[j] for j in range(1, n)):
+                    match_at = i
+                    break
+            if match_at >= 0:
+                result_lines[match_at : match_at + n] = norm_replace.split("\n")
                 result = "\n".join(result_lines)
                 applied += 1
                 continue
@@ -922,6 +1089,109 @@ class GenerationService:
             )
 
         return result, applied, failed
+
+    def _llm_options(self, prompt_tokens: int) -> dict:
+        """
+        stream_completion に渡す共通オプションを返す。
+        num_ctx のバケット方針は ollama_client.pick_num_ctx を参照。
+        max_output_tokens が設定されている場合は num_predict として渡し、
+        CPU推論での生成暴走（無限ループ）を防ぐ。
+        """
+        opts: dict = {"num_ctx": pick_num_ctx(prompt_tokens), "keep_alive": "2h"}
+        if self._max_output_tokens > 0:
+            opts["num_predict"] = self._max_output_tokens
+        return opts
+
+    @staticmethod
+    def _make_unified_diff(old: str, new: str, path: str) -> str:
+        """編集前後の unified diff テキストを返す（プレビュー表示用）。"""
+        import difflib
+        old_norm = old.replace("\r\n", "\n").replace("\r", "\n")
+        new_norm = new.replace("\r\n", "\n").replace("\r", "\n")
+        diff = difflib.unified_diff(
+            old_norm.splitlines(),
+            new_norm.splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        )
+        return "\n".join(diff)
+
+    def apply_pending_edit(self, root: Path, file_path: str) -> Tuple[bool, str]:
+        """
+        プレビューで保留中の編集を検証してディスクに適用する。
+
+        Returns:
+            (ok, error_message)
+        """
+        full_path = root / file_path
+        pending = self._pending_edits.pop(str(full_path.resolve()), None)
+        if pending is None:
+            return False, "保留中の編集が見つかりません。再度プレビューしてください"
+
+        # プレビュー作成後にファイルが変更されていないか確認する
+        if full_path.exists() and pending["base_content"]:
+            try:
+                current = self._fs.read_text(full_path)
+            except Exception:
+                current = None
+            if current is not None and (
+                current.replace("\r\n", "\n") != pending["base_content"].replace("\r\n", "\n")
+            ):
+                return False, "プレビュー作成後にファイルが変更されています。再度プレビューしてください"
+
+        content = pending["content"]
+        if pending.get("newline") == "\r\n":
+            content = content.replace("\n", "\r\n")
+
+        ok, err = validate(full_path, content)
+        if not ok:
+            return False, f"構文エラー: {err}"
+
+        try:
+            self._fs.write_text(full_path, content)
+        except Exception as exc:
+            return False, str(exc)
+
+        delete_backup(full_path)
+        try:
+            self._git.commit_all(root, f"LocalForge [edit-approved] {file_path} ✓")
+        except Exception as exc:
+            logger.warning("git commit失敗 [%s]: %s", file_path, exc)
+        return True, ""
+
+    def discard_pending_edit(self, root: Path, file_path: str) -> bool:
+        """プレビューで保留中の編集を破棄する。ファイルは変更されない。"""
+        full_path = root / file_path
+        delete_backup(full_path)
+        return self._pending_edits.pop(str(full_path.resolve()), None) is not None
+
+    @staticmethod
+    def _plan_digest(plan: GenerationPlan) -> str:
+        """
+        プランのコンパクトなダイジェストを返す。
+        フルJSON（全ファイルの modification_notes・dependencies 含む）の代わりに
+        ファイル生成プロンプトへ注入し、プロンプトサイズを抑える。
+        """
+        lines = [
+            f"プロジェクト: {plan.project_name}",
+            f"概要: {plan.description}",
+            "ファイル構成:",
+        ]
+        for f in plan.files:
+            desc = (f.description or "").replace("\n", " ")[:100]
+            lines.append(f"- {f.path}: {desc}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _detect_newline(file_path: Path) -> str:
+        """ファイル先頭8KBの生バイトから元の改行コードを判定する。"""
+        try:
+            with file_path.open("rb") as fh:
+                head = fh.read(8192)
+            return "\r\n" if b"\r\n" in head else "\n"
+        except OSError:
+            return "\n"
 
     def _ensure_bak_ignored(self, root: Path) -> None:
         """
@@ -953,7 +1223,8 @@ class GenerationService:
         try:
             existing = self._fs.read_text(file_path)
             backup_path = file_path.with_suffix(file_path.suffix + ".bak")
-            self._fs.write_text(backup_path, existing)
+            # バイト単位でコピーし、改行コードや BOM を完全に保存する
+            shutil.copy2(file_path, backup_path)
             logger.info("バックアップ作成: %s", backup_path)
             return existing
         except Exception as exc:

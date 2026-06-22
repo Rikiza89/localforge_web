@@ -38,11 +38,79 @@ const OllamaPanel = (() => {
   let _thinkingVisible = false;
   let _normalBuf = "";
   let _thinkBuf = "";
+  // rAF debounce state — avoids re-rendering full markdown on every token
+  let _normalDirty = false;
+  let _thinkDirty = false;
+  let _rafPending = false;
+
+  // インクリメンタルレンダリング状態:
+  // バッファ全体を毎フレーム marked.parse() すると長いストリームで O(n²) になる。
+  // 確定領域（最後の段落境界まで、コードフェンス外）は一度だけパースして HTML を
+  // キャッシュし、末尾の未確定領域のみ毎フレーム再パースする。
+  // markDone() で全体を一度フルパースして最終整合を取る。
+  const _incr = {
+    normal: { stableLen: 0, stableHtml: "" },
+    think: { stableLen: 0, stableHtml: "" },
+  };
+
+  function _renderIncremental(buf, state) {
+    const boundary = buf.lastIndexOf("\n\n");
+    if (boundary + 2 > state.stableLen && boundary >= 0) {
+      const candidate = buf.slice(0, boundary + 2);
+      // 開いたコードフェンス内では確定境界を進めない（分割パースで壊れるため）
+      const fenceCount = (candidate.match(/```/g) || []).length;
+      if (fenceCount % 2 === 0) {
+        state.stableHtml += _renderMd(buf.slice(state.stableLen, boundary + 2));
+        state.stableLen = boundary + 2;
+      }
+    }
+    return state.stableHtml + _renderMd(buf.slice(state.stableLen));
+  }
 
   function _normalEl() { return document.getElementById("ollama-output-normal"); }
   function _thinkingEl() { return document.getElementById("ollama-output-thinking"); }
   function _thinkingContent() { return document.getElementById("ollama-thinking-content"); }
   function _panel() { return document.getElementById("ollama-panel"); }
+
+  function _flushDirty(final) {
+    if (_normalDirty) {
+      _normalDirty = false;
+      const el = _normalEl();
+      if (el) {
+        el.innerHTML = final
+          ? _renderMd(_normalBuf)
+          : _renderIncremental(_normalBuf, _incr.normal);
+        _autoScroll(el);
+      }
+    }
+    if (_thinkDirty) {
+      _thinkDirty = false;
+      const el = _thinkingContent();
+      if (el) {
+        el.innerHTML = final
+          ? _renderMd(_thinkBuf)
+          : _renderIncremental(_thinkBuf, _incr.think);
+        _autoScroll(el.parentElement);
+      }
+    }
+  }
+
+  function _scheduleFlush() {
+    if (_rafPending) return;
+    _rafPending = true;
+    requestAnimationFrame(() => {
+      _rafPending = false;
+      _flushDirty(false);
+    });
+  }
+
+  function _flushNow() {
+    _rafPending = false;
+    // 最終フラッシュ: 全体を一度フルパースして分割パースの境界ズレを解消する
+    _normalDirty = _normalBuf.length > 0;
+    _thinkDirty = _thinkBuf.length > 0;
+    _flushDirty(true);
+  }
 
   function appendToken(token) {
     const panel = _panel();
@@ -57,15 +125,13 @@ const OllamaPanel = (() => {
         const thinkStart = remaining.indexOf("<think>");
         if (thinkStart === -1) {
           _normalBuf += remaining;
-          const el = _normalEl();
-          if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
+          _normalDirty = true;
           break;
         }
         const before = remaining.slice(0, thinkStart);
         if (before) {
           _normalBuf += before;
-          const el = _normalEl();
-          if (el) { el.innerHTML = _renderMd(_normalBuf); _autoScroll(el); }
+          _normalDirty = true;
         }
         _inThinkBlock = true;
         remaining = remaining.slice(thinkStart + "<think>".length);
@@ -73,23 +139,23 @@ const OllamaPanel = (() => {
         const thinkEnd = remaining.indexOf("</think>");
         if (thinkEnd === -1) {
           _thinkBuf += remaining;
-          const el = _thinkingContent();
-          if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
+          _thinkDirty = true;
           break;
         }
         const thinkText = remaining.slice(0, thinkEnd);
         if (thinkText) {
           _thinkBuf += thinkText;
-          const el = _thinkingContent();
-          if (el) { el.innerHTML = _renderMd(_thinkBuf); _autoScroll(el.parentElement); }
+          _thinkDirty = true;
         }
         _inThinkBlock = false;
         remaining = remaining.slice(thinkEnd + "</think>".length);
       }
     }
+    if (_normalDirty || _thinkDirty) _scheduleFlush();
   }
 
   function markDone() {
+    _flushNow();
     const panel = _panel();
     if (panel) panel.classList.remove("streaming");
     _inThinkBlock = false;
@@ -98,6 +164,13 @@ const OllamaPanel = (() => {
   function clear() {
     _normalBuf = "";
     _thinkBuf = "";
+    _normalDirty = false;
+    _thinkDirty = false;
+    _rafPending = false;
+    _incr.normal.stableLen = 0;
+    _incr.normal.stableHtml = "";
+    _incr.think.stableLen = 0;
+    _incr.think.stableHtml = "";
     const normal = _normalEl();
     const thinking = _thinkingContent();
     if (normal) normal.innerHTML = "";
@@ -271,6 +344,175 @@ const ProcessLog = (() => {
   return { addPhase, markAllDone, setPromptPreview, clear, init };
 })();
 
+// ---------------------------------------------------------------------------
+// トークンスループット / ETA 表示（ステータスバーの #status-tokens）
+// ---------------------------------------------------------------------------
+const TokenStats = (() => {
+  let _count = 0;
+  let _startTime = 0;
+  let _lastRender = 0;
+  let _progressDone = 0;
+  let _progressTotal = 0;
+
+  function _el() { return document.getElementById("status-tokens"); }
+
+  function _fmt(seconds) {
+    const s = Math.max(0, Math.round(seconds));
+    const m = Math.floor(s / 60);
+    return m > 0 ? `${m}分${s % 60}秒` : `${s}秒`;
+  }
+
+  function _render(now) {
+    const el = _el();
+    if (!el || !_startTime) return;
+    const elapsed = (now - _startTime) / 1000;
+    if (elapsed <= 0.5) return;
+    const tps = (_count / elapsed).toFixed(1);
+    let eta = "";
+    // 複数ユニット（ファイル/セクション）の進捗があれば平均所要時間からETAを出す
+    if (_progressTotal > 1 && _progressDone > 0 && _progressDone < _progressTotal) {
+      const remain = (elapsed / _progressDone) * (_progressTotal - _progressDone);
+      eta = ` ・残り目安 ${_fmt(remain)}`;
+    }
+    el.textContent = `⚡ ${tps} tok/s ・経過 ${_fmt(elapsed)}${eta}`;
+  }
+
+  function reset() {
+    _count = 0;
+    _startTime = 0;
+    _lastRender = 0;
+    _progressDone = 0;
+    _progressTotal = 0;
+    const el = _el();
+    if (el) el.textContent = "";
+  }
+
+  function addToken() {
+    const now = performance.now();
+    if (!_startTime) _startTime = now;
+    _count++;
+    if (now - _lastRender > 500) {
+      _lastRender = now;
+      _render(now);
+    }
+  }
+
+  function setProgress(done, total) {
+    _progressDone = done;
+    _progressTotal = total;
+  }
+
+  function done() {
+    _render(performance.now());
+  }
+
+  return { reset, addToken, setProgress, done };
+})();
+
+// outputEl へのトークン追記を rAF でバッチ化する WeakMap ベースバッファ。
+// textContent += を毎トークン呼ぶと O(n²) になるため、フレームごとに一括更新する。
+const _tokenStreamBufs = new WeakMap();
+
+function _appendTokenToEl(el, token) {
+  if (!_tokenStreamBufs.has(el)) {
+    _tokenStreamBufs.set(el, { text: el.textContent, pending: false });
+  }
+  const state = _tokenStreamBufs.get(el);
+  state.text += token;
+  if (!state.pending) {
+    state.pending = true;
+    requestAnimationFrame(() => {
+      state.pending = false;
+      el.textContent = state.text;
+      _autoScroll(el);
+    });
+  }
+}
+
+/**
+ * 単一のSSEペイロードを解析して適切なハンドラーに振り分ける共通ルーター。
+ * "done" / "error" を返した場合は呼び出し元がストリームを終了する。
+ * @param {Object} data - パース済みSSEペイロード
+ * @param {Object} handlers - イベントハンドラーマップ
+ * @param {HTMLElement|null} outputEl - トークン追記先要素
+ * @returns {"done"|"error"|null}
+ */
+function _dispatchSseEvent(data, handlers, outputEl) {
+  if (data.heartbeat) return null;
+
+  if (data.raw_token !== undefined) {
+    OllamaPanel.appendToken(data.raw_token);
+    return null;
+  }
+
+  if (data.phase !== undefined) {
+    ProcessLog.addPhase(data.phase, data.detail || "");
+    return null;
+  }
+
+  if (data.prompt_preview !== undefined) {
+    ProcessLog.setPromptPreview(data.prompt_preview, data.prompt_tokens);
+    return null;
+  }
+
+  if (data.done) {
+    OllamaPanel.markDone();
+    ProcessLog.markAllDone();
+    TokenStats.done();
+    if (handlers.onDone) handlers.onDone();
+    return "done";
+  }
+
+  if (data.error) {
+    OllamaPanel.markDone();
+    ProcessLog.markAllDone();
+    TokenStats.done();
+    if (handlers.onError) handlers.onError(data.error);
+    return "error";
+  }
+
+  if (data.token !== undefined) {
+    if (outputEl) { _appendTokenToEl(outputEl, data.token); }
+    if (handlers.onToken) handlers.onToken(data.token);
+    // Ollamaライブパネルは token イベントから直接給電する。
+    // （以前はサーバーが全トークンを raw_token として二重送信していた —
+    //   SSEペイロードを半減するため通常トークンの複製は廃止。
+    //   思考トークンのみ raw_token イベントとして届く。）
+    OllamaPanel.appendToken(data.token);
+    TokenStats.addToken();
+  }
+
+  if (data.section !== undefined && handlers.onSection) {
+    handlers.onSection(data.section, data.section_idx, data.section_total);
+  }
+
+  if (data.file_written !== undefined && handlers.onFileWritten) {
+    handlers.onFileWritten(data.file_written);
+  }
+
+  if (data.progress !== undefined) {
+    const { done: d, total, current_file } = data.progress;
+    TokenStats.setProgress(d, total);
+    if (handlers.onProgress) handlers.onProgress(d, total, current_file || "");
+  }
+
+  if (data.status !== undefined) updateStatusBar(data.status);
+
+  if (data.checkpoint !== undefined && handlers.onCheckpoint) {
+    handlers.onCheckpoint(data.checkpoint);
+  }
+
+  if (data.diff_preview !== undefined && handlers.onDiffPreview) {
+    handlers.onDiffPreview(data.diff_preview, data.file_path);
+  }
+
+  if (data.warning !== undefined && handlers.onWarning) {
+    handlers.onWarning(data.warning);
+  }
+
+  return null;
+}
+
 /**
  * SSEストリームを開始する。
  * @param {string} url - SSEエンドポイントURL
@@ -286,6 +528,7 @@ const ProcessLog = (() => {
  * @returns {{close: function}} ストリームコントローラー（常に現在のESをclose()する）
  */
 function startStream(url, outputEl, handlers) {
+  TokenStats.reset();
   let es = null;
   let _closed = false;
   let _idleTimer = null;
@@ -324,82 +567,11 @@ function startStream(url, outputEl, handlers) {
   function _dispatch(data) {
     if (_closed) return;
     _resetIdle();
-
-    if (data.heartbeat) return;
-
-    if (data.raw_token !== undefined) {
-      OllamaPanel.appendToken(data.raw_token);
-      return;
-    }
-
-    if (data.phase !== undefined) {
-      ProcessLog.addPhase(data.phase, data.detail || "");
-      return;
-    }
-
-    if (data.prompt_preview !== undefined) {
-      ProcessLog.setPromptPreview(data.prompt_preview, data.prompt_tokens);
-      return;
-    }
-
-    if (data.done) {
+    const result = _dispatchSseEvent(data, handlers, outputEl);
+    if (result === "done" || result === "error") {
       _closed = true;
       if (_idleTimer) clearTimeout(_idleTimer);
       if (es) es.close();
-      OllamaPanel.markDone();
-      ProcessLog.markAllDone();
-      if (handlers.onDone) handlers.onDone();
-      return;
-    }
-
-    if (data.error) {
-      _closed = true;
-      if (_idleTimer) clearTimeout(_idleTimer);
-      if (es) es.close();
-      OllamaPanel.markDone();
-      ProcessLog.markAllDone();
-      if (handlers.onError) handlers.onError(data.error);
-      return;
-    }
-
-    if (data.token !== undefined) {
-      if (outputEl) {
-        outputEl.textContent += data.token;
-        _autoScroll(outputEl);
-      }
-      if (handlers.onToken) handlers.onToken(data.token);
-      return;
-    }
-
-    if (data.section !== undefined) {
-      if (handlers.onSection) handlers.onSection(data.section, data.section_idx, data.section_total);
-      return;
-    }
-
-    if (data.file_written !== undefined) {
-      if (handlers.onFileWritten) handlers.onFileWritten(data.file_written);
-      return;
-    }
-
-    if (data.progress !== undefined) {
-      const { done, total, current_file } = data.progress;
-      if (handlers.onProgress) handlers.onProgress(done, total, current_file || "");
-      return;
-    }
-
-    if (data.status !== undefined) {
-      updateStatusBar(data.status);
-      return;
-    }
-
-    if (data.checkpoint !== undefined) {
-      if (handlers.onCheckpoint) handlers.onCheckpoint(data.checkpoint);
-      return;
-    }
-
-    if (data.warning !== undefined) {
-      if (handlers.onWarning) handlers.onWarning(data.warning);
-      return;
     }
   }
 
@@ -434,6 +606,7 @@ function startStream(url, outputEl, handlers) {
  * @returns {Promise<void>}
  */
 async function startPostStream(url, body, outputEl, handlers) {
+  TokenStats.reset();
   let aborted = false;
   const controller = new AbortController();
 
@@ -482,60 +655,9 @@ async function startPostStream(url, body, outputEl, handlers) {
           continue;
         }
 
-        if (data.heartbeat) continue;
-
-        if (data.raw_token !== undefined) {
-          OllamaPanel.appendToken(data.raw_token);
-          continue;
-        }
-
-        if (data.phase !== undefined) {
-          ProcessLog.addPhase(data.phase, data.detail || "");
-          continue;
-        }
-
-        if (data.prompt_preview !== undefined) {
-          ProcessLog.setPromptPreview(data.prompt_preview, data.prompt_tokens);
-          continue;
-        }
-
-        if (data.done) {
-          OllamaPanel.markDone();
-          ProcessLog.markAllDone();
-          if (handlers.onDone) handlers.onDone();
+        const result = _dispatchSseEvent(data, handlers, outputEl);
+        if (result === "done" || result === "error") {
           return cancel;
-        }
-        if (data.error) {
-          OllamaPanel.markDone();
-          ProcessLog.markAllDone();
-          if (handlers.onError) handlers.onError(data.error);
-          return cancel;
-        }
-        if (data.token !== undefined) {
-          if (outputEl) {
-            outputEl.textContent += data.token;
-            _autoScroll(outputEl);
-          }
-          if (handlers.onToken) handlers.onToken(data.token);
-        }
-        if (data.section !== undefined && handlers.onSection) {
-          handlers.onSection(data.section, data.section_idx, data.section_total);
-        }
-        if (data.file_written !== undefined && handlers.onFileWritten) {
-          handlers.onFileWritten(data.file_written);
-        }
-        if (data.progress !== undefined && handlers.onProgress) {
-          const { done: d, total, current_file } = data.progress;
-          handlers.onProgress(d, total, current_file || "");
-        }
-        if (data.status !== undefined) {
-          updateStatusBar(data.status);
-        }
-        if (data.checkpoint !== undefined && handlers.onCheckpoint) {
-          handlers.onCheckpoint(data.checkpoint);
-        }
-        if (data.warning !== undefined && handlers.onWarning) {
-          handlers.onWarning(data.warning);
         }
       }
     }
@@ -607,9 +729,10 @@ function escapeHtml(str) {
  * @returns {string} サニタイズ済みHTML文字列
  */
 function _renderMd(text) {
-  if (typeof marked !== "undefined") {
-    const raw = marked.parse(text || "");
-    return typeof DOMPurify !== "undefined" ? DOMPurify.sanitize(raw) : raw;
+  // DOMPurify が読み込めていない場合は生HTMLを返さない（XSSフォールバック防止）。
+  // LLM出力はインデックスされたファイル内容に影響され得るため信頼できない。
+  if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
+    return DOMPurify.sanitize(marked.parse(text || ""));
   }
   return "<pre>" + escapeHtml(text || "") + "</pre>";
 }

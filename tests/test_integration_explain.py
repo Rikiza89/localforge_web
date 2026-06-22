@@ -27,7 +27,6 @@ class TestExplainPipelineE2E:
         mock_llm = MagicMock(spec=OllamaClient)
         mock_llm.cuda_available = False
         mock_llm.num_thread = None
-        mock_llm.generate_sync.return_value = "モックファイルサマリー: このファイルはテスト用のモジュールです。"
 
         fs = FileSystemAdapter()
         index_adapter = IndexAdapter()
@@ -37,6 +36,7 @@ class TestExplainPipelineE2E:
             index_adapter=index_adapter,
             llm=mock_llm,
             context=context,
+            semantic_cache_dir=python_fixture_project / "_semcache",
         )
         explanation_svc = ExplanationService(
             analysis=analysis_svc,
@@ -82,20 +82,23 @@ class TestExplainPipelineE2E:
         """増分インデックス: 変更なしファイルは再処理されないことをテスト。"""
         root = explain_env["root"]
         analysis_svc = explain_env["analysis_svc"]
-        mock_llm = explain_env["mock_llm"]
+        index_adapter = explain_env["index_adapter"]
+        index_path = root / ".localforge" / "index.jsonl"
 
         # 1回目のインデックス構築
         list(analysis_svc.build_index(root=root, model="llama3.2"))
-        first_call_count = mock_llm.generate_sync.call_count
+        first_indexed_at = {
+            c.path: c.indexed_at for c in index_adapter.load_chunks(index_path)
+        }
 
         # 2回目のインデックス構築（ファイル変更なし）
         list(analysis_svc.build_index(root=root, model="llama3.2"))
-        second_call_count = mock_llm.generate_sync.call_count
+        second_indexed_at = {
+            c.path: c.indexed_at for c in index_adapter.load_chunks(index_path)
+        }
 
-        # 2回目は新規サマリー生成（LLMコール）がほぼないはず
-        # ProjectIndex生成のための1コール程度のみ
-        new_calls = second_call_count - first_call_count
-        assert new_calls <= 2  # ProjectIndex更新のための最大2コール
+        # 変更なしファイルはキャッシュチャンクが再利用され、indexed_at が変わらないはず
+        assert first_indexed_at == second_indexed_at
 
     def test_keyword_ranking(self, explain_env):
         """キーワードランキングでファイルが適切に選択されることをテスト。"""
@@ -128,7 +131,7 @@ class TestExplainPipelineE2E:
             ),
         ]
 
-        top = analysis_svc.get_top_chunks_by_keywords(chunks, "login auth user", top_n=2)
+        top = analysis_svc._get_top_chunks_by_keywords(chunks, "login auth user", top_n=2)
         assert len(top) == 2
         paths = {c.path for c in top}
         assert "auth/login.py" in paths
@@ -143,7 +146,7 @@ class TestExplainPipelineE2E:
         # インデックスを先に構築
         list(analysis_svc.build_index(root=root, model="llama3.2"))
 
-        def mock_stream(model, prompt, system=None):
+        def mock_stream(model, prompt, system=None, **kwargs):
             yield "モックレポートテキスト。"
 
         mock_llm.stream_completion.side_effect = mock_stream
@@ -171,7 +174,7 @@ class TestExplainPipelineE2E:
         # インデックスを先に構築
         list(analysis_svc.build_index(root=root, model="llama3.2"))
 
-        def mock_qa_stream(model, prompt, system=None):
+        def mock_qa_stream(model, prompt, system=None, **kwargs):
             yield "このプロジェクトはFlaskベースのWebアプリです。"
 
         mock_llm.stream_completion.side_effect = mock_qa_stream
@@ -203,7 +206,7 @@ class TestExplainPipelineE2E:
             Message(role="assistant", content="前の回答"),
         ]
 
-        def mock_qa_stream(model, prompt, system=None):
+        def mock_qa_stream(model, prompt, system=None, **kwargs):
             # 会話履歴がプロンプトに含まれることを確認
             assert "前の質問" in prompt or "前の回答" in prompt
             yield "継続的な回答。"

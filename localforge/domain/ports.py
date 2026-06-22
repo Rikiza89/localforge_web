@@ -19,14 +19,27 @@ class LLMPort(Protocol):
         model: str,
         prompt: str,
         system: Optional[str] = None,
+        read_timeout: Optional[int] = None,
+        num_ctx: Optional[int] = None,
+        num_predict: Optional[int] = None,
+        keep_alive: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """
         LLMへのプロンプトを送信し、テキストチャンクをストリーミングで生成する。
 
+        バックエンド（Ollama / llama.cpp など）に依存しない共通シグネチャ。
+        オプション引数は実装ごとに解釈する（未対応なら無視してよい）。
+
         Args:
-            model: 使用するOllamaモデル名
+            model: 使用するモデル名
             prompt: ユーザープロンプト
             system: システムプロンプト（省略可能）
+            read_timeout: 読み込みタイムアウト秒数（省略時は実装デフォルト）
+            num_ctx: コンテキスト長（省略時は実装デフォルト。
+                llama.cpp ではサーバー起動時に固定されるため無視される場合がある）
+            num_predict: 最大生成トークン数（-1で無制限、省略時は実装デフォルト）
+            keep_alive: モデルをRAMに保持する時間（Ollama専用。
+                単一モデルサーバーでは無視される場合がある）
 
         Yields:
             テキストチャンク（文字列）
@@ -35,7 +48,7 @@ class LLMPort(Protocol):
 
     def list_models(self) -> List[str]:
         """
-        Ollamaで利用可能なモデルの一覧を返す。
+        利用可能なモデルの一覧を返す。
 
         Returns:
             モデル名のリスト
@@ -44,7 +57,7 @@ class LLMPort(Protocol):
 
     def is_available(self) -> bool:
         """
-        Ollamaサーバーが起動していてアクセス可能かどうかを確認する。
+        LLMバックエンドが起動していてアクセス可能かどうかを確認する。
 
         Returns:
             接続可能であればTrue
@@ -55,9 +68,10 @@ class LLMPort(Protocol):
         """
         指定モデルをVRAM/RAMから即時アンロードする。
         失敗しても例外を送出せず警告のみ出力する。
+        単一モデルバックエンドでは no-op としてよい。
 
         Args:
-            model: アンロードするOllamaモデル名
+            model: アンロードするモデル名
         """
         ...
 

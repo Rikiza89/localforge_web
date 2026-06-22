@@ -23,7 +23,10 @@ _DEFAULT_TOKEN_LIMIT = 131072
 
 def _estimate_tokens(text: str) -> int:
     """
-    テキストのトークン数を単語数から推定する。
+    テキストのトークン数を推定する。
+
+    英語はスペース区切り単語数 × 1.3、日本語などの非スペース言語は
+    文字数 ÷ 4 で推定し、両者の大きい方を返す。
 
     Args:
         text: 推定対象テキスト
@@ -31,7 +34,9 @@ def _estimate_tokens(text: str) -> int:
     Returns:
         推定トークン数
     """
-    return int(len(text.split()) * _WORDS_TO_TOKENS)
+    word_est = int(len(text.split()) * _WORDS_TO_TOKENS)
+    char_est = len(text) // 4
+    return max(word_est, char_est)
 
 
 _DOC_EXTENSIONS: Set[str] = {".md", ".rst", ".txt", ".pdf", ".adoc", ".org", ".docx", ".xlsx"}
@@ -130,7 +135,7 @@ class ContextService:
         workspace_summaries: Optional[List[tuple[str, str]]] = None,
         max_files: Optional[int] = None,
         min_files: Optional[int] = None,
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         プロジェクト生成・改善プランのプロンプトを組み立てる。
         既存プロジェクトのインデックスサマリーがある場合はRAGコンテキストとして注入する。
@@ -250,7 +255,7 @@ class ContextService:
         context_md: str,
         plan_json: str,
         dependency_contents: List[tuple[str, str]],
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         個別ファイル生成のプロンプトを組み立てる。
 
@@ -264,16 +269,19 @@ class ContextService:
         Returns:
             組み立てたプロンプト文字列
         """
-        parts = [
-            f"生成対象ファイル: {target_file}",
-            f"役割・内容の説明: {target_description}",
-        ]
+        # 静的な共有コンテキスト（計画・context.md）を先頭に置き、ファイル固有の
+        # 部分を後ろに置く。複数ファイルの連続生成でプロンプトのプレフィックスが
+        # 一致し、Ollama の KV プロンプトキャッシュが prefill を再利用できる。
+        parts = []
+
+        if plan_json.strip():
+            parts.append(f"プロジェクト全体の計画:\n{plan_json}")
 
         if context_md.strip():
             parts.append(f"プロジェクトコンテキスト:\n{context_md}")
 
-        if plan_json.strip():
-            parts.append(f"プロジェクト全体の計画:\n{plan_json}")
+        parts.append(f"生成対象ファイル: {target_file}")
+        parts.append(f"役割・内容の説明: {target_description}")
 
         # トークン予算内で依存ファイルを注入（古いものから切り詰め）
         dep_parts: List[str] = []
@@ -324,7 +332,7 @@ class ContextService:
         context_md: str,
         chunk_idx: int = 0,
         total_chunks: int = 1,
-    ) -> str:
+    ) -> tuple[str, int]:
         """
         ファイル編集差分（SEARCH/REPLACE形式）生成のプロンプトを組み立てる。
         ファイルが大きい場合はチャンク単位で呼び出し、全チャンクの出力を合成して適用する。
@@ -340,10 +348,15 @@ class ContextService:
         Returns:
             組み立てたプロンプト文字列
         """
-        parts = [
-            f"ファイル: {target_file}",
-            f"変更要求: {modification_notes}",
-        ]
+        # 安定部分（context.md・対象ファイル・コードチャンク）を先頭に、
+        # 変動部分（変更要求 — リトライ時に書き換わる）を後ろに置く。
+        # リトライ時に同一チャンクの prefill を Ollama の KV キャッシュが再利用できる。
+        parts = []
+
+        if context_md.strip():
+            parts.append(f"プロジェクトコンテキスト:\n{context_md}")
+
+        parts.append(f"ファイル: {target_file}")
 
         if total_chunks > 1:
             parts.append(
@@ -352,10 +365,8 @@ class ContextService:
                 f" このチャンク内の変更のみを出力してください。]"
             )
 
-        if context_md.strip():
-            parts.append(f"プロジェクトコンテキスト:\n{context_md}")
-
         parts.append(f"現在のコード:\n```\n{chunk_content}\n```")
+        parts.append(f"変更要求: {modification_notes}")
 
         parts.append(
             "変更要求を実現するために必要な変更を SEARCH/REPLACE ブロックで出力してください。\n"
@@ -454,34 +465,6 @@ class ContextService:
     # Explainモード用コンテキスト
     # ------------------------------------------------------------------
 
-    def build_batch_file_summary_prompt(
-        self,
-        file_chunks: List["FileChunk"],
-        content_limit: int = 800,
-    ) -> str:
-        """
-        複数ファイルを一括でサマリー生成するプロンプトを組み立てる。
-        1回のLLM呼び出しで複数ファイルのサマリーを取得することで処理を高速化する。
-
-        Args:
-            file_chunks: FileChunkのリスト
-            content_limit: バッチプロンプト内で使う1ファイルあたりの最大文字数
-
-        Returns:
-            組み立てたプロンプト文字列
-        """
-        sections = []
-        for chunk in file_chunks:
-            excerpt = chunk.content[:content_limit]
-            sections.append(f"FILE: {chunk.path}\n{excerpt}")
-
-        prompt = (
-            "各ファイルの役割を1文で要約してください。\n"
-            "出力形式: FILE: <パス>\\nSUMMARY: <要約>\n\n"
-            + "\n\n".join(sections)
-        )
-        return self._guard_budget(prompt, "batch_file_summary")
-
     def build_file_summary_prompt(
         self,
         file_path: str,
@@ -509,12 +492,6 @@ class ContextService:
             "4. 特筆すべきアルゴリズム、データ構造、または状態管理のロジック\n"
             "これらをマークダウン形式の箇条書きで、詳細かつ具体的に記述してください。"
         )
-        # prompt = (
-        #     f"ファイル: {file_path} (拡張子: {extension})\n\n"
-        #     f"{content}\n\n"
-        #     "このファイルの役割、主要なクラス・関数・エクスポート、依存関係を3〜5文の日本語で要約してください。"
-        #     " 要約のみを出力してください。"
-        # )
         return self._guard_budget(prompt, f"file_summary:{file_path}")
 
     # セクション別の具体的な分析指示 — 各セクションで何を書くべきかをLLMに明示する
@@ -1010,62 +987,3 @@ class ContextService:
             )
         return self._guard_budget(prompt, "qa"), estimated
 
-    # ------------------------------------------------------------------
-    # Resumeモード用コンテキスト
-    # ------------------------------------------------------------------
-
-    def build_resume_continue_prompt(
-        self,
-        target_file: str,
-        target_description: str,
-        context_md: str,
-        plan_json: str,
-        completed_contents: List[tuple[str, str]],
-    ) -> str:
-        """
-        再開時のファイル生成プロンプトを組み立てる。
-
-        Args:
-            target_file: 生成対象ファイル
-            target_description: ファイルの説明
-            context_md: context.mdの内容
-            plan_json: プランのJSON文字列
-            completed_contents: 完了済みファイルの内容リスト
-
-        Returns:
-            組み立てたプロンプト文字列
-        """
-        return self.build_file_generation_prompt(
-            target_file=target_file,
-            target_description=target_description,
-            context_md=context_md,
-            plan_json=plan_json,
-            dependency_contents=completed_contents,
-        )
-
-    def build_foreign_resume_qa_prompt(
-        self,
-        question: str,
-        project_index_json: str,
-        top_summaries: List[tuple[str, str]],
-        conversation_history: List[Message],
-    ) -> str:
-        """
-        外部プロジェクト再開時のQ&AプロンプトをQ&Aプロンプトに委譲して組み立てる。
-
-        Args:
-            question: ユーザーの質問
-            project_index_json: ProjectIndexのJSON文字列
-            top_summaries: 上位5件のファイルサマリー
-            conversation_history: 会話履歴
-
-        Returns:
-            組み立てたプロンプト文字列
-        """
-        return self.build_qa_prompt(
-            question=question,
-            project_index_json=project_index_json,
-            top_summaries=top_summaries,
-            full_contents=[],
-            conversation_history=conversation_history,
-        )

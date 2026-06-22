@@ -69,6 +69,13 @@
         <button class="btn-link" id="pin-clear-btn">クリア</button>
       </div>
 
+      <!-- プロジェクト検索（セマンティック / BM25） -->
+      <div class="project-search-bar">
+        <input type="text" id="project-search-input"
+               placeholder="🔍 プロジェクト内を検索..." autocomplete="off" />
+      </div>
+      <div class="project-search-results" id="project-search-results" style="display:none;"></div>
+
       <div class="file-tree-container" id="file-tree">
         <div class="empty-state">フォルダを開いてください</div>
       </div>
@@ -254,7 +261,6 @@
     </ul>
   </div>
 
-  <script src="{{ url_for('static', filename='js/workspace.js') }}"></script>
   <script src="{{ url_for('static', filename='js/purify.min.js') }}"></script>
   <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
   <script>
@@ -265,6 +271,7 @@
   <script src="{{ url_for('static', filename='js/stream.js') }}"></script>
   <script src="{{ url_for('static', filename='js/filetree.js') }}"></script>
   <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/workspace.js') }}"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

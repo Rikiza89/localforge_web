@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re as _re_mod
+import re as _re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -17,9 +17,9 @@ from typing import Dict, Generator, List, Optional
 from localforge.application.analysis_service import AnalysisService
 from localforge.application.context_service import ContextService
 from localforge.application.generation_service import is_cancelled, reset_cancel
-from localforge.domain.models import FileChunk, GenerationLogEntry, Message, ProjectIndex
+from localforge.domain.models import LOCALFORGE_DIR as _LOCALFORGE_DIR, FileChunk, GenerationLogEntry, Message, ProjectIndex
 from localforge.infrastructure.disk_cache import DiskCache
-from localforge.infrastructure.ollama_client import OllamaClient
+from localforge.infrastructure.ollama_client import OllamaClient, pick_num_ctx
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +39,6 @@ REPORT_SECTIONS = [
     "How to Extend This Project",
 ]
 
-_LOCALFORGE_DIR = ".localforge"
-
-import re as _re
 _HEADING_RE = _re.compile(r"^#{1,3}\s+", _re.MULTILINE)
 
 
@@ -97,7 +94,6 @@ class ExplanationService:
         # Avoids re-reading unchanged files across Q&A calls.
         # Bounded at 300 entries (LRU-ish: dict insertion order).
         self._file_content_cache: dict[tuple, str] = {}
-        _FILE_CACHE_MAX = 300
 
         # ── Cache 4: Q&A response ──
         # Stores full answer strings keyed by a hash of (root, question,
@@ -142,6 +138,8 @@ class ExplanationService:
             return None
         cached = self._file_content_cache.get(key)
         if cached is not None:
+            # 真の LRU: アクセスされたエントリを末尾に移動して退避されにくくする
+            self._file_content_cache[key] = self._file_content_cache.pop(key)
             return cached
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
@@ -184,12 +182,9 @@ class ExplanationService:
 
     def invalidate_response_cache(self, root: Path) -> None:
         """Clear response cache for a project (call after build_index)."""
-        dc = self._response_cache.pop(str(root), None)
-        if dc:
-            dc.clear()
-        else:
-            # Clear disk cache even if not in memory
-            DiskCache(root / _LOCALFORGE_DIR / "cache" / "responses").clear()
+        dc = self._get_response_disk_cache(root)
+        dc.clear()
+        self._response_cache.pop(str(root), None)
 
     def _log_async(self, log_path: Path, log_entry: "GenerationLogEntry") -> None:
         """Append a log entry in a background thread — does not block streaming."""
@@ -244,9 +239,15 @@ class ExplanationService:
         total_sections = len(REPORT_SECTIONS)
         completed_sections: List[tuple[str, str]] = []
 
+        # 既存レポートのセクションを常に読み込み、選択的再生成（特定セクションのみ）
+        # でも他セクションが失われないようマージして保存する
+        existing = self._load_existing_sections(root)
+        merged: dict[str, str] = {
+            name: existing[name] for name in REPORT_SECTIONS if name in existing
+        }
+
         # resume_from: 既存レポートから既存セクション内容を取得して再利用する
         if resume_from > 0:
-            existing = self._load_existing_sections(root)
             for i, name in enumerate(REPORT_SECTIONS):
                 if i < resume_from:
                     existing_content = existing.get(name, "")
@@ -279,9 +280,21 @@ class ExplanationService:
         if sections_needing_gen:
             with ThreadPoolExecutor(max_workers=min(len(sections_needing_gen), 4)) as ex:
                 fetched_chunks = list(ex.map(_fetch_section_chunks, sections_needing_gen))
-            chunk_map = {name: fetched_chunks[j] for j, (_, name) in enumerate(sections_needing_gen)}
         else:
-            chunk_map = {}
+            fetched_chunks = []
+
+        # 全セクションの関連サマリーを重複排除して 1 つの共有リストに統合する。
+        # 全セクションのプロンプトが「メタデータ + サマリー」までの同一プレフィックスを
+        # 共有するため、Ollama の KV プロンプトキャッシュがセクション 2 以降の
+        # prefill をほぼスキップできる（セクションごとに異なるサマリーを渡すと
+        # 毎回フル prefill になる）。
+        _union: dict[str, str] = {}
+        for sec_chunks in fetched_chunks:
+            for c in sec_chunks:
+                if c.summary and c.path not in _union:
+                    _union[c.path] = "\n".join(c.summary.splitlines()[:3])[:400]
+        _MAX_SHARED_SUMMARIES = 30
+        shared_summaries = sorted(_union.items())[:_MAX_SHARED_SUMMARIES]
 
         for sec_idx, section_name in sections_to_run:
             if sec_idx < resume_from:
@@ -293,24 +306,19 @@ class ExplanationService:
                 "section_total": total_sections,
             }
 
-            relevant_chunks = chunk_map.get(section_name, [])
-            # サマリーを先頭3行・最大400文字に拡張してコンテキストを豊かにする
-            relevant_summaries = [
-                (c.path, "\n".join((c.summary or "").splitlines()[:3])[:400])
-                for c in relevant_chunks if c.summary
-            ]
-
             prompt, tokens = self._context.build_report_section_prompt(
                 section_name=section_name,
                 project_index_json=index_json,
-                relevant_summaries=relevant_summaries,
+                relevant_summaries=shared_summaries,
                 language=language,
             )
 
             start_time = time.time()
             section_tokens: List[str] = []
             try:
-                for token in self._llm.stream_completion(model, prompt):
+                for token in self._llm.stream_completion(
+                    model, prompt, num_ctx=pick_num_ctx(tokens), keep_alive="2h"
+                ):
                     section_tokens.append(token)
                     yield {"token": token}
             except Exception as exc:
@@ -329,12 +337,19 @@ class ExplanationService:
             log_path = root / _LOCALFORGE_DIR / "generation_log.jsonl"
             self._log_async(log_path, log_entry)
 
-            completed_sections.append((section_name, "".join(section_tokens)))
+            section_content = "".join(section_tokens)
+            completed_sections.append((section_name, section_content))
+            merged[section_name] = section_content
 
-            # セクション完了ごとに差分保存（中断しても失わない）
-            is_partial = len(completed_sections) < total_sections
+            # セクション完了ごとに差分保存（中断しても失わない）。
+            # 既存セクションとマージし、REPORT_SECTIONS の正規順で保存する —
+            # 選択的再生成でも他のセクションが失われない。
+            ordered_sections = [
+                (name, merged[name]) for name in REPORT_SECTIONS if name in merged
+            ]
+            is_partial = len(ordered_sections) < total_sections
             self._save_report(
-                root, completed_sections, project_index.project_name,
+                root, ordered_sections, project_index.project_name,
                 partial=is_partial, total=total_sections,
             )
 
@@ -448,7 +463,7 @@ class ExplanationService:
 
         result: dict = {}
         # ## Section Name\n\n ... \n\n---\n\n のパターンで分割
-        pattern = _re_mod.compile(r"^## (.+?)$", _re_mod.MULTILINE)
+        pattern = _re.compile(r"^## (.+?)$", _re.MULTILINE)
         matches = list(pattern.finditer(content))
         for i, m in enumerate(matches):
             name = m.group(1).strip()
@@ -574,7 +589,9 @@ class ExplanationService:
 
         answer_tokens: List[str] = []
         try:
-            for token in self._llm.stream_completion(model, prompt, keep_alive="2h"):
+            for token in self._llm.stream_completion(
+                model, prompt, num_ctx=pick_num_ctx(tokens), keep_alive="2h"
+            ):
                 if is_cancelled():
                     break
                 answer_tokens.append(token)
@@ -672,6 +689,16 @@ class ExplanationService:
             yield {"phase": "完了", "detail": "キャッシュから回答済み"}
             yield {"done": True}
             return
+
+        # ── Phase D 先行実行: 質問のセマンティック検索は Phase A/B と独立なので
+        # バックグラウンドで並列実行し、Phase D で結果を回収する ──
+        _is_cpu = not getattr(self._llm, "cuda_available", False)
+        _top_n = 3 if mode == "fast" else (5 if _is_cpu else 10)
+        _search_executor = ThreadPoolExecutor(max_workers=1)
+        _semantic_future = _search_executor.submit(
+            self._analysis.get_top_chunks_semantic, chunks, question, _top_n
+        )
+        _search_executor.shutdown(wait=False)
 
         # ── Phase A: ピン留めコンテキスト解決 ──
         # ピン留めファイルはユーザーが明示的に選んだもの。全内容を読み込む（文字数上限なし）。
@@ -779,15 +806,19 @@ class ExplanationService:
             yield {"status": "セマンティック検索でファイルを選択中..."}
 
         # ── Phase D: セマンティック検索で補完 ──
+        # 検索自体は Phase A の前にバックグラウンドで開始済み — ここで結果を回収する。
         # CPU専用では top_n を絞ってコンテキストサイズを抑制する（8000+ トークンを防ぐ）
         # mode == "fast" では常に top_n=3 に絞る
-        _is_cpu = not getattr(self._llm, "cuda_available", False)
-        _top_n = 3 if mode == "fast" else (5 if _is_cpu else 10)
+        try:
+            _semantic_results = _semantic_future.result()
+        except Exception as exc:
+            logger.warning("セマンティック検索エラー: %s", exc)
+            _semantic_results = []
         if pinned_base_chunks:
             # ピン留めファイルを起点に、不足分をセマンティック検索で補完
             base_chunks = list(pinned_base_chunks)
             seen_paths: set[str] = {c.path for c in base_chunks}
-            extra = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
+            extra = _semantic_results
             for c in extra:
                 if c.path not in seen_paths:
                     base_chunks.append(c)
@@ -798,14 +829,14 @@ class ExplanationService:
             base_chunks = [chunk_map[p] for p in selected_paths if p in chunk_map]
             if len(base_chunks) < _top_n:
                 seen_paths = {c.path for c in base_chunks}
-                for c in self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n):
+                for c in _semantic_results:
                     if c.path not in seen_paths:
                         base_chunks.append(c)
                         seen_paths.add(c.path)
                         if len(base_chunks) >= _top_n:
                             break
         else:
-            base_chunks = self._analysis.get_top_chunks_semantic(chunks, question, top_n=_top_n)
+            base_chunks = _semantic_results
 
         # ── Phase E: 依存関係展開 (BFS 10 hop, カスタムインポートのみ) ──
         # mode == "fast" では BFS を完全にスキップして base_chunks をそのまま使う
@@ -877,15 +908,11 @@ class ExplanationService:
         preview = preview_head + ("\n...[中略]...\n" + preview_tail if preview_tail else "")
         yield {"prompt_preview": preview, "prompt_tokens": tokens}
 
-        # CPU 用 Ollama パラメータ — 固定値にすることでモデル再ロードを防ぐ。
-        # 8192 は CPU モードの典型的な Q&A プロンプト（サマリーのみ）を収容するのに十分で、
-        # 16384 より prefill が約 2 倍速い。
-        _CPU_NUM_CTX = 8192
-        _num_ctx: Optional[int] = None
-        _num_predict: Optional[int] = None
-        if _is_cpu:
-            _num_ctx = _CPU_NUM_CTX
-            _num_predict = -1
+        # num_ctx はプロンプトサイズに応じた共通バケット（最小 8192）。
+        # 全 LLM 呼び出し（Q&A / レポート / 生成）が同じバケット体系を共有し、
+        # num_ctx 差異による Ollama のモデル再ロードを防ぐ。
+        _num_ctx: Optional[int] = pick_num_ctx(tokens)
+        _num_predict: Optional[int] = -1 if _is_cpu else None
 
         # Wait for preload to complete before sending the prompt.
         # This guarantees the model is in RAM with no Ollama queue gap.

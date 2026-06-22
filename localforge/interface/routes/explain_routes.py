@@ -5,18 +5,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import queue
-import threading
 from pathlib import Path
 from typing import List
 
-from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
+from flask import Blueprint, current_app, jsonify, request
 
-from localforge.application.analysis_service import AnalysisService
 from localforge.application.explanation_service import ExplanationService
-from localforge.application.project_service import ProjectService
 from localforge.domain.exceptions import LocalForgeError
 from localforge.domain.models import Message
 
@@ -24,86 +19,71 @@ logger = logging.getLogger(__name__)
 
 bp = Blueprint("explain", __name__, url_prefix="/api/explain")
 
-_SSE_HEADERS = {
-    "Cache-Control": "no-cache",
-    "X-Accel-Buffering": "no",
-    "Content-Type": "text/event-stream",
-}
-
-
-def _get_project_svc() -> ProjectService:
-    return current_app.config["project_service"]
-
-
-def _get_analysis_svc() -> AnalysisService:
-    return current_app.config["analysis_service"]
+from localforge.interface.routes._sse_helpers import (  # noqa: E402
+    _SSE_HEADERS, _HB, _HEARTBEAT_INTERVAL,
+    _sse_response, _error_response,
+    _get_project_svc, _get_analysis_svc,
+)
 
 
 def _get_explanation_svc() -> ExplanationService:
     return current_app.config["explanation_service"]
 
 
-_HEARTBEAT_INTERVAL = 15  # 秒
-
-_HB = {"heartbeat": True}
-_HB_LINE = f"data: {json.dumps(_HB, ensure_ascii=False)}\n\n"
-
-
-def _sse_response(generator):
+@bp.route("/sections", methods=["GET"])
+def get_report_sections():
     """
-    SSEレスポンスを生成する。
-    ハートビートはバックグラウンドスレッドからキューに投入するため、
-    LLM呼び出しでジェネレーターがブロックされていても15秒ごとに送出される。
+    Return the ordered list of report section names.
+    Used by the frontend to build the section-selector checkboxes dynamically.
     """
-    def wrapped():
-        q: queue.Queue = queue.Queue()
-        stop = threading.Event()
+    from localforge.application.explanation_service import REPORT_SECTIONS
+    return jsonify({"sections": REPORT_SECTIONS})
 
-        def _produce():
-            try:
-                for payload in generator:
-                    if stop.is_set():
-                        break
-                    q.put(payload)
-            except Exception as exc:
-                q.put({"error": str(exc)})
-            finally:
-                q.put(None)  # 終了センチネル
 
-        def _heartbeat():
-            while not stop.wait(_HEARTBEAT_INTERVAL):
-                q.put(_HB)
+@bp.route("/search", methods=["GET"])
+def search_project():
+    """
+    プロジェクト全体のセマンティック検索（ChromaDB / BM25フォールバック）。
 
-        threading.Thread(target=_produce, daemon=True).start()
-        threading.Thread(target=_heartbeat, daemon=True).start()
+    Query params:
+        q: 検索クエリ
+        top_n: 返す件数（デフォルト10、最大30）
 
-        try:
-            while True:
-                payload = q.get()
-                if payload is None:
-                    break
-                if "token" in payload:
-                    tok = payload["token"]
-                    if tok.startswith("\x01"):
-                        # 思考トークン: Ollamaパネル専用（メイン表示には送らない）
-                        thinking_text = tok[1:]
-                        yield f"data: {json.dumps({'raw_token': '<think>' + thinking_text + '</think>'}, ensure_ascii=False)}\n\n"
-                        continue  # メイン token イベントを送出しない
-                    else:
-                        yield f"data: {json.dumps({'raw_token': tok}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        finally:
-            stop.set()
+    Response JSON:
+        results: [{path, summary, language}]
+    """
+    project_svc = _get_project_svc()
+    analysis_svc = _get_analysis_svc()
+    project = project_svc.current_project
+    if not project:
+        return jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400
 
-    return Response(
-        stream_with_context(wrapped()),
-        mimetype="text/event-stream",
-        headers=_SSE_HEADERS,
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"results": []})
+
+    try:
+        top_n = max(1, min(int(request.args.get("top_n", "10")), 30))
+    except ValueError:
+        top_n = 10
+
+    project_index = analysis_svc.load_project_index(project.root)
+    if not project_index:
+        return jsonify({"error": "NoIndex", "message": "先にインデックスを構築してください"}), 404
+
+    results = analysis_svc.get_top_chunks_semantic(
+        project_index.file_chunks, query, top_n=top_n
     )
-
-
-def _error_response(exc: Exception, status: int = 500):
-    return jsonify({"error": type(exc).__name__, "message": str(exc)}), status
+    return jsonify({
+        "results": [
+            {
+                "path": c.path,
+                "summary": (c.summary or "")[:300],
+                "language": c.language or "",
+            }
+            for c in results
+        ]
+    })
 
 
 @bp.route("/index", methods=["GET"])

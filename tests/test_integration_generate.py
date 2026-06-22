@@ -74,7 +74,7 @@ class TestGeneratePipelineE2E:
             ]
         })
 
-        def mock_plan_stream(model, prompt, system=None):
+        def mock_plan_stream(model, prompt, system=None, **kwargs):
             yield plan_json
 
         mock_llm.stream_completion.side_effect = mock_plan_stream
@@ -102,7 +102,7 @@ class TestGeneratePipelineE2E:
         # 4. ファイル生成
         file_counter = [0]
 
-        def mock_file_stream(model, prompt, system=None):
+        def mock_file_stream(model, prompt, system=None, **kwargs):
             file_counter[0] += 1
             yield f"# Generated file {file_counter[0]}\nprint('hello')\n"
 
@@ -134,14 +134,14 @@ class TestGeneratePipelineE2E:
             assert len(entries) >= 1
 
     def test_single_file_regeneration(self, gen_env):
-        """単一ファイルの再生成をテスト。"""
+        """単一ファイルの再生成（既存ファイル → diffモード）をテスト。"""
         root = gen_env["root"]
         gen_svc = gen_env["gen_svc"]
         mock_llm = gen_env["mock_llm"]
 
         reset_cancel()
 
-        # 既存ファイルを作成
+        # 既存ファイルを作成（既存ファイルは SEARCH/REPLACE diff モードで編集される）
         (root / "main.py").write_text("# old content", encoding="utf-8")
 
         plan = GenerationPlan(
@@ -150,8 +150,15 @@ class TestGeneratePipelineE2E:
             files=[PlannedFile(path="main.py", description="メイン", dependencies=[])],
         )
 
-        def mock_stream(model, prompt, system=None):
-            yield "# regenerated content\nprint('new')\n"
+        def mock_stream(model, prompt, system=None, **kwargs):
+            yield (
+                "<<<<<<< SEARCH\n"
+                "# old content\n"
+                "=======\n"
+                "# regenerated content\n"
+                "print('new')\n"
+                ">>>>>>> REPLACE\n"
+            )
 
         mock_llm.stream_completion.side_effect = mock_stream
 
@@ -169,6 +176,37 @@ class TestGeneratePipelineE2E:
         assert len(done_events) == 1
         assert len(file_written_events) == 1
         assert "regenerated" in (root / "main.py").read_text(encoding="utf-8")
+
+    def test_single_file_regeneration_create_path(self, gen_env):
+        """単一ファイルの再生成（ファイル未存在 → 全体生成モード）をテスト。"""
+        root = gen_env["root"]
+        gen_svc = gen_env["gen_svc"]
+        mock_llm = gen_env["mock_llm"]
+
+        reset_cancel()
+
+        plan = GenerationPlan(
+            project_name="test",
+            description="test",
+            files=[PlannedFile(path="newfile.py", description="新規", dependencies=[])],
+        )
+
+        def mock_stream(model, prompt, system=None, **kwargs):
+            yield "# generated content\nprint('new')\n"
+
+        mock_llm.stream_completion.side_effect = mock_stream
+
+        events = list(gen_svc.stream_regenerate_file(
+            root=root,
+            plan=plan,
+            model="llama3.2",
+            context_md="",
+            file_path="newfile.py",
+        ))
+
+        done_events = [e for e in events if e.get("done")]
+        assert len(done_events) == 1
+        assert "generated" in (root / "newfile.py").read_text(encoding="utf-8")
 
     def test_cancel_generation(self, gen_env):
         """生成キャンセルをテスト。"""
@@ -191,7 +229,7 @@ class TestGeneratePipelineE2E:
 
         call_count = [0]
 
-        def mock_stream(model, prompt, system=None):
+        def mock_stream(model, prompt, system=None, **kwargs):
             call_count[0] += 1
             if call_count[0] >= 2:
                 request_cancel()

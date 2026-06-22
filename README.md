@@ -54,11 +54,9 @@ Download and install Ollama from [https://ollama.com](https://ollama.com), then 
 ollama pull llama3.2
 ```
 
-For RAG-powered Explain mode, also pull the embedding model:
-
-```bash
-ollama pull nomic-embed-text:latest
-```
+RAG-powered Explain mode needs **no** Ollama embedding model — embeddings run in-process
+via the bundled `sentence-transformers` `all-MiniLM-L6-v2` (auto-downloaded once on first
+run, then fully offline).
 
 Start the Ollama server (runs automatically on most systems):
 ```bash
@@ -68,6 +66,23 @@ ollama serve
 ### 2. Python 3.10+
 
 Ensure you have Python 3.10 or newer installed.
+
+### Alternative backend: llama.cpp (faster on CPU-only / iGPU machines)
+
+LocalForge can use **llama.cpp** instead of Ollama for generation — useful on machines
+without an NVIDIA GPU, since llama.cpp's Vulkan build can offload to an integrated GPU
+(e.g. Intel Arc) that Ollama cannot use on Windows. Embeddings are unaffected.
+
+```bash
+# Download the prebuilt Windows Vulkan release (ggml-org/llama.cpp releases →
+# llama-*-bin-win-vulkan-x64.zip), unzip into ./llamacpp/, grab a GGUF model, then:
+export LLM_BACKEND=llamacpp
+export LLAMACPP_AUTO_START=1
+export LLAMACPP_MODEL_PATH=/path/to/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+export LLAMACPP_N_GPU_LAYERS=999   # offload to the iGPU via Vulkan; 0 = pure CPU
+```
+
+See the **LLM Backends** section in `CLAUDE.md` for the full list of environment variables.
 
 ---
 

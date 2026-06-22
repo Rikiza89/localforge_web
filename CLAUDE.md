@@ -1,4 +1,8 @@
-# LocalForge Web — AI Assistant Orientation
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+> The project root is `localforge_web/` (this file's directory), one level below the workspace folder `LocalForge_web_best/`. All commands below assume `cd localforge_web` first.
 
 ## What This Project Is
 
@@ -22,27 +26,33 @@ localforge/
 │   ├── analysis_service.py    # Incremental indexing, hybrid file reading, LLM batching, parallel RAG embedding, semantic search cache
 │   ├── context_service.py     # All LLM prompt assembly, token budget management, O(n) history trimming
 │   ├── explanation_service.py # Report generation (11 sections), Q&A orchestration, response/file/index_json caches
-│   ├── generation_service.py  # Plan generation, file generation, git commits
-│   ├── project_service.py     # Project management, mode detection, state
-│   └── resume_service.py      # Resume mode coordination
+│   ├── generation_service.py  # Plan generation, file generation, git commits, resume coordination
+│   └── project_service.py     # Project management, mode detection (generate/resume/explain), state
+│   (Note: resume mode has no dedicated service — it is coordinated by generation_service + project_service)
 │
 ├── infrastructure/      # Adapters — all I/O lives here
-│   ├── ollama_client.py       # HTTP wrapper for Ollama /api/generate (streaming) and /api/embeddings
+│   ├── ollama_client.py       # HTTP wrapper for Ollama /api/generate (streaming), /api/tags, /api/ps
 │   │                          # Includes preload_model_async() and unload_model()
 │   ├── disk_cache.py          # Dual-layer cache: in-memory LRU dict + JSON files on disk
 │   ├── filesystem_adapter.py  # Path operations, file tree building
 │   ├── git_adapter.py         # Git operations via GitPython
 │   ├── index_adapter.py       # JSONL/JSON persistence for file indexes
-│   ├── vector_adapter.py      # ChromaDB + Ollama embeddings for RAG semantic search
-│   └── bm25_adapter.py        # BM25 keyword search fallback (used when ChromaDB unavailable)
+│   ├── vector_adapter.py      # ChromaDB + in-process sentence-transformers (all-MiniLM-L6-v2) embeddings for RAG
+│   ├── bm25_adapter.py        # BM25 keyword search fallback (used when ChromaDB unavailable)
+│   ├── symbol_extractor.py    # tree-sitter AST symbol extraction (Python/JS/TS); regex fallback for SQL/others
+│   ├── code_validator.py      # Post-generation syntax check + auto-rollback (AST for .py, brace-balance for JS/TS)
+│   ├── dependency_resolver.py # Resolves import statements → project-relative file paths (cross-file deps)
+│   └── document_extractor.py  # Plain-text extraction from PDF/DOCX/XLSX/PPTX (optional deps, empty string on failure)
 │
 └── interface/           # Flask routes, templates, static assets
     ├── server.py              # App factory, dependency injection
     ├── routes/
+    │   ├── _sse_helpers.py      # _sse_response() lives HERE — heartbeated SSE wrapper, raw_token/heartbeat events
     │   ├── project_routes.py    # /api/project/*
     │   ├── generation_routes.py # /api/generate/*
     │   ├── explain_routes.py    # /api/explain/*
-    │   └── git_routes.py        # /api/git/*
+    │   ├── git_routes.py        # /api/git/*
+    │   └── workspace_routes.py  # /api/workspace/* — multi-project workspace management
     ├── templates/
     │   ├── base.html            # Layout + Ollama live panel + global stop button
     │   └── partials/            # plan_viewer, resume_panel, report_viewer
@@ -59,7 +69,7 @@ localforge/
 
 ### Adding a New API Endpoint
 1. Add route function to the appropriate `interface/routes/*.py` blueprint
-2. Use `_sse_response(generator)` for streaming endpoints — it automatically adds `raw_token` and `heartbeat` events
+2. Use `_sse_response(generator)` (defined in `interface/routes/_sse_helpers.py`) for streaming endpoints — it automatically adds `raw_token` and `heartbeat` events
 3. Register nothing in `server.py` — blueprints are already registered
 
 ### Adding a New LLM Operation
@@ -127,13 +137,13 @@ The global `⏹ 停止` button in the header calls `_activeCancel()` (closes Eve
 | `error` | `{"error": "message"}` | Error occurred |
 
 ### RAG / Vector Search
-- **Backend**: ChromaDB (embedded, no server) + `nomic-embed-text:latest` via Ollama `/api/embeddings`
+- **Backend**: ChromaDB (embedded, no server) + **in-process `sentence-transformers` (`all-MiniLM-L6-v2`, 384-dim)** for embeddings — embeddings run inside the Python process, **not** via Ollama. Loaded from `models/all-MiniLM-L6-v2/` or `LOCALFORGE_ST_MODEL_PATH` (see `vector_adapter.py`).
 - **Persistence**: `.localforge/chroma/` alongside `index.jsonl`
 - **Primary path**: `build_index()` embeds all chunks inline — no separate migration step needed for new projects
 - **Parallel embedding**: After JSONL indexing completes, all new chunks are embedded concurrently with `ThreadPoolExecutor(max_workers=4)` and progress is reported via `{"status": "ベクトルインデックス構築中: X/Y"}` events
 - **Auto-heal**: `build_index()` also checks cached JSONL chunks via `needs_reembedding()` and backfills any missing from ChromaDB — the "RAG移行" button is only needed for projects indexed with a pre-RAG version of the app
 - **Incremental**: `VectorAdapter.needs_reembedding(chunk)` checks mtime+size before re-embedding; unchanged files are skipped
-- **Fallback**: If ChromaDB is unavailable, `get_top_chunks_semantic()` falls back to BM25 keyword search automatically
+- **Fallback**: If ChromaDB or the sentence-transformers model is unavailable, `get_top_chunks_semantic()` falls back to BM25 keyword search automatically
 - **Search entry point**: `AnalysisService.get_top_chunks_semantic(chunks, query, top_n)` — use this everywhere. It checks in-memory cache → disk cache → actual search before calling the vector DB or BM25.
 - **Search cache**: Results are cached in `AnalysisService._semantic_cache` (in-memory) and `.localforge/cache/semantic/` (disk). Both are cleared on every `build_index()` call via `invalidate_index_cache()`.
 
@@ -185,16 +195,88 @@ History trimming in `build_qa_prompt()` uses **O(n) per-message pre-computation*
 - `.localforge/cache/responses/` — Q&A response cache (DiskCache, one file per entry)
 - `.localforge/cache/semantic/` — semantic search result cache (DiskCache)
 
+## LLM Backends (Ollama / llama.cpp)
+
+The generation backend is **pluggable**. Both backends implement the same `LLMPort`
+(`domain/ports.py`), so the application/service layer never changes. The factory
+`_build_llm_backend()` in `interface/server.py` selects the adapter from `LLM_BACKEND`.
+
+| `LLM_BACKEND` | Adapter | Endpoint |
+|---|---|---|
+| `ollama` (default) | `OllamaClient` (`infrastructure/ollama_client.py`) | Ollama `/api/generate` |
+| `llamacpp` | `LlamaCppClient` (`infrastructure/llamacpp_client.py`) | llama-server native `/completion` (with `cache_prompt` KV reuse) |
+
+**Embeddings are backend-independent** — always in-process `sentence-transformers`
+(`all-MiniLM-L6-v2`). Switching backend affects generation/Q&A/report only.
+
+### Why llama.cpp on a CUDA-less machine
+Ollama on Windows cannot offload to an Intel/AMD integrated GPU. The llama.cpp **Vulkan**
+build can (`--n-gpu-layers`), so on a CPU-only laptop with an iGPU (e.g. Intel Arc) it is
+often meaningfully faster. `LlamaCppClient` uses the native `/completion` endpoint (not
+the OpenAI `/v1/chat/completions`) because LocalForge builds full raw prompts itself and
+does not use chat templates — `/completion` takes the prompt verbatim and supports
+`cache_prompt: true` (KV prefix reuse), which accelerates the 11-section report and Q&A.
+
+**Key difference vs Ollama**: llama-server fixes `n_ctx` at startup (`--ctx-size`), so
+per-request `num_ctx` is ignored by `LlamaCppClient`. Start the server with a generous
+context (16384–32768) and rely on `cache_prompt`.
+
+### llama-server lifecycle
+`LlamaServerManager` (`infrastructure/llamacpp_server.py`) optionally launches and
+health-checks `llama-server`. With `LLAMACPP_AUTO_START=1` it spawns the process (Vulkan
+offload via `--n-gpu-layers`); otherwise LocalForge attaches to an already-running server
+at `LLAMACPP_SERVER_URL`. It is stopped on exit by `main.py` `_stop_llamacpp_server()`
+(only a process LocalForge itself started is terminated).
+
+### Backend / CPU environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `LLM_BACKEND` | `ollama` | `ollama` or `llamacpp` |
+| `LLAMACPP_SERVER_URL` | `http://127.0.0.1:8081` | llama-server URL to connect to |
+| `LLAMACPP_AUTO_START` | unset | `1` → LocalForge launches llama-server itself |
+| `LLAMACPP_BINARY` | `./llamacpp/llama-server[.exe]` | path to the llama-server executable |
+| `LLAMACPP_MODEL_PATH` | — | GGUF model to load (required for auto-start) |
+| `LLAMACPP_CTX` | `16384` | `--ctx-size` |
+| `LLAMACPP_N_GPU_LAYERS` | `0` | `--n-gpu-layers` (Vulkan iGPU offload; `0` = pure CPU) |
+| `LLAMACPP_THREADS` | physical cores | `--threads` |
+| `LLAMACPP_EXTRA_ARGS` | — | extra llama-server args (space-separated) |
+| `LOCALFORGE_NUM_THREAD` | physical cores (CPU-only) | Ollama `num_thread`. On CPU-only machines, the default is the **physical** core count (not logical) to avoid SMT/E-core oversubscription (`recommended_num_thread()`). |
+| `LOCALFORGE_MAX_OUTPUT_TOKENS` | `0` (unlimited) | Caps `num_predict` for **generation** to bound runaway CPU loops. Also settable per-project via `ProjectConfig.max_output_tokens`. |
+| `LOCALFORGE_KILL_OLLAMA_ON_EXIT` | `0` | `1` → also hard-kill the Ollama process on exit. By default LocalForge only **unloads the model** (it does not start Ollama, so it should not kill it). |
+
+### Recommended local models for CPU-only boxes
+Model choice dominates CPU wall-clock. A good speed/quality balance on a ~12-core / 32 GB
+machine is a 7B coder model at Q4 (e.g. `qwen2.5-coder:7b` in Ollama, or
+`qwen2.5-coder-7b-instruct-q4_k_m.gguf` for llama.cpp); use a 3B for max speed. 32 GB RAM
+can hold up to ~14B Q4, but 7B is the sweet spot for interactive use without a GPU.
+
+### Quick start: llama.cpp + Vulkan (iGPU)
+```bash
+# 1. Download the prebuilt Windows Vulkan release of llama.cpp (ggml-org/llama.cpp
+#    releases → llama-*-bin-win-vulkan-x64.zip) and unzip into ./llamacpp/
+# 2. Place a GGUF model somewhere, then:
+export LLM_BACKEND=llamacpp
+export LLAMACPP_AUTO_START=1
+export LLAMACPP_MODEL_PATH=/path/to/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+export LLAMACPP_N_GPU_LAYERS=999   # offload all layers it can to the Intel Arc iGPU
+python main.py
+# (or run llama-server yourself and just set LLM_BACKEND + LLAMACPP_SERVER_URL)
+```
+
 ## Ollama Lifecycle
 
-`main.py` ensures Ollama is terminated when the app exits, freeing VRAM/RAM:
+`main.py` releases LLM resources when the app exits, freeing VRAM/RAM. `_cleanup()` runs
+on normal close, `atexit`, and SIGTERM/SIGINT (SIGKILL cannot be caught). It performs, in
+order: `_unload_hf_model()` → `_unload_ollama_model()` → `_stop_llamacpp_server()` →
+`_kill_ollama()`.
 
-- **Normal close**: `_kill_ollama()` is called immediately after `webview.start()` returns
-- **Python exit**: `atexit.register(_kill_ollama)` covers interpreter shutdown
-- **SIGTERM / SIGINT**: signal handlers call `_kill_ollama()` then `os._exit(0)`
-- **SIGKILL**: cannot be caught — unavoidable OS limitation
-
-`_kill_ollama()` uses `pkill -x ollama` on Linux/Mac and `taskkill /F /IM ollama.exe` on Windows.
+**Default behavior changed**: LocalForge does **not** start Ollama, so it no longer
+hard-kills it by default. `_unload_ollama_model()` sends the currently-selected model a
+`keep_alive=0` (the actual memory-freeing goal) without terminating a process the user may
+be using elsewhere. `_kill_ollama()` (`pkill -x ollama` / `taskkill /F /IM ollama.exe`) is
+now **opt-in** via `LOCALFORGE_KILL_OLLAMA_ON_EXIT=1`. The llama.cpp backend stops only the
+`llama-server` process LocalForge itself launched (`LlamaServerManager.stop()`).
 
 ### Model Switching and VRAM Management
 
@@ -210,20 +292,23 @@ When the user selects a different model via the UI selector, `POST /api/project/
 ## Running the App
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt   # or: poetry install
 python main.py
 # Opens native window on http://127.0.0.1:7331
 ```
 
-Requires Ollama running locally with at least one model pulled. For RAG:
-```bash
-ollama pull nomic-embed-text:latest
-```
+On Windows, `start_main.bat` activates the bundled `venv/` and runs `main.py`. Dependencies are declared in two places: `requirements.txt` (full pip set, incl. tree-sitter / sentence-transformers / document-parsing libs) and `pyproject.toml` (Poetry; a leaner core set). Keep both in sync when adding a dependency. Docker/headless LAN mode is documented in `README.md`.
+
+Requires Ollama running locally with at least one model pulled (for generation/Q&A).
+RAG embeddings need **no** Ollama model — they use the bundled `sentence-transformers`
+`all-MiniLM-L6-v2` (auto-detected from `models/all-MiniLM-L6-v2/`, or set
+`LOCALFORGE_ST_MODEL_PATH`). On first run, if the model is absent locally it is
+downloaded once from HuggingFace Hub, then cached for fully-offline use.
 
 ## Common Debugging
 
 - **Stream timeouts**: All SSE routes emit heartbeats every 15s via a background thread independent of the LLM generator. Client idle timer fires after 300s (5 min) — in practice it should never trigger.
-- **Embedding phase slow**: Embedding runs 4 workers in parallel after JSONL indexing. Status bar shows `ベクトルインデックス構築中: X/Y`. If `nomic-embed-text` is not pulled, embedding silently falls back to BM25 keyword search.
+- **Embedding phase slow**: Embedding runs 4 workers in parallel after JSONL indexing. Status bar shows `ベクトルインデックス構築中: X/Y`. Embeddings use in-process `sentence-transformers` (`all-MiniLM-L6-v2`); if that model or ChromaDB is unavailable, search silently falls back to BM25 keyword search.
 - **ChromaDB errors**: Check `.localforge/chroma/` exists and is writeable; delete it to force full re-embedding on next `build_index()` call (auto-heal will repopulate it).
 - **Semantic cache stale**: Delete `.localforge/cache/semantic/` and restart; it is rebuilt automatically on the next Q&A.
 - **Response cache stale**: Delete `.localforge/cache/responses/` or trigger a `build_index()` run (which updates `project_index.json` mtime, making all old cache keys miss automatically).
@@ -235,8 +320,13 @@ ollama pull nomic-embed-text:latest
 ## Testing
 
 ```bash
-pytest tests/
+python -m pytest tests/ -v          # full suite
+python -m pytest tests/test_flask_routes.py -v          # one file
+python -m pytest tests/test_application_services.py::test_name -v   # one test
+python -m pytest tests/ -k explain  # tests matching a keyword
 ```
+
+Test files are organized by layer: `test_domain_models.py`, `test_application_services.py`, `test_infrastructure.py`, `test_flask_routes.py`, plus integration suites `test_integration_{generate,resume,explain}.py`. Shared fixtures live in `tests/conftest.py`.
 
 Tests use mock adapters — no real Ollama or filesystem required. `VectorAdapter` is not injected in test fixtures (`vector=None`), so embedding is skipped and `get_top_chunks_semantic()` falls back to BM25 keyword search.
 
@@ -249,7 +339,7 @@ LocalForge is designed as a **fully local, offline-first** tool. No data leaves 
 | Component | Network target | Notes |
 |---|---|---|
 | LLM inference | `http://localhost:11434` (Ollama) | All prompts, file contents, and responses stay on-machine |
-| Vector embeddings | `http://localhost:11434` (Ollama) | `nomic-embed-text` via local Ollama |
+| Vector embeddings | None (in-process) | `sentence-transformers` `all-MiniLM-L6-v2` runs inside the Python process — no network call after the one-time first-run model download |
 | ChromaDB | Embedded, no network | Telemetry explicitly disabled: `Settings(anonymized_telemetry=False)` |
 | Flask server | `127.0.0.1:7331` by default | Binds to loopback only; not reachable from the network |
 | All JS assets | Served from `static/` | No external CDN dependencies anywhere |

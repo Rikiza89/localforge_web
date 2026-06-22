@@ -7,59 +7,33 @@ from __future__ import annotations
 
 import json
 import logging
-import queue
 import threading
 from pathlib import Path
 
-from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
+from flask import Blueprint, current_app, jsonify, request
 
-from localforge.application.analysis_service import AnalysisService
 from localforge.application.generation_service import (
     GenerationService,
     request_cancel,
     reset_cancel,
 )
-from localforge.application.project_service import ProjectService
 from localforge.domain.exceptions import LocalForgeError, PlanParseError
 from localforge.domain.models import GenerationPlan, PlannedFile
-from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("generation", __name__, url_prefix="/api/generate")
 
-# SSEヘッダー
-_SSE_HEADERS = {
-    "Cache-Control": "no-cache",
-    "X-Accel-Buffering": "no",
-    "Content-Type": "text/event-stream",
-}
-
-
-def _get_generation_svc() -> GenerationService:
-    return current_app.config["generation_service"]
-
-
-def _get_project_svc() -> ProjectService:
-    return current_app.config["project_service"]
-
-
-def _get_git() -> GitAdapter:
-    return current_app.config["git"]
-
-
-def _get_analysis_svc() -> AnalysisService:
-    return current_app.config["analysis_service"]
+from localforge.interface.routes._sse_helpers import (  # noqa: E402
+    _SSE_HEADERS, _HB, _HEARTBEAT_INTERVAL,
+    _sse_response, _error_response,
+    _get_project_svc, _get_generation_svc, _get_analysis_svc, _get_git,
+)
 
 
 def _get_index_adapter() -> IndexAdapter:
     return current_app.config["index_adapter"]
-
-
-_HEARTBEAT_INTERVAL = 15  # 秒
-
-_HB = {"heartbeat": True}
 
 
 def _after_done(gen, callback):
@@ -74,63 +48,6 @@ def _after_done(gen, callback):
             callback()
         except Exception as exc:
             logger.warning("post-generation callback error: %s", exc)
-
-
-def _sse_response(generator):
-    """
-    SSEレスポンスを生成する。
-    ハートビートはバックグラウンドスレッドからキューに投入するため、
-    LLM呼び出しでジェネレーターがブロックされていても15秒ごとに送出される。
-    """
-    def wrapped():
-        q: queue.Queue = queue.Queue()
-        stop = threading.Event()
-
-        def _produce():
-            try:
-                for payload in generator:
-                    if stop.is_set():
-                        break
-                    q.put(payload)
-            except Exception as exc:
-                q.put({"error": str(exc)})
-            finally:
-                q.put(None)
-
-        def _heartbeat():
-            while not stop.wait(_HEARTBEAT_INTERVAL):
-                q.put(_HB)
-
-        threading.Thread(target=_produce, daemon=True).start()
-        threading.Thread(target=_heartbeat, daemon=True).start()
-
-        try:
-            while True:
-                payload = q.get()
-                if payload is None:
-                    break
-                if "token" in payload:
-                    tok = payload["token"]
-                    if tok.startswith("\x01"):
-                        # 思考トークン: Ollamaパネル専用（メイン表示には送らない）
-                        thinking_text = tok[1:]
-                        yield f"data: {json.dumps({'raw_token': '<think>' + thinking_text + '</think>'})}\n\n"
-                        continue
-                    else:
-                        yield f"data: {json.dumps({'raw_token': tok})}\n\n"
-                yield f"data: {json.dumps(payload)}\n\n"
-        finally:
-            stop.set()
-
-    return Response(
-        stream_with_context(wrapped()),
-        mimetype="text/event-stream",
-        headers=_SSE_HEADERS,
-    )
-
-
-def _error_response(exc: Exception, status: int = 500):
-    return jsonify({"error": type(exc).__name__, "message": str(exc)}), status
 
 
 @bp.route("/plan", methods=["POST"])
@@ -162,7 +79,7 @@ def stream_plan():
     root = project.root
 
     # ファイルツリーのテキスト表現を構築
-    file_tree_text = _build_tree_text(root)
+    file_tree_text = _get_analysis_svc().build_tree_text(root)
     context_md = project_svc.get_context_md(root)
     git_log_entries = _get_git().get_log(root, max_entries=5)
     git_log = "\n".join(
@@ -204,11 +121,25 @@ def stream_plan():
                     root, pinned_paths, pi.file_chunks, max_total=15
                 )
                 _max_pin = 4000
+                _root_resolved = root.resolve()
                 for pc in pin_chunks:
                     fp = root / pc.path
+                    # 防御的検証: 旧バージョンの config や改ざんされた index 由来の
+                    # ルート外パスを読み込まない
+                    try:
+                        fp.resolve().relative_to(_root_resolved)
+                    except (ValueError, OSError):
+                        logger.warning("ルート外のピン留めパスをスキップ: %s", pc.path)
+                        continue
                     if fp.exists():
                         try:
-                            pinned_contents.append((pc.path, fp.read_text(encoding="utf-8", errors="replace")[:_max_pin]))
+                            content = fp.read_text(encoding="utf-8", errors="replace")
+                            if len(content) > _max_pin:
+                                logger.warning(
+                                    "ピン留めファイルを %d 文字に切り詰め (元サイズ %d 文字): %s",
+                                    _max_pin, len(content), pc.path,
+                                )
+                            pinned_contents.append((pc.path, content[:_max_pin]))
                         except OSError:
                             pass
     except Exception as exc:
@@ -520,13 +451,20 @@ def regenerate_file():
     if not plan or not any(f.path == file_path for f in plan.files):
         plan = _synthesize_plan_for_file(root, file_path)
 
+    preview = bool(data.get("preview", False))
+
     gen = generation_svc.stream_regenerate_file(
         root=root,
         plan=plan,
         model=model,
         context_md=context_md,
         file_path=file_path,
+        preview=preview,
     )
+
+    if preview:
+        # プレビューモード: ファイル未書き込みのため context.md 更新もスキップ
+        return _sse_response(gen)
 
     def _update_ctx():
         threading.Thread(
@@ -536,6 +474,78 @@ def regenerate_file():
         ).start()
 
     return _sse_response(_after_done(gen, _update_ctx))
+
+
+def _validated_edit_request():
+    """edit/apply・edit/discard 共通の検証。(project, file_path) または (None, error_response)。"""
+    project_svc = _get_project_svc()
+    project = project_svc.current_project
+    if not project:
+        return None, (jsonify({"error": "NoProject", "message": "プロジェクトが開かれていません"}), 400)
+
+    data = request.get_json(silent=True) or {}
+    file_path = str(data.get("file_path", "")).strip()
+    if not file_path:
+        return None, (jsonify({"error": "NoFilePath", "message": "ファイルパスが指定されていません"}), 400)
+
+    # パストラバーサル防御
+    try:
+        (project.root / file_path).resolve().relative_to(project.root.resolve())
+    except (ValueError, OSError):
+        return None, (jsonify({"error": "InvalidPath", "message": "プロジェクト外のパスです"}), 403)
+
+    return (project, file_path), None
+
+
+@bp.route("/edit/apply", methods=["POST"])
+def apply_pending_edit():
+    """
+    差分プレビューで保留中の編集を承認してディスクに適用する。
+
+    Request JSON:
+        file_path (str): 対象ファイルの相対パス
+    """
+    validated, err = _validated_edit_request()
+    if err:
+        return err
+    project, file_path = validated
+
+    generation_svc = _get_generation_svc()
+    ok, message = generation_svc.apply_pending_edit(project.root, file_path)
+    if not ok:
+        return jsonify({"error": "ApplyFailed", "message": message}), 409
+
+    # context.md をバックグラウンドで更新する
+    model = project.config.model
+    if model:
+        project_svc = _get_project_svc()
+        threading.Thread(
+            target=generation_svc.update_context_md_incremental,
+            args=(project.root, model, file_path, project_svc),
+            daemon=True,
+        ).start()
+
+    logger.info("差分プレビューを適用: %s", file_path)
+    return jsonify({"ok": True})
+
+
+@bp.route("/edit/discard", methods=["POST"])
+def discard_pending_edit():
+    """
+    差分プレビューで保留中の編集を破棄する。ファイルは変更されない。
+
+    Request JSON:
+        file_path (str): 対象ファイルの相対パス
+    """
+    validated, err = _validated_edit_request()
+    if err:
+        return err
+    project, file_path = validated
+
+    generation_svc = _get_generation_svc()
+    discarded = generation_svc.discard_pending_edit(project.root, file_path)
+    logger.info("差分プレビューを破棄: %s (存在: %s)", file_path, discarded)
+    return jsonify({"ok": True, "discarded": discarded})
 
 
 def _synthesize_plan_for_file(root: Path, file_path: str) -> GenerationPlan:
@@ -595,38 +605,3 @@ def _synthesize_plan_for_file(root: Path, file_path: str) -> GenerationPlan:
     )
 
 
-def _build_tree_text(root: Path, path: Path | None = None, prefix: str = "") -> str:
-    """
-    ディレクトリツリーをテキストで表現する補助関数。
-
-    Args:
-        root: ルートディレクトリ
-        path: 現在のパス（省略時はroot）
-        prefix: インデントプレフィックス
-
-    Returns:
-        ツリーテキスト
-    """
-    skip_dirs = {".git", ".localforge", "__pycache__", "node_modules", ".venv", "venv"}
-    if path is None:
-        path = root
-
-    try:
-        entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
-    except PermissionError:
-        return ""
-
-    lines = []
-    filtered = [e for e in entries if not (e.is_dir() and e.name in skip_dirs)]
-
-    for i, entry in enumerate(filtered):
-        is_last = i == len(filtered) - 1
-        connector = "└── " if is_last else "├── "
-        lines.append(f"{prefix}{connector}{entry.name}")
-        if entry.is_dir():
-            extension = "    " if is_last else "│   "
-            subtree = _build_tree_text(root, entry, prefix + extension)
-            if subtree:
-                lines.append(subtree)
-
-    return "\n".join(lines)

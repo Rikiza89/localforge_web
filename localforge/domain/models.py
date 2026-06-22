@@ -12,6 +12,9 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# Shared directory name constant — used across all application services
+LOCALFORGE_DIR = ".localforge"
+
 
 # ---------------------------------------------------------------------------
 # 列挙型
@@ -204,6 +207,9 @@ class ProjectConfig(BaseModel):
     token_limit: int = 12000
     # Ollama が使用する CPU スレッド数（None = Ollama デフォルト）
     num_thread: Optional[int] = None
+    # 1回の生成呼び出しの最大出力トークン数（0 = 無制限 / バックエンドデフォルト）。
+    # CPU推論で生成が暴走（無限ループ）した場合の上限として機能する。
+    max_output_tokens: int = 0
     # False にするとインデックス時の RAG 埋め込みフェーズをスキップする（CPU 専用機向け）
     enable_rag: bool = True
     # コンテキストピン留めされたパス（プロジェクト相対、ファイルまたはフォルダ）

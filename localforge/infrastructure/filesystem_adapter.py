@@ -64,7 +64,11 @@ class FileSystemAdapter:
         """
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            # newline="" で改行コード変換を無効化し、content をそのまま書き込む。
+            # （デフォルトの newline=None は Windows で LF→CRLF に変換してしまい、
+            #   LF ファイルを編集するたびに全行差分が発生する）
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                fh.write(content)
             logger.debug("ファイル書き込み完了: %s", path)
         except OSError as exc:
             raise FileWriteError(f"ファイル書き込みに失敗しました: {path} — {exc}") from exc

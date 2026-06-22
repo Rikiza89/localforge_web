@@ -16,11 +16,10 @@ from localforge.application.context_service import ContextService
 from localforge.application.explanation_service import ExplanationService
 from localforge.application.generation_service import GenerationService
 from localforge.application.project_service import ProjectService
-from localforge.application.resume_service import ResumeService
 from localforge.infrastructure.filesystem_adapter import FileSystemAdapter
 from localforge.infrastructure.git_adapter import GitAdapter
 from localforge.infrastructure.index_adapter import IndexAdapter
-from localforge.infrastructure.ollama_client import OllamaClient
+from localforge.infrastructure.ollama_client import OllamaClient, recommended_num_thread
 from localforge.infrastructure.vector_adapter import VectorAdapter
 
 # ログレベル設定
@@ -90,17 +89,27 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     fs = FileSystemAdapter()
     git = GitAdapter()
     index_adapter = IndexAdapter()
-    ollama_client = OllamaClient()
-    llm = ollama_client
+    # LLM バックエンドを LLM_BACKEND 環境変数で選択する（ollama 既定 / llamacpp）。
+    # どちらも同じ LLMPort を実装するため、以降のサービス層は変更不要。
+    llm, llamacpp_manager = _build_llm_backend(logger)
     vector = VectorAdapter()
 
-    # LOCALFORGE_NUM_THREAD 環境変数が設定されている場合は CPU スレッド数を適用する
+    # CPU スレッド数の決定:
+    #   1. LOCALFORGE_NUM_THREAD 環境変数（明示指定）が最優先
+    #   2. 未指定かつ GPU 非搭載の場合は物理コア数を既定とする
+    #      （論理コア全数だと SMT / E コアの過剰割当でスループットが落ちやすい）
+    #   3. プロジェクトを開いた時点で config.json の num_thread が更にこれを上書きする
     _env_num_thread = os.environ.get("LOCALFORGE_NUM_THREAD")
     if _env_num_thread:
         try:
             llm.set_num_thread(int(_env_num_thread))
         except ValueError:
             logger.warning("LOCALFORGE_NUM_THREAD の値が不正です: %s", _env_num_thread)
+    elif not getattr(llm, "cuda_available", False):
+        _rec_threads = recommended_num_thread()
+        if _rec_threads:
+            llm.set_num_thread(_rec_threads)
+            logger.info("CPU専用環境を検出: num_thread の既定値を物理コア数 %d に設定しました", _rec_threads)
 
     # ---------------------------------------------------------------------------
     # アプリケーション層のサービスを構築
@@ -116,13 +125,15 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     generation_svc = GenerationService(
         fs=fs, git=git, index_adapter=index_adapter, llm=llm, context=context_svc
     )
-    resume_svc = ResumeService(
-        fs=fs,
-        git=git,
-        generation=generation_svc,
-        explanation=explanation_svc,
-        context=context_svc,
-    )
+
+    # LOCALFORGE_MAX_OUTPUT_TOKENS 環境変数で生成出力トークン上限を設定する（0 = 無制限）。
+    # CPU推論で生成が暴走した場合のセーフティとして機能する。
+    _env_max_out = os.environ.get("LOCALFORGE_MAX_OUTPUT_TOKENS")
+    if _env_max_out:
+        try:
+            generation_svc.set_max_output_tokens(int(_env_max_out))
+        except ValueError:
+            logger.warning("LOCALFORGE_MAX_OUTPUT_TOKENS の値が不正です: %s", _env_max_out)
 
     # ---------------------------------------------------------------------------
     # サービスをアプリケーション設定に格納
@@ -131,10 +142,11 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     app.config["generation_service"] = generation_svc
     app.config["analysis_service"] = analysis_svc
     app.config["explanation_service"] = explanation_svc
-    app.config["resume_service"] = resume_svc
     app.config["context_service"] = context_svc
     app.config["llm"] = llm
-    app.config["ollama_client"] = ollama_client
+    # "ollama_client" は後方互換のためのレガシーキー（実体は選択中の LLM クライアント）
+    app.config["ollama_client"] = llm
+    app.config["llamacpp_manager"] = llamacpp_manager
     app.config["git"] = git
     app.config["fs"] = fs
     app.config["vector"] = vector
@@ -156,6 +168,50 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
     app.register_blueprint(workspace_bp)
 
     # ---------------------------------------------------------------------------
+    # Host / Origin 検証（DNSリバインディング・CSRF対策）
+    # ---------------------------------------------------------------------------
+    # ループバック専用サーバーには認証がないため、ブラウザ経由の攻撃
+    # （悪意あるWebページからの localhost へのリクエスト、DNSリバインディング）
+    # を Host / Origin ヘッダー検証でブロックする。
+    # FLASK_HOST を明示的に変更してLAN公開した場合は検証をスキップする
+    # （main.py が起動時に警告を出す）。
+    from urllib.parse import urlsplit
+
+    from flask import abort, request
+
+    _flask_host = os.environ.get("FLASK_HOST", "127.0.0.1").lower()
+    _enforce_local = _flask_host in ("127.0.0.1", "localhost", "::1", "")
+    _allowed_hosts = {"127.0.0.1", "localhost", "::1"}
+
+    if not _enforce_local:
+        logger.warning(
+            "FLASK_HOST=%s のため Host/Origin 検証を無効化します。"
+            "信頼できるネットワークでのみ使用してください。", _flask_host
+        )
+
+    @app.before_request
+    def _validate_host_origin():
+        if not _enforce_local:
+            return None
+        try:
+            host = urlsplit("//" + (request.host or "")).hostname or ""
+        except ValueError:
+            abort(403)
+        if host.lower() not in _allowed_hosts:
+            logger.warning("不正な Host ヘッダーを拒否: %s", request.host)
+            abort(403)
+        origin = request.headers.get("Origin")
+        if origin:
+            try:
+                origin_host = urlsplit(origin).hostname or ""
+            except ValueError:
+                origin_host = ""
+            if origin_host.lower() not in _allowed_hosts:
+                logger.warning("不正な Origin ヘッダーを拒否: %s", origin)
+                abort(403)
+        return None
+
+    # ---------------------------------------------------------------------------
     # メインルート（SPAシェル）
     # ---------------------------------------------------------------------------
     from flask import render_template
@@ -166,16 +222,42 @@ def create_app(log_dir: Path = Path(".localforge")) -> Flask:
         return render_template("index.html")
 
     # ---------------------------------------------------------------------------
-    # 起動時Ollamaヘルスチェック
+    # 起動時 LLM バックエンドヘルスチェック（Ollama / llama-server 共通）
     # ---------------------------------------------------------------------------
-    if ollama_client.is_available():
+    if llm.is_available():
         try:
-            models = ollama_client.list_models()
-            logger.info("Ollama接続確認: OK — 利用可能なモデル: %s", models)
+            models = llm.list_models()
+            logger.info("LLMバックエンド接続確認: OK — 利用可能なモデル: %s", models)
         except Exception as exc:
-            logger.warning("Ollama接続: サーバーは起動中だがモデル一覧取得失敗: %s", exc)
+            logger.warning("LLMバックエンド接続: 起動中だがモデル一覧取得失敗: %s", exc)
     else:
-        logger.warning("Ollama接続失敗: http://localhost:11434 に到達できません。")
+        logger.warning("LLMバックエンドに接続できません。Ollama または llama-server が起動しているか確認してください。")
 
     logger.info("LocalForge Flaskアプリケーション初期化完了")
     return app
+
+
+def _build_llm_backend(logger: logging.Logger):
+    """
+    LLM_BACKEND 環境変数に基づいて LLM クライアント（LLMPort 実装）を構築する。
+
+    Returns:
+        (llm_client, llamacpp_manager or None)
+    """
+    backend = os.environ.get("LLM_BACKEND", "ollama").strip().lower()
+    if backend in ("llamacpp", "llama.cpp", "llama_cpp", "llama-cpp"):
+        from localforge.infrastructure.llamacpp_client import LlamaCppClient
+        from localforge.infrastructure.llamacpp_server import LlamaServerManager, _truthy
+
+        client = LlamaCppClient()
+        manager = None
+        # LLAMACPP_AUTO_START=1 のときのみ llama-server プロセスを自動起動する。
+        # 既定では外部で起動済みの llama-server へ接続する。
+        if _truthy(os.environ.get("LLAMACPP_AUTO_START")):
+            manager = LlamaServerManager.from_env()
+            manager.start()
+        logger.info("LLMバックエンド: llama.cpp (%s)", client._base_url)
+        return client, manager
+
+    logger.info("LLMバックエンド: Ollama")
+    return OllamaClient(), None

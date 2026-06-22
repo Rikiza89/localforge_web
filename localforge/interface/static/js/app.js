@@ -202,7 +202,7 @@ function switchTab(tabName) {
 function _resetProjectUI() {
   // Clear stale content from the previous project before loading a new one
   _indexBuilt = false;
-  window._reportResumFrom = 0;
+  window._reportResumeFrom = 0;
 
   const reportOutput = document.getElementById("report-output");
   if (reportOutput) reportOutput.innerHTML = "";
@@ -338,8 +338,10 @@ async function refreshContextPanel() {
   try {
     const data = await apiRequest("/api/project/context");
     const contextEl = document.getElementById("context-md-content");
-    if (contextEl) {
-      contextEl.textContent = data.content || "（空）";
+    const newContent = data.content || "（空）";
+    // 内容が変わっていない場合は DOM 更新（reflow）をスキップする
+    if (contextEl && contextEl.textContent !== newContent) {
+      contextEl.textContent = newContent;
     }
   } catch (e) {
     console.warn("コンテキスト更新エラー:", e.message);
@@ -350,10 +352,11 @@ async function refreshContextPanel() {
     const summary = await apiRequest("/api/explain/summary");
     const summaryEl = document.getElementById("index-summary");
     if (summaryEl) {
-      summaryEl.innerHTML = `
+      const newHtml = `
         <div class="index-stat"><span>ファイル数</span><span>${summary.indexed_files} / ${summary.total_files}</span></div>
         <div class="index-stat" style="margin-top:6px; color:var(--text-muted); font-size:11px;">${(summary.summary || "").slice(0, 120)}...</div>
       `;
+      if (summaryEl.innerHTML !== newHtml) summaryEl.innerHTML = newHtml;
     }
     const reportBtn = document.getElementById("generate-report-btn");
     if (reportBtn) reportBtn.disabled = false;
@@ -457,6 +460,19 @@ function _showOllamaWarning(message) {
 // =========================================================================
 
 /**
+ * UIで選択中のモデルをプロジェクト設定に同期する。
+ * ほぼすべての生成操作の先頭で呼び出す。
+ */
+async function _syncModelToProject() {
+  const modelEl = document.getElementById("model-selector");
+  const model = modelEl ? modelEl.value : null;
+  if (model) {
+    try { await apiRequest("/api/project/model", "POST", { model }); }
+    catch (e) { console.warn("モデル同期エラー:", e.message); }
+  }
+}
+
+/**
  * プラン生成を開始する。
  */
 async function generatePlan() {
@@ -487,12 +503,7 @@ async function generatePlan() {
   updateStatusBar("プランを生成中...");
 
   // UIで選択中のモデルをプロジェクト設定に同期する
-  const modelSelectEl = document.getElementById("model-selector");
-  const selectedModel = modelSelectEl ? modelSelectEl.value : null;
-  if (selectedModel) {
-    try { await apiRequest("/api/project/model", "POST", { model: selectedModel }); }
-    catch (e) { console.warn("モデル同期エラー:", e.message); }
-  }
+  await _syncModelToProject();
 
   // Read optional file-count hints
   const _maxFilesEl = document.getElementById("plan-max-files");
@@ -639,12 +650,7 @@ async function approvePlanAndGenerate() {
   updateStatusBar("ファイルを生成中...");
 
   // UIで選択中のモデルをプロジェクト設定に同期する
-  const approveModelEl = document.getElementById("model-selector");
-  const approveModel = approveModelEl ? approveModelEl.value : null;
-  if (approveModel) {
-    try { await apiRequest("/api/project/model", "POST", { model: approveModel }); }
-    catch (e) { console.warn("モデル同期エラー:", e.message); }
-  }
+  await _syncModelToProject();
 
   // 新ブランチで生成するか確認
   const branchToggle = document.getElementById("gen-branch-toggle");
@@ -682,7 +688,7 @@ async function approvePlanAndGenerate() {
       }
     },
     onFileWritten: (path) => {
-      refreshFileTree();
+      debouncedRefreshFileTree();
       // Briefly show a completion tick before the next file clears the header
       if (genFileHeader) {
         genFileHeader.innerHTML =
@@ -735,16 +741,7 @@ async function buildIndex() {
     return;
   }
 
-  // UIで選択中のモデルをプロジェクト設定に同期する
-  const modelSelectEl = document.getElementById("model-selector");
-  const selectedModel = modelSelectEl ? modelSelectEl.value : null;
-  if (selectedModel) {
-    try {
-      await apiRequest("/api/project/model", "POST", { model: selectedModel });
-    } catch (e) {
-      console.warn("モデル同期エラー:", e.message);
-    }
-  }
+  await _syncModelToProject();
 
   const progressContainer = document.getElementById("index-progress-container");
   const indexProgress = document.getElementById("index-progress");
@@ -779,6 +776,7 @@ async function buildIndex() {
       updateStatusBar("インデックス構築完了");
       _applyRagButtonState(true);
       refreshContextPanel();
+      await _loadReportSections();
       _initSectionSelector();
 
       // セクション選択パネルを表示
@@ -871,6 +869,7 @@ async function loadSavedReport() {
     if (!reportOutput) return false;
 
     reportOutput.innerHTML = _renderMd(data.content);
+    _attachSectionRegenButtons(reportOutput);
 
     if (data.partial) {
       _showPartialBanner(data.sections_done, data.sections_total);
@@ -1010,9 +1009,12 @@ function _updateSavedPlanBanner(plan, progress) {
 }
 
 /**
- * 保存済みプランの生成を続きから再開する（前回中断した箇所から）。
+ * 保存済みプランを指定エンドポイントで実行する共通ヘルパー。
+ * @param {string} endpoint - /api/generate/resume または /api/generate/start
+ * @param {string} statusText - 進行中のステータスバー表示
+ * @param {string} successText - 完了時のステータスバー表示
  */
-async function _resumeFromSavedPlan() {
+async function _runSavedPlan(endpoint, statusText, successText) {
   const genSection = document.getElementById("generation-section");
   const planSection = document.getElementById("plan-section");
   const genStream = document.getElementById("generation-stream-output");
@@ -1026,20 +1028,14 @@ async function _resumeFromSavedPlan() {
   if (genSection) genSection.style.display = "flex";
   if (genStream) genStream.textContent = "";
 
-  updateStatusBar("生成を再開中...");
+  updateStatusBar(statusText);
+  await _syncModelToProject();
 
-  const modelEl = document.getElementById("model-selector");
-  const model = modelEl ? modelEl.value : null;
-  if (model) {
-    try { await apiRequest("/api/project/model", "POST", { model }); }
-    catch (e) { console.warn("モデル同期エラー:", e.message); }
-  }
-
-  const _es = startStream("/api/generate/resume", genStream, {
+  const _es = startStream(endpoint, genStream, {
     onProgress: (done, total, currentFile) => {
       if (genProgress) { genProgress.max = total; genProgress.value = done; }
       if (progressLabel) progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
-      updateStatusBar(`再開中: ${currentFile} (${done}/${total})`);
+      updateStatusBar(`${statusText}: ${currentFile} (${done}/${total})`);
       if (genStream) genStream.textContent = "";
       if (genFileHeader && currentFile) {
         genFileHeader.style.display = "flex";
@@ -1050,7 +1046,7 @@ async function _resumeFromSavedPlan() {
       }
     },
     onFileWritten: (path) => {
-      refreshFileTree();
+      debouncedRefreshFileTree();
       if (genFileHeader) {
         genFileHeader.innerHTML =
           `<span class="gen-file-icon gen-file-done">✓</span>` +
@@ -1059,7 +1055,7 @@ async function _resumeFromSavedPlan() {
     },
     onDone: () => {
       _unlockUI();
-      updateStatusBar("生成再開完了");
+      updateStatusBar(successText);
       showAlert("すべてのファイルを生成しました！", "success");
       if (genSection) genSection.style.display = "none";
       refreshFileTree();
@@ -1068,7 +1064,7 @@ async function _resumeFromSavedPlan() {
     },
     onError: (err) => {
       _unlockUI();
-      showAlert(`再開エラー: ${err}`, "error");
+      showAlert(`エラー: ${err}`, "error");
       updateStatusBar("エラーが発生しました");
     },
   });
@@ -1077,70 +1073,17 @@ async function _resumeFromSavedPlan() {
 }
 
 /**
+ * 保存済みプランの生成を続きから再開する（前回中断した箇所から）。
+ */
+async function _resumeFromSavedPlan() {
+  await _runSavedPlan("/api/generate/resume", "生成を再開中...", "生成再開完了");
+}
+
+/**
  * 保存済みプランの生成を最初から（全ファイル）やり直す。
  */
 async function _restartFromSavedPlan() {
-  const genSection = document.getElementById("generation-section");
-  const planSection = document.getElementById("plan-section");
-  const genStream = document.getElementById("generation-stream-output");
-  const genProgress = document.getElementById("generation-progress");
-  const progressLabel = document.getElementById("progress-label");
-  const genFileHeader = document.getElementById("gen-current-file-header");
-  const banner = document.getElementById("saved-plan-banner");
-
-  if (banner) banner.style.display = "none";
-  if (planSection) planSection.style.display = "none";
-  if (genSection) genSection.style.display = "flex";
-  if (genStream) genStream.textContent = "";
-
-  updateStatusBar("ファイルを生成中...");
-
-  const modelEl = document.getElementById("model-selector");
-  const model = modelEl ? modelEl.value : null;
-  if (model) {
-    try { await apiRequest("/api/project/model", "POST", { model }); }
-    catch (e) { console.warn("モデル同期エラー:", e.message); }
-  }
-
-  const _es = startStream("/api/generate/start", genStream, {
-    onProgress: (done, total, currentFile) => {
-      if (genProgress) { genProgress.max = total; genProgress.value = done; }
-      if (progressLabel) progressLabel.textContent = `${done} / ${total}: ${currentFile}`;
-      updateStatusBar(`生成中: ${currentFile} (${done}/${total})`);
-      if (genStream) genStream.textContent = "";
-      if (genFileHeader && currentFile) {
-        genFileHeader.style.display = "flex";
-        genFileHeader.innerHTML =
-          `<span class="gen-file-icon">▶</span>` +
-          `<span class="gen-file-name">${escapeHtml(currentFile)}</span>` +
-          `<span class="gen-file-count">${done + 1} / ${total}</span>`;
-      }
-    },
-    onFileWritten: (path) => {
-      refreshFileTree();
-      if (genFileHeader) {
-        genFileHeader.innerHTML =
-          `<span class="gen-file-icon gen-file-done">✓</span>` +
-          `<span class="gen-file-name">${escapeHtml(path)}</span>`;
-      }
-    },
-    onDone: () => {
-      _unlockUI();
-      updateStatusBar("ファイル生成完了");
-      showAlert("すべてのファイルを生成しました！", "success");
-      if (genSection) genSection.style.display = "none";
-      refreshFileTree();
-      refreshContextPanel();
-      refreshGitLog();
-    },
-    onError: (err) => {
-      _unlockUI();
-      showAlert(`生成エラー: ${err}`, "error");
-      updateStatusBar("エラーが発生しました");
-    },
-  });
-  _lockUI(() => _es.close());
-  _cancelGenStream = _es;
+  await _runSavedPlan("/api/generate/start", "ファイルを生成中...", "ファイル生成完了");
 }
 
 function _showPartialBanner(done, total) {
@@ -1149,13 +1092,13 @@ function _showPartialBanner(done, total) {
   if (banner) banner.style.display = "flex";
   if (text) text.textContent = `部分レポート: ${done}/${total} セクション完了 — 残りを生成するか最初から再生成できます。`;
   // resume_from をグローバルに記憶
-  window._reportResumFrom = done;
+  window._reportResumeFrom = done;
 }
 
 function _hideSavedReportBanner() {
   const banner = document.getElementById("report-partial-banner");
   if (banner) banner.style.display = "none";
-  window._reportResumFrom = 0;
+  window._reportResumeFrom = 0;
 }
 
 /**
@@ -1244,6 +1187,12 @@ function generateReport(opts = {}) {
       showAlert("レポートが完成しました！Q&Aで質問できます。", "success");
       _hideSavedReportBanner();
       enableChat();
+      if (opts.sectionIndices && opts.sectionIndices.length > 0) {
+        // 選択的再生成: 既存セクションとマージされた保存済みレポートを再表示する
+        loadSavedReport();
+      } else if (reportOutput) {
+        _attachSectionRegenButtons(reportOutput);
+      }
     },
     onError: (err) => {
       _unlockUI();
@@ -1254,6 +1203,49 @@ function generateReport(opts = {}) {
     },
   });
   _lockUI(() => _ctrl.close());
+}
+
+// =========================================================================
+// セクション単位の再生成ボタン
+// =========================================================================
+
+let _reportSectionNames = null;
+
+async function _getReportSectionNames() {
+  if (_reportSectionNames) return _reportSectionNames;
+  try {
+    const data = await apiRequest("/api/explain/sections");
+    _reportSectionNames = data.sections || [];
+  } catch (e) {
+    _reportSectionNames = [];
+  }
+  return _reportSectionNames;
+}
+
+/**
+ * レポート内のセクション見出しに「このセクションのみ再生成」ボタンを付与する。
+ * 保存済みレポートは h2、ライブ生成は h3[data-section] が見出しになる。
+ */
+async function _attachSectionRegenButtons(container) {
+  const names = await _getReportSectionNames();
+  if (!names.length || !container) return;
+  container.querySelectorAll("h2, h3[data-section]").forEach(h => {
+    if (h.querySelector(".section-regen-btn")) return;
+    const name = (h.dataset.section || h.textContent).trim();
+    const idx = names.indexOf(name);
+    if (idx === -1) return;
+    const btn = document.createElement("button");
+    btn.className = "section-regen-btn";
+    btn.type = "button";
+    btn.title = "このセクションのみ再生成";
+    btn.textContent = "↻";
+    btn.addEventListener("click", () => {
+      if (_uiLocked) return;
+      if (!confirm(`セクション「${name}」のみ再生成しますか？\n（他のセクションは保持されます）`)) return;
+      generateReport({ sectionIndices: [idx] });
+    });
+    h.appendChild(btn);
+  });
 }
 
 // =========================================================================
@@ -1330,14 +1322,9 @@ async function continueGeneration() {
   updateStatusBar("生成を再開中...");
 
   // UIで選択中のモデルをプロジェクト設定に同期する
-  const resumeModelEl = document.getElementById("model-selector");
-  const resumeModel = resumeModelEl ? resumeModelEl.value : null;
-  if (resumeModel) {
-    try { await apiRequest("/api/project/model", "POST", { model: resumeModel }); }
-    catch (e) { console.warn("モデル同期エラー:", e.message); }
-  }
+  await _syncModelToProject();
 
-  const _es = startStream("/api/generate/start", genStream, {
+  const _es = startStream("/api/generate/resume", genStream, {
     onProgress: (done, total, currentFile) => {
       if (genProgress) {
         genProgress.max = total;
@@ -1349,7 +1336,7 @@ async function continueGeneration() {
       updateStatusBar(`再開中: ${currentFile} (${done}/${total})`);
       if (genStream) genStream.textContent = "";
     },
-    onFileWritten: () => refreshFileTree(),
+    onFileWritten: () => debouncedRefreshFileTree(),
     onDone: () => {
       _unlockUI();
       updateStatusBar("生成再開完了");
@@ -1437,20 +1424,17 @@ async function applyCpuThread(numThread) {
 // セクション選択・レポート履歴・比較ビュー
 // =========================================================================
 
-const REPORT_SECTIONS = [
-  "Project Overview",
-  "Module Map",
-  "Entry Points & Startup Flow",
-  "Data Flow",
-  "Key Interfaces & Contracts",
-  "External Dependencies",
-  "Configuration",
-  "Test Coverage",
-  "Notable Patterns & Design Decisions",
-  "Potential Issues & Technical Debt",
-  "Project Health & Code Quality Analysis",
-  "How to Extend This Project",
-];
+// Populated dynamically from /api/explain/sections to stay in sync with the Python list
+let REPORT_SECTIONS = [];
+
+async function _loadReportSections() {
+  try {
+    const data = await apiRequest("/api/explain/sections");
+    REPORT_SECTIONS = data.sections || [];
+  } catch (e) {
+    console.warn("セクション一覧の取得に失敗しました:", e.message);
+  }
+}
 
 /** セクション選択パネルを初期化してチェックボックスを描画する。 */
 function _initSectionSelector() {
@@ -1670,6 +1654,49 @@ function _parseReportSections(content) {
 }
 
 // =========================================================================
+// 共有ヘルパー
+// =========================================================================
+
+/**
+ * 生成ログをモーダルダイアログで表示する。
+ */
+async function showGenerationLogs() {
+  try {
+    const data = await apiRequest("/api/generate/logs");
+    const logs = data.logs || [];
+    const tbody = document.getElementById("logs-tbody");
+    const summaryEl = document.getElementById("token-usage-summary");
+    const modal = document.getElementById("logs-modal");
+
+    if (modal) modal.style.display = "flex";
+    if (!tbody || !summaryEl) return;
+
+    tbody.innerHTML = logs.map(l => `
+      <tr>
+        <td>${new Date(l.timestamp).toLocaleString()}</td>
+        <td>${escapeHtml(l.model)}</td>
+        <td>${escapeHtml(l.operation)}</td>
+        <td>${l.prompt_tokens_estimated}</td>
+        <td>${l.response_time_ms ? Math.round(l.response_time_ms) : "-"}</td>
+        <td>${escapeHtml(l.status)}</td>
+      </tr>
+    `).join("");
+
+    // トークン使用量の集計
+    const usageByModel = {};
+    logs.forEach(l => {
+      usageByModel[l.model] = (usageByModel[l.model] || 0) + (l.prompt_tokens_estimated || 0);
+    });
+
+    summaryEl.innerHTML = "<strong>モデル別推定トークン使用量:</strong><br>" +
+      Object.entries(usageByModel).map(([m, t]) => `${escapeHtml(m)}: ${t} tokens`).join("<br>");
+
+  } catch (err) {
+    showAlert(`ログの取得に失敗しました: ${err.message}`, "error");
+  }
+}
+
+// =========================================================================
 // 初期化
 // =========================================================================
 
@@ -1817,7 +1844,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const resumeBtn = document.getElementById("report-resume-btn");
   if (resumeBtn) {
     resumeBtn.addEventListener("click", () => {
-      generateReport({ resumeFrom: window._reportResumFrom || 0 });
+      generateReport({ resumeFrom: window._reportResumeFrom || 0 });
     });
   }
   const regenBtn = document.getElementById("report-regen-btn");
@@ -1985,43 +2012,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   // リサイズ機能の初期化
   initResizers();
 
-  // 生成ログを表示する
-  async function showGenerationLogs() {
-    try {
-      const data = await apiRequest("/api/generate/logs");
-      const logs = data.logs || [];
-      const tbody = document.getElementById("logs-tbody");
-      const summaryEl = document.getElementById("token-usage-summary");
-      const modal = document.getElementById("logs-modal");
-
-      if (modal) modal.style.display = "flex";
-      if (!tbody || !summaryEl) return;
-
-      tbody.innerHTML = logs.map(l => `
-        <tr>
-          <td>${new Date(l.timestamp).toLocaleString()}</td>
-          <td>${escapeHtml(l.model)}</td>
-          <td>${escapeHtml(l.operation)}</td>
-          <td>${l.prompt_tokens_estimated}</td>
-          <td>${l.response_time_ms ? Math.round(l.response_time_ms) : "-"}</td>
-          <td>${escapeHtml(l.status)}</td>
-        </tr>
-      `).join("");
-
-      // トークン使用量の集計
-      const usageByModel = {};
-      logs.forEach(l => {
-        usageByModel[l.model] = (usageByModel[l.model] || 0) + (l.prompt_tokens_estimated || 0);
-      });
-
-      summaryEl.innerHTML = "<strong>モデル別推定トークン使用量:</strong><br>" +
-        Object.entries(usageByModel).map(([m, t]) => `${escapeHtml(m)}: ${t} tokens`).join("<br>");
-
-    } catch (err) {
-      showAlert(`ログの取得に失敗しました: ${err.message}`, "error");
-    }
-  }
-
   // 保存されたレイアウト状態を復元
   restoreLayout();
 
@@ -2041,6 +2031,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 async function refreshSysInfo() {
   const vramEl = document.getElementById("status-vram");
   if (!vramEl) return;
+
+  // 生成・Q&Aストリーム中はポーリングを一時停止する
+  // （API呼び出し + DOM更新がトークン描画のフレームを奪うため）
+  if (_uiLocked) return;
 
   try {
     const data = await apiRequest("/api/project/sysinfo");
